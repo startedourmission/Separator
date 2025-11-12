@@ -91,7 +91,7 @@ class PDFSeparationViewer {
 
             // Worker 메시지 핸들러를 한 번만 설정
             this.worker.onmessage = (e) => {
-                const { type, requestId, success, data, width, height, message } = e.data;
+                const { type, requestId, success, data, width, height, message, pageSize } = e.data;
 
                 if (type === 'init') {
                     const pending = this.pendingRequests.get('init');
@@ -102,6 +102,12 @@ class PDFSeparationViewer {
                             pending.reject(new Error(message || 'Worker 초기화 실패'));
                         }
                         this.pendingRequests.delete('init');
+                    }
+                } else if (type === 'pageSize') {
+                    const pending = this.pendingRequests.get(requestId);
+                    if (pending) {
+                        pending.resolve(pageSize);
+                        this.pendingRequests.delete(requestId);
                     }
                 } else if (type === 'result') {
                     const pending = this.pendingRequests.get(requestId);
@@ -148,6 +154,26 @@ class PDFSeparationViewer {
                     }
                 },
 
+                getPageSize: async (pageNum) => {
+                    if (!this.currentPDFData) {
+                        throw new Error('PDF가 로딩되지 않았습니다');
+                    }
+
+                    return new Promise((resolve, reject) => {
+                        const reqId = ++this.requestId;
+                        this.pendingRequests.set(reqId, { resolve, reject });
+
+                        this.worker.postMessage({
+                            type: 'getPageSize',
+                            requestId: reqId,
+                            data: {
+                                pdfData: this.currentPDFData,
+                                pageNum: pageNum
+                            }
+                        });
+                    });
+                },
+
                 renderPage: async (pageNum, options) => {
                     if (!this.currentPDFData) {
                         throw new Error('PDF가 로딩되지 않았습니다');
@@ -191,25 +217,30 @@ class PDFSeparationViewer {
     
     async convertPNGToImageData(pngData, width, height) {
         return new Promise((resolve, reject) => {
+            console.log('PNG 변환 시작:', pngData.length, 'bytes →', width, 'x', height);
             const blob = new Blob([pngData], { type: 'image/png' });
             const img = new Image();
-            
+
             img.onload = () => {
+                console.log('PNG 이미지 로드 완료');
                 const canvas = document.createElement('canvas');
                 canvas.width = width;
                 canvas.height = height;
                 const ctx = canvas.getContext('2d');
-                
+
                 ctx.drawImage(img, 0, 0, width, height);
                 const imageData = ctx.getImageData(0, 0, width, height);
+                console.log('ImageData 생성 완료:', imageData.width, 'x', imageData.height);
+                URL.revokeObjectURL(img.src);
                 resolve(imageData);
             };
-            
+
             img.onerror = (error) => {
                 console.error('PNG 이미지 로딩 실패:', error);
+                URL.revokeObjectURL(img.src);
                 reject(error);
             };
-            
+
             img.src = URL.createObjectURL(blob);
         });
     }
@@ -349,34 +380,43 @@ class PDFSeparationViewer {
         }
 
         try {
-            // 컨테이너 크기 확인
-            const container = this.canvas.parentElement;
-            const containerWidth = container.clientWidth - 40; // padding 고려
-            const containerHeight = container.clientHeight - 40;
+            // PDF 페이지의 실제 크기 가져오기 (포인트 단위)
+            let pageSize;
+            let pdfAspectRatio;
 
-            // A4 비율 (210mm x 297mm = 1:1.414)
-            const aspectRatio = 1.414;
-
-            // 100% 줌일 때 컨테이너 가로에 꽉 차게 표시할 기본 크기 계산
-            let baseWidth = containerWidth;
-            let baseHeight = Math.floor(baseWidth * aspectRatio);
-
-            // 세로가 넘치면 세로 기준으로 재계산
-            if (baseHeight > containerHeight) {
-                baseHeight = containerHeight;
-                baseWidth = Math.floor(baseHeight / aspectRatio);
+            try {
+                pageSize = await this.ghostscript.getPageSize(this.currentPage);
+                pdfAspectRatio = pageSize.width / pageSize.height;
+                console.log('PDF 실제 크기:', pageSize.width, 'x', pageSize.height, '(비율:', pdfAspectRatio.toFixed(2) + ')');
+            } catch (error) {
+                console.warn('PDF 크기 조회 실패, 기본 비율 사용:', error);
+                // 기본값: A4 비율
+                pdfAspectRatio = 1 / 1.414;
             }
 
-            // Ghostscript로 고해상도 렌더링 (baseWidth의 2배 해상도)
-            const renderWidth = baseWidth * 2;
-            const renderHeight = baseHeight * 2;
+            // 컨테이너 크기 확인 (padding 제거했으므로 전체 크기 사용)
+            const container = this.canvas.parentElement;
+            const containerWidth = container.clientWidth;
+            const containerHeight = container.clientHeight;
+
+            // 100% 줌일 때 컨테이너 가로에 꽉 차게 표시 (세로는 스크롤)
+            let baseWidth = containerWidth;
+            let baseHeight = Math.floor(baseWidth / pdfAspectRatio);
+
+            // Ghostscript 렌더링은 실제 표시 크기와 동일하게 (1:1)
+            // DPI를 높여서 고해상도를 얻는 방식으로 변경
+            const renderWidth = baseWidth;
+            const renderHeight = baseHeight;
 
             const renderOptions = this.buildRenderOptions();
             renderOptions.width = renderWidth;
             renderOptions.height = renderHeight;
+            renderOptions.pdfWidth = pageSize.width;
+            renderOptions.pdfHeight = pageSize.height;
 
             console.log('PDF 렌더링:', renderWidth, 'x', renderHeight);
             console.log('100% 표시 크기:', baseWidth, 'x', baseHeight);
+            console.log('PDF 비율:', pdfAspectRatio.toFixed(3), 'vs 렌더링 비율:', (renderWidth / renderHeight).toFixed(3));
 
             const imageData = await this.ghostscript.renderPage(this.currentPage, renderOptions);
 
@@ -394,28 +434,21 @@ class PDFSeparationViewer {
     }
 
     applyZoomAndSeparation() {
-        if (!this.baseImageData) return;
-
-        // 컨테이너 크기에 맞춰 캔버스 크기 고정
-        const container = this.canvas.parentElement;
-        const containerWidth = container.clientWidth - 40;
-        const containerHeight = container.clientHeight - 40;
-
-        // 캔버스 크기는 컨테이너에 맞춤 (고정)
-        this.canvas.width = containerWidth;
-        this.canvas.height = containerHeight;
-
-        console.log('캔버스 크기:', containerWidth, 'x', containerHeight);
-
-        // 배경 클리어
-        this.ctx.fillStyle = '#f0f0f0';
-        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        if (!this.baseImageData) {
+            console.error('applyZoomAndSeparation: baseImageData가 없습니다');
+            return;
+        }
 
         // 줌 적용된 이미지 표시 크기 (baseWidth는 100% 줌 기준)
         const scaledWidth = Math.floor(this.baseWidth * this.zoomLevel);
         const scaledHeight = Math.floor(this.baseHeight * this.zoomLevel);
 
-        console.log('줌', this.zoomLevel, '적용된 이미지 크기:', scaledWidth, 'x', scaledHeight);
+        // 캔버스 크기를 줌 적용된 이미지 크기로 설정 (스크롤 가능하게)
+        this.canvas.width = scaledWidth;
+        this.canvas.height = scaledHeight;
+
+        console.log('캔버스 및 이미지 크기:', scaledWidth, 'x', scaledHeight, '(줌:', this.zoomLevel + ')');
+        console.log('baseImageData:', this.baseImageData.width, 'x', this.baseImageData.height);
 
         // 이미지 스케일링하여 그리기
         const tempCanvas = document.createElement('canvas');
@@ -424,25 +457,19 @@ class PDFSeparationViewer {
         const tempCtx = tempCanvas.getContext('2d');
         tempCtx.putImageData(this.baseImageData, 0, 0);
 
-        // 좌상단 정렬
-        const offsetX = 0;
-        const offsetY = 0;
+        console.log('임시 캔버스에 이미지 데이터 그리기 완료');
 
-        // 스케일링된 크기로 그리기
+        // 스케일링된 크기로 그리기 (캔버스 전체에)
         this.ctx.imageSmoothingEnabled = true;
         this.ctx.imageSmoothingQuality = 'high';
-        this.ctx.drawImage(tempCanvas, offsetX, offsetY, scaledWidth, scaledHeight);
+        this.ctx.drawImage(tempCanvas, 0, 0, scaledWidth, scaledHeight);
 
-        // 실제 그려진 영역의 이미지 데이터 추출 (분판 필터용)
-        const visibleWidth = Math.min(scaledWidth, this.canvas.width);
-        const visibleHeight = Math.min(scaledHeight, this.canvas.height);
-        this.originalImageData = this.ctx.getImageData(offsetX, offsetY, visibleWidth, visibleHeight);
-        this.imageOffsetX = offsetX;
-        this.imageOffsetY = offsetY;
-        this.imageScaledWidth = scaledWidth;
-        this.imageScaledHeight = scaledHeight;
+        console.log('메인 캔버스에 스케일링하여 그리기 완료');
 
-        console.log('보이는 영역:', visibleWidth, 'x', visibleHeight);
+        // 전체 캔버스의 이미지 데이터 추출 (분판 필터용)
+        this.originalImageData = this.ctx.getImageData(0, 0, scaledWidth, scaledHeight);
+
+        console.log('originalImageData 업데이트 완료');
 
         // 분판 필터 적용
         this.applyColorSeparation(this.originalImageData);
@@ -546,10 +573,8 @@ class PDFSeparationViewer {
             filteredData.data[i + 2] = newB;
         }
 
-        // 필터링된 이미지를 이미지가 그려진 위치에 표시
-        const offsetX = this.imageOffsetX || 0;
-        const offsetY = this.imageOffsetY || 0;
-        this.ctx.putImageData(filteredData, offsetX, offsetY);
+        // 필터링된 이미지 표시 (캔버스 전체)
+        this.ctx.putImageData(filteredData, 0, 0);
     }
     
     createDummyImageData(width = 800, height = 600) {
