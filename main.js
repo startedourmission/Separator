@@ -341,46 +341,117 @@ class PDFSeparationViewer {
             return;
         }
 
+        // 이미 원본 이미지가 있으면 스케일만 적용
+        if (this.baseImageData && this.zoomLevel !== this.lastZoomLevel) {
+            this.applyZoomAndSeparation();
+            this.lastZoomLevel = this.zoomLevel;
+            return;
+        }
+
         try {
-            // 컨테이너 크기에 맞춰 렌더링 크기 계산
+            // 컨테이너 크기 확인
             const container = this.canvas.parentElement;
-            const maxWidth = container.clientWidth - 40; // padding 고려
-            const maxHeight = container.clientHeight - 40;
+            const containerWidth = container.clientWidth - 40; // padding 고려
+            const containerHeight = container.clientHeight - 40;
 
             // A4 비율 (210mm x 297mm = 1:1.414)
             const aspectRatio = 1.414;
-            let baseWidth = Math.min(maxWidth, 800);
+
+            // 100% 줌일 때 컨테이너 가로에 꽉 차게 표시할 기본 크기 계산
+            let baseWidth = containerWidth;
             let baseHeight = Math.floor(baseWidth * aspectRatio);
 
-            if (baseHeight > maxHeight) {
-                baseHeight = maxHeight;
+            // 세로가 넘치면 세로 기준으로 재계산
+            if (baseHeight > containerHeight) {
+                baseHeight = containerHeight;
                 baseWidth = Math.floor(baseHeight / aspectRatio);
             }
 
-            // 줌 레벨 적용
-            let renderWidth = Math.floor(baseWidth * this.zoomLevel);
-            let renderHeight = Math.floor(baseHeight * this.zoomLevel);
+            // Ghostscript로 고해상도 렌더링 (baseWidth의 2배 해상도)
+            const renderWidth = baseWidth * 2;
+            const renderHeight = baseHeight * 2;
 
             const renderOptions = this.buildRenderOptions();
             renderOptions.width = renderWidth;
             renderOptions.height = renderHeight;
 
-            console.log('렌더링 크기:', renderWidth, 'x', renderHeight, '줌:', this.zoomLevel);
+            console.log('PDF 렌더링:', renderWidth, 'x', renderHeight);
+            console.log('100% 표시 크기:', baseWidth, 'x', baseHeight);
 
             const imageData = await this.ghostscript.renderPage(this.currentPage, renderOptions);
 
-            this.displayImageData(imageData);
-            this.applyColorSeparation(imageData);
+            this.baseImageData = imageData;
+            this.baseWidth = baseWidth;  // 100% 줌일 때의 표시 크기
+            this.baseHeight = baseHeight;
+
+            this.applyZoomAndSeparation();
             this.updatePageControls();
+            this.lastZoomLevel = this.zoomLevel;
         } catch (error) {
             console.error('페이지 렌더링 실패:', error);
             this.showError('페이지를 렌더링할 수 없습니다.');
         }
     }
 
+    applyZoomAndSeparation() {
+        if (!this.baseImageData) return;
+
+        // 컨테이너 크기에 맞춰 캔버스 크기 고정
+        const container = this.canvas.parentElement;
+        const containerWidth = container.clientWidth - 40;
+        const containerHeight = container.clientHeight - 40;
+
+        // 캔버스 크기는 컨테이너에 맞춤 (고정)
+        this.canvas.width = containerWidth;
+        this.canvas.height = containerHeight;
+
+        console.log('캔버스 크기:', containerWidth, 'x', containerHeight);
+
+        // 배경 클리어
+        this.ctx.fillStyle = '#f0f0f0';
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+        // 줌 적용된 이미지 표시 크기 (baseWidth는 100% 줌 기준)
+        const scaledWidth = Math.floor(this.baseWidth * this.zoomLevel);
+        const scaledHeight = Math.floor(this.baseHeight * this.zoomLevel);
+
+        console.log('줌', this.zoomLevel, '적용된 이미지 크기:', scaledWidth, 'x', scaledHeight);
+
+        // 이미지 스케일링하여 그리기
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = this.baseImageData.width;
+        tempCanvas.height = this.baseImageData.height;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.putImageData(this.baseImageData, 0, 0);
+
+        // 좌상단 정렬
+        const offsetX = 0;
+        const offsetY = 0;
+
+        // 스케일링된 크기로 그리기
+        this.ctx.imageSmoothingEnabled = true;
+        this.ctx.imageSmoothingQuality = 'high';
+        this.ctx.drawImage(tempCanvas, offsetX, offsetY, scaledWidth, scaledHeight);
+
+        // 실제 그려진 영역의 이미지 데이터 추출 (분판 필터용)
+        const visibleWidth = Math.min(scaledWidth, this.canvas.width);
+        const visibleHeight = Math.min(scaledHeight, this.canvas.height);
+        this.originalImageData = this.ctx.getImageData(offsetX, offsetY, visibleWidth, visibleHeight);
+        this.imageOffsetX = offsetX;
+        this.imageOffsetY = offsetY;
+        this.imageScaledWidth = scaledWidth;
+        this.imageScaledHeight = scaledHeight;
+
+        console.log('보이는 영역:', visibleWidth, 'x', visibleHeight);
+
+        // 분판 필터 적용
+        this.applyColorSeparation(this.originalImageData);
+    }
+
     goToPreviousPage() {
         if (this.currentPage > 1) {
             this.currentPage--;
+            this.baseImageData = null; // 새 페이지 렌더링 강제
             this.renderCurrentPage();
         }
     }
@@ -388,6 +459,7 @@ class PDFSeparationViewer {
     goToNextPage() {
         if (this.currentPage < this.totalPages) {
             this.currentPage++;
+            this.baseImageData = null; // 새 페이지 렌더링 강제
             this.renderCurrentPage();
         }
     }
@@ -426,12 +498,8 @@ class PDFSeparationViewer {
     }
     
     displayImageData(imageData) {
-        this.canvas.width = imageData.width;
-        this.canvas.height = imageData.height;
-        this.ctx.putImageData(imageData, 0, 0);
-
-        // 원본 이미지 데이터 저장 (분판 필터링용)
-        this.originalImageData = this.ctx.getImageData(0, 0, imageData.width, imageData.height);
+        // 이 함수는 applyZoomAndSeparation에서 처리됨
+        // 호환성을 위해 유지
     }
 
     applyColorSeparation(imageData) {
@@ -478,8 +546,10 @@ class PDFSeparationViewer {
             filteredData.data[i + 2] = newB;
         }
 
-        // 필터링된 이미지 표시
-        this.ctx.putImageData(filteredData, 0, 0);
+        // 필터링된 이미지를 이미지가 그려진 위치에 표시
+        const offsetX = this.imageOffsetX || 0;
+        const offsetY = this.imageOffsetY || 0;
+        this.ctx.putImageData(filteredData, offsetX, offsetY);
     }
     
     createDummyImageData(width = 800, height = 600) {
