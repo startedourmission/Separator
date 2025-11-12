@@ -11,11 +11,11 @@ body {
 }
 
 .container {
-    max-width: 1400px;
+    max-width: 100%;
     margin: 0 auto;
     padding: 20px;
     display: grid;
-    grid-template-columns: 300px 1fr;
+    grid-template-columns: 320px 1fr;
     grid-template-rows: auto 1fr;
     gap: 20px;
     height: 100vh;
@@ -180,7 +180,7 @@ h4 {
     transform: scale(1.2);
 }
 
-.info-panel {
+.info-panel, .viewer-controls {
     font-size: 0.9em;
 }
 
@@ -189,6 +189,70 @@ h4 {
     padding: 8px;
     background: #f8f9fa;
     border-radius: 4px;
+}
+
+.viewer-controls {
+    margin-bottom: 25px;
+    padding-bottom: 20px;
+}
+
+.zoom-controls {
+    margin-bottom: 15px;
+    padding: 10px;
+    background: #f8f9fa;
+    border-radius: 4px;
+}
+
+.zoom-controls label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 600;
+}
+
+.zoom-controls input[type="range"] {
+    width: 100%;
+    margin-bottom: 5px;
+}
+
+#zoom-value {
+    display: inline-block;
+    font-weight: 600;
+    color: #2c3e50;
+}
+
+.page-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px;
+    background: #f8f9fa;
+    border-radius: 4px;
+}
+
+.page-controls button {
+    padding: 8px 12px;
+    background: #3498db;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9em;
+    transition: background-color 0.2s;
+}
+
+.page-controls button:hover:not(:disabled) {
+    background: #2980b9;
+}
+
+.page-controls button:disabled {
+    background: #bdc3c7;
+    cursor: not-allowed;
+}
+
+#page-info {
+    font-size: 0.9em;
+    white-space: nowrap;
 }
 
 .canvas-container {

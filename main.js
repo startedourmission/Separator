@@ -8,6 +8,9 @@ class PDFSeparationViewer {
         this.ghostscript = null;
         this.spotColors = [];
         this.gsModule = null;
+        this.currentPage = 1;
+        this.totalPages = 1;
+        this.zoomLevel = 1.0;
 
         this.initializeElements();
         this.bindEvents();
@@ -43,19 +46,38 @@ class PDFSeparationViewer {
         this.spotControlsContainer = document.getElementById('spot-controls');
         this.tacValueElement = document.getElementById('tac-value');
         this.cursorCoordsElement = document.getElementById('cursor-coords');
+
+        // 뷰어 컨트롤
+        this.zoomSlider = document.getElementById('zoom-slider');
+        this.zoomValue = document.getElementById('zoom-value');
+        this.prevPageBtn = document.getElementById('prev-page');
+        this.nextPageBtn = document.getElementById('next-page');
+        this.currentPageSpan = document.getElementById('current-page');
+        this.totalPagesSpan = document.getElementById('total-pages');
     }
     
     bindEvents() {
         this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
-        
+
         Object.values(this.cmykCheckboxes).forEach(checkbox => {
             checkbox.addEventListener('change', () => this.updateSeparation());
         });
-        
+
         this.overprintCheckbox.addEventListener('change', () => this.updateSeparation());
-        
+
         this.canvas.addEventListener('mousemove', (e) => this.handleMouseMove(e));
         this.canvas.addEventListener('mouseleave', () => this.clearMouseInfo());
+
+        // 줌 컨트롤
+        this.zoomSlider.addEventListener('input', (e) => {
+            this.zoomLevel = parseInt(e.target.value) / 100;
+            this.zoomValue.textContent = e.target.value + '%';
+            this.renderCurrentPage();
+        });
+
+        // 페이지 네비게이션
+        this.prevPageBtn.addEventListener('click', () => this.goToPreviousPage());
+        this.nextPageBtn.addEventListener('click', () => this.goToNextPage());
     }
     
     async loadGhostscript() {
@@ -327,28 +349,54 @@ class PDFSeparationViewer {
 
             // A4 비율 (210mm x 297mm = 1:1.414)
             const aspectRatio = 1.414;
-            let renderWidth = Math.min(maxWidth, 800);
-            let renderHeight = Math.floor(renderWidth * aspectRatio);
+            let baseWidth = Math.min(maxWidth, 800);
+            let baseHeight = Math.floor(baseWidth * aspectRatio);
 
-            if (renderHeight > maxHeight) {
-                renderHeight = maxHeight;
-                renderWidth = Math.floor(renderHeight / aspectRatio);
+            if (baseHeight > maxHeight) {
+                baseHeight = maxHeight;
+                baseWidth = Math.floor(baseHeight / aspectRatio);
             }
+
+            // 줌 레벨 적용
+            let renderWidth = Math.floor(baseWidth * this.zoomLevel);
+            let renderHeight = Math.floor(baseHeight * this.zoomLevel);
 
             const renderOptions = this.buildRenderOptions();
             renderOptions.width = renderWidth;
             renderOptions.height = renderHeight;
 
-            console.log('렌더링 크기:', renderWidth, 'x', renderHeight);
+            console.log('렌더링 크기:', renderWidth, 'x', renderHeight, '줌:', this.zoomLevel);
 
-            const imageData = await this.ghostscript.renderPage(1, renderOptions);
+            const imageData = await this.ghostscript.renderPage(this.currentPage, renderOptions);
 
             this.displayImageData(imageData);
             this.applyColorSeparation(imageData);
+            this.updatePageControls();
         } catch (error) {
             console.error('페이지 렌더링 실패:', error);
             this.showError('페이지를 렌더링할 수 없습니다.');
         }
+    }
+
+    goToPreviousPage() {
+        if (this.currentPage > 1) {
+            this.currentPage--;
+            this.renderCurrentPage();
+        }
+    }
+
+    goToNextPage() {
+        if (this.currentPage < this.totalPages) {
+            this.currentPage++;
+            this.renderCurrentPage();
+        }
+    }
+
+    updatePageControls() {
+        this.currentPageSpan.textContent = this.currentPage;
+        this.totalPagesSpan.textContent = this.totalPages;
+        this.prevPageBtn.disabled = this.currentPage <= 1;
+        this.nextPageBtn.disabled = this.currentPage >= this.totalPages;
     }
     
     buildRenderOptions() {

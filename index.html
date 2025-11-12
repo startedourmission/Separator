@@ -64,8 +64,22 @@
                     <span id="cursor-coords">-</span>
                 </div>
             </div>
+
+            <div class="viewer-controls">
+                <h3>뷰어 제어</h3>
+                <div class="zoom-controls">
+                    <label for="zoom-slider">확대/축소:</label>
+                    <input type="range" id="zoom-slider" min="25" max="200" value="100" step="25">
+                    <span id="zoom-value">100%</span>
+                </div>
+                <div class="page-controls">
+                    <button id="prev-page" disabled>◀ 이전</button>
+                    <span id="page-info">페이지 <span id="current-page">1</span> / <span id="total-pages">1</span></span>
+                    <button id="next-page" disabled>다음 ▶</button>
+                </div>
+            </div>
         </div>
-        
+
         <div class="canvas-container">
             <canvas id="pdf-canvas"></canvas>
         </div>
