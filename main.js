@@ -91,7 +91,7 @@ class PDFSeparationViewer {
 
             // Worker 메시지 핸들러를 한 번만 설정
             this.worker.onmessage = (e) => {
-                const { type, requestId, success, data, width, height, message, pageSize } = e.data;
+                const { type, requestId, success, data, width, height, message, pageSize, pageCount } = e.data;
 
                 if (type === 'init') {
                     const pending = this.pendingRequests.get('init');
@@ -102,6 +102,12 @@ class PDFSeparationViewer {
                             pending.reject(new Error(message || 'Worker 초기화 실패'));
                         }
                         this.pendingRequests.delete('init');
+                    }
+                } else if (type === 'pageCount') {
+                    const pending = this.pendingRequests.get(requestId);
+                    if (pending) {
+                        pending.resolve(pageCount);
+                        this.pendingRequests.delete(requestId);
                     }
                 } else if (type === 'pageSize') {
                     const pending = this.pendingRequests.get(requestId);
@@ -147,11 +153,34 @@ class PDFSeparationViewer {
                     try {
                         this.currentPDFData = new Uint8Array(data);
                         console.log('PDF 로딩 완료, 크기:', this.currentPDFData.length);
-                        return { success: true, pages: 1 };
+
+                        // 페이지 수 조회
+                        const pageCount = await this.ghostscript.getPageCount();
+
+                        return { success: true, pages: pageCount };
                     } catch (error) {
                         console.error('PDF 로딩 실패:', error);
                         return { success: false };
                     }
+                },
+
+                getPageCount: async () => {
+                    if (!this.currentPDFData) {
+                        throw new Error('PDF가 로딩되지 않았습니다');
+                    }
+
+                    return new Promise((resolve, reject) => {
+                        const reqId = ++this.requestId;
+                        this.pendingRequests.set(reqId, { resolve, reject });
+
+                        this.worker.postMessage({
+                            type: 'getPageCount',
+                            requestId: reqId,
+                            data: {
+                                pdfData: this.currentPDFData
+                            }
+                        });
+                    });
                 },
 
                 getPageSize: async (pageNum) => {
@@ -179,16 +208,19 @@ class PDFSeparationViewer {
                         throw new Error('PDF가 로딩되지 않았습니다');
                     }
 
+                    const payloadOptions = { ...options, pageNum };
+
                     return new Promise((resolve, reject) => {
                         const reqId = ++this.requestId;
-                        this.pendingRequests.set(reqId, { resolve, reject, options });
+                        this.pendingRequests.set(reqId, { resolve, reject, options: payloadOptions });
 
                         this.worker.postMessage({
                             type: 'process',
                             requestId: reqId,
                             data: {
                                 pdfData: this.currentPDFData,
-                                options: options
+                                options: payloadOptions,
+                                pageNum
                             }
                         });
                     });
@@ -217,12 +249,10 @@ class PDFSeparationViewer {
     
     async convertPNGToImageData(pngData, width, height) {
         return new Promise((resolve, reject) => {
-            console.log('PNG 변환 시작:', pngData.length, 'bytes →', width, 'x', height);
             const blob = new Blob([pngData], { type: 'image/png' });
             const img = new Image();
 
             img.onload = () => {
-                console.log('PNG 이미지 로드 완료');
                 const canvas = document.createElement('canvas');
                 canvas.width = width;
                 canvas.height = height;
@@ -230,7 +260,6 @@ class PDFSeparationViewer {
 
                 ctx.drawImage(img, 0, 0, width, height);
                 const imageData = ctx.getImageData(0, 0, width, height);
-                console.log('ImageData 생성 완료:', imageData.width, 'x', imageData.height);
                 URL.revokeObjectURL(img.src);
                 resolve(imageData);
             };
@@ -318,11 +347,15 @@ class PDFSeparationViewer {
             this.showError('Ghostscript가 준비되지 않았습니다.');
             return;
         }
-        
+
         try {
             const result = await this.ghostscript.loadPDF(data);
             if (result.success) {
                 this.currentPDF = data;
+                this.totalPages = result.pages;
+                this.currentPage = 1;
+                console.log('PDF 총 페이지:', this.totalPages);
+
                 await this.loadSpotColors();
                 await this.renderCurrentPage();
                 console.log('PDF 로딩 성공');
@@ -411,12 +444,13 @@ class PDFSeparationViewer {
             const renderOptions = this.buildRenderOptions();
             renderOptions.width = renderWidth;
             renderOptions.height = renderHeight;
-            renderOptions.pdfWidth = pageSize.width;
-            renderOptions.pdfHeight = pageSize.height;
+            renderOptions.pdfWidth = pageSize?.width || renderWidth;
+            renderOptions.pdfHeight = pageSize?.height || renderHeight;
+            renderOptions.pageNum = this.currentPage;
 
-            console.log('PDF 렌더링:', renderWidth, 'x', renderHeight);
-            console.log('100% 표시 크기:', baseWidth, 'x', baseHeight);
-            console.log('PDF 비율:', pdfAspectRatio.toFixed(3), 'vs 렌더링 비율:', (renderWidth / renderHeight).toFixed(3));
+            // 디버그 로그 제거 (필요시 주석 해제)
+            // console.log('PDF 렌더링:', renderWidth, 'x', renderHeight);
+            // console.log('100% 표시 크기:', baseWidth, 'x', baseHeight);
 
             const imageData = await this.ghostscript.renderPage(this.currentPage, renderOptions);
 
@@ -447,9 +481,6 @@ class PDFSeparationViewer {
         this.canvas.width = scaledWidth;
         this.canvas.height = scaledHeight;
 
-        console.log('캔버스 및 이미지 크기:', scaledWidth, 'x', scaledHeight, '(줌:', this.zoomLevel + ')');
-        console.log('baseImageData:', this.baseImageData.width, 'x', this.baseImageData.height);
-
         // 이미지 스케일링하여 그리기
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = this.baseImageData.width;
@@ -457,19 +488,13 @@ class PDFSeparationViewer {
         const tempCtx = tempCanvas.getContext('2d');
         tempCtx.putImageData(this.baseImageData, 0, 0);
 
-        console.log('임시 캔버스에 이미지 데이터 그리기 완료');
-
         // 스케일링된 크기로 그리기 (캔버스 전체에)
         this.ctx.imageSmoothingEnabled = true;
         this.ctx.imageSmoothingQuality = 'high';
         this.ctx.drawImage(tempCanvas, 0, 0, scaledWidth, scaledHeight);
 
-        console.log('메인 캔버스에 스케일링하여 그리기 완료');
-
         // 전체 캔버스의 이미지 데이터 추출 (분판 필터용)
         this.originalImageData = this.ctx.getImageData(0, 0, scaledWidth, scaledHeight);
-
-        console.log('originalImageData 업데이트 완료');
 
         // 분판 필터 적용
         this.applyColorSeparation(this.originalImageData);

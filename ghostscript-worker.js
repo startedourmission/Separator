@@ -11,6 +11,31 @@ function createModuleConfig(overrides = {}) {
     }, overrides);
 }
 
+function interceptConsole(handler) {
+    const originalLog = console.log;
+    const originalWarn = console.warn;
+    const originalError = console.error;
+
+    console.log = (...args) => {
+        handler(args.join(' '));
+        if (originalLog) originalLog.apply(console, args);
+    };
+    console.warn = (...args) => {
+        handler(args.join(' '));
+        if (originalWarn) originalWarn.apply(console, args);
+    };
+    console.error = (...args) => {
+        handler(args.join(' '));
+        if (originalError) originalError.apply(console, args);
+    };
+
+    return () => {
+        console.log = originalLog;
+        console.warn = originalWarn;
+        console.error = originalError;
+    };
+}
+
 async function initGhostscript() {
     if (!gsModule) {
         gsModule = await Module(createModuleConfig({ noExitRuntime: true }));
@@ -70,10 +95,72 @@ async function getPDFPageSize(pdfData, pageNum = 1) {
     }
 }
 
-async function processPDF(pdfData, options) {
+async function getPDFPageCount(pdfData) {
+    try {
+        const outputs = [];
+        const captureOutput = (text) => {
+            if (typeof text === 'string') {
+                outputs.push(text);
+            }
+        };
+
+        const restoreConsole = interceptConsole(captureOutput);
+        let moduleInstance;
+
+        try {
+            moduleInstance = await Module(createModuleConfig({
+                noExitRuntime: false,
+                print: captureOutput,
+                printErr: captureOutput
+            }));
+
+            moduleInstance.FS.writeFile("input.pdf", new Uint8Array(pdfData));
+
+            const args = [
+                '-dNOPAUSE',
+                '-dBATCH',
+                '-dSAFER',
+                '-sDEVICE=nullpage',
+                'input.pdf'
+            ];
+
+            try {
+                moduleInstance.callMain(args);
+            } catch (error) {
+                if (error?.name !== 'ExitStatus' || error.status !== 0) {
+                    throw error;
+                }
+            }
+        } finally {
+            restoreConsole();
+        }
+
+        const pageMatch = [...outputs].reverse().find(line => {
+            const match = line.match(/Processing pages \d+ through (\d+)/);
+            return !!match;
+        });
+
+        let pageCount = 1;
+        if (pageMatch) {
+            const match = pageMatch.match(/Processing pages \d+ through (\d+)/);
+            if (match) {
+                pageCount = parseInt(match[1], 10);
+            }
+        }
+
+        console.log('최종 페이지 수:', pageCount);
+        return pageCount;
+    } catch (error) {
+        console.error('PDF 페이지 수 조회 실패:', error);
+        return 1;
+    }
+}
+
+async function processPDF(pdfData, options, pageNum = 1) {
     const outputWidth = options.width || 800;
     const outputHeight = options.height || 600;
-    const ghostscriptArgs = buildGhostscriptArgs(options, outputWidth, outputHeight);
+    const targetPage = pageNum || options.pageNum || 1;
+    const ghostscriptArgs = buildGhostscriptArgs(options, outputWidth, outputHeight, targetPage);
 
     try {
         const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
@@ -97,10 +184,11 @@ async function processPDF(pdfData, options) {
     }
 }
 
-function buildGhostscriptArgs(options, width, height) {
+function buildGhostscriptArgs(options, width, height, pageNum = 1) {
     // PDF 크기와 원하는 출력 크기를 기반으로 DPI 계산
-    // 기본 PDF는 72 DPI 기준
-    const dpi = Math.round((width / options.pdfWidth) * 72);
+    const pdfWidth = options.pdfWidth || width;
+    const pdfHeight = options.pdfHeight || height;
+    const dpi = Math.max(1, Math.round((width / pdfWidth) * 72));
 
     const args = [
         '-dNOPAUSE',
@@ -110,10 +198,12 @@ function buildGhostscriptArgs(options, width, height) {
         '-dGraphicsAlphaBits=4',
         '-dTextAlphaBits=4',
         `-r${dpi}`,
+        `-dFirstPage=${pageNum}`,
+        `-dLastPage=${pageNum}`,
         '-sOutputFile=output.png'
     ];
 
-    console.log('Ghostscript DPI:', dpi, '(PDF:', options.pdfWidth, 'x', options.pdfHeight, '→ 출력:', width, 'x', height + ')');
+    console.log('Ghostscript DPI:', dpi, `페이지: ${pageNum}`, '(PDF:', pdfWidth, 'x', pdfHeight, '→ 출력:', width, 'x', height + ')');
 
     // CMYK 분판 제어 (실제 Ghostscript 옵션 사용)
     // 주의: Ghostscript의 CMYK 분판은 복잡하므로 일단 기본 렌더링만 수행
@@ -137,6 +227,19 @@ self.addEventListener('message', async function(e) {
         if (type === 'init') {
             await initGhostscript();
             self.postMessage({ type: 'init', success: true });
+        } else if (type === 'getPageCount') {
+            const { pdfData } = data;
+            console.log('Worker: PDF 페이지 수 조회 중...');
+
+            const pageCount = await getPDFPageCount(pdfData);
+            console.log('Worker: PDF 페이지 수:', pageCount);
+
+            self.postMessage({
+                type: 'pageCount',
+                requestId: requestId,
+                success: true,
+                pageCount: pageCount
+            });
         } else if (type === 'getPageSize') {
             const { pdfData, pageNum } = data;
             console.log('Worker: PDF 페이지 크기 조회 중...');
@@ -151,10 +254,11 @@ self.addEventListener('message', async function(e) {
                 pageSize: pageSize
             });
         } else if (type === 'process') {
-            const { pdfData, options } = data;
-            console.log('Worker: PDF 처리 시작', { width: options.width, height: options.height });
+            const { pdfData, options, pageNum } = data;
+            const targetPage = pageNum || options?.pageNum || 1;
+            console.log('Worker: PDF 처리 시작', { width: options.width, height: options.height, page: targetPage });
 
-            const outputData = await processPDF(pdfData, options);
+            const outputData = await processPDF(pdfData, options, targetPage);
             console.log('Worker: PDF 처리 완료, 출력 크기:', outputData.length);
 
             self.postMessage({
