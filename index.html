@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF 색상 분판 미리보기</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>PDF 색상 분판 미리보기</h1>
+        </header>
+        
+        <div class="controls">
+            <div class="file-section">
+                <label for="pdf-file">PDF 파일 선택:</label>
+                <input type="file" id="pdf-file" accept=".pdf">
+            </div>
+            
+            <div class="separation-controls">
+                <h3>CMYK 분판 제어</h3>
+                <div class="cmyk-controls">
+                    <label>
+                        <input type="checkbox" id="cyan" checked>
+                        <span class="color-label cyan">C (Cyan)</span>
+                    </label>
+                    <label>
+                        <input type="checkbox" id="magenta" checked>
+                        <span class="color-label magenta">M (Magenta)</span>
+                    </label>
+                    <label>
+                        <input type="checkbox" id="yellow" checked>
+                        <span class="color-label yellow">Y (Yellow)</span>
+                    </label>
+                    <label>
+                        <input type="checkbox" id="black" checked>
+                        <span class="color-label black">K (Black)</span>
+                    </label>
+                </div>
+                
+                <div class="spot-colors" id="spot-colors">
+                    <h4>별색 (Spot Colors)</h4>
+                    <div id="spot-controls"></div>
+                </div>
+            </div>
+            
+            <div class="advanced-controls">
+                <h3>고급 기능</h3>
+                <label>
+                    <input type="checkbox" id="overprint">
+                    오버프린트 시뮬레이션
+                </label>
+            </div>
+            
+            <div class="info-panel">
+                <h3>정보</h3>
+                <div class="ink-info">
+                    <span>마우스 위치 잉크량 (TAC): </span>
+                    <span id="tac-value">-</span>%
+                </div>
+                <div class="cursor-position">
+                    <span>좌표: </span>
+                    <span id="cursor-coords">-</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="canvas-container">
+            <canvas id="pdf-canvas"></canvas>
+        </div>
+    </div>
+    
+    <script src="main.js" type="module"></script>
+</body>
+</html>
