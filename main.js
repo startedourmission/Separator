@@ -43,8 +43,6 @@ class PDFSeparationViewer {
             yellow: document.getElementById('yellow'),
             black: document.getElementById('black')
         };
-        this.overprintCheckbox = document.getElementById('overprint');
-        this.spotControlsContainer = document.getElementById('spot-controls');
         this.tacValueElement = document.getElementById('tac-value');
         this.cursorCoordsElement = document.getElementById('cursor-coords');
 
@@ -53,7 +51,7 @@ class PDFSeparationViewer {
         this.zoomValue = document.getElementById('zoom-value');
         this.prevPageBtn = document.getElementById('prev-page');
         this.nextPageBtn = document.getElementById('next-page');
-        this.currentPageSpan = document.getElementById('current-page');
+        this.currentPageInput = document.getElementById('current-page');
         this.totalPagesSpan = document.getElementById('total-pages');
     }
     
@@ -63,8 +61,6 @@ class PDFSeparationViewer {
         Object.values(this.cmykCheckboxes).forEach(checkbox => {
             checkbox.addEventListener('change', () => this.updateSeparation());
         });
-
-        this.overprintCheckbox.addEventListener('change', () => this.updateSeparation());
 
         this.canvas.addEventListener('mousemove', (e) => this.handleMouseMove(e));
         this.canvas.addEventListener('mouseleave', () => this.clearMouseInfo());
@@ -79,6 +75,23 @@ class PDFSeparationViewer {
         // 페이지 네비게이션
         this.prevPageBtn.addEventListener('click', () => this.goToPreviousPage());
         this.nextPageBtn.addEventListener('click', () => this.goToNextPage());
+
+        // 페이지 번호 직접 입력
+        this.currentPageInput.addEventListener('change', (e) => {
+            const pageNum = parseInt(e.target.value);
+            this.goToPage(pageNum);
+        });
+        this.currentPageInput.addEventListener('keydown', (e) => {
+            console.log('키 입력 감지:', e.key); // 디버깅용
+            if (e.key === 'Enter') {
+                e.preventDefault(); // 폼 제출 방지
+                e.stopPropagation(); // 이벤트 전파 차단
+                const pageNum = parseInt(e.target.value);
+                console.log('페이지 이동:', pageNum);
+                this.goToPage(pageNum);
+                e.target.blur(); // Enter 후 포커스 해제
+            }
+        });
     }
     
     async loadGhostscript() {
@@ -635,24 +648,37 @@ class PDFSeparationViewer {
         }
     }
 
-    goToPreviousPage() {
-        if (this.currentPage > 1) {
-            this.currentPage--;
+    goToPage(pageNum) {
+        // 유효성 검증
+        if (isNaN(pageNum) || pageNum < 1 || pageNum > this.totalPages) {
+            console.warn('유효하지 않은 페이지 번호:', pageNum);
+            // 현재 페이지로 되돌리기
+            this.currentPageInput.value = this.currentPage;
+            return;
+        }
+
+        if (pageNum !== this.currentPage) {
+            this.currentPage = pageNum;
             this.baseImageData = null; // 새 페이지 렌더링 강제
             this.renderCurrentPage();
+        }
+    }
+
+    goToPreviousPage() {
+        if (this.currentPage > 1) {
+            this.goToPage(this.currentPage - 1);
         }
     }
 
     goToNextPage() {
         if (this.currentPage < this.totalPages) {
-            this.currentPage++;
-            this.baseImageData = null; // 새 페이지 렌더링 강제
-            this.renderCurrentPage();
+            this.goToPage(this.currentPage + 1);
         }
     }
 
     updatePageControls() {
-        this.currentPageSpan.textContent = this.currentPage;
+        this.currentPageInput.value = this.currentPage;
+        this.currentPageInput.max = this.totalPages;
         this.totalPagesSpan.textContent = this.totalPages;
         this.prevPageBtn.disabled = this.currentPage <= 1;
         this.nextPageBtn.disabled = this.currentPage >= this.totalPages;
@@ -662,25 +688,16 @@ class PDFSeparationViewer {
         const options = {
             width: 800,
             height: 600,
-            separations: [],
-            overprint: this.overprintCheckbox.checked
+            separations: []
         };
-        
+
         // CMYK 분판 옵션
         Object.entries(this.cmykCheckboxes).forEach(([color, checkbox]) => {
             if (checkbox.checked) {
                 options.separations.push(color);
             }
         });
-        
-        // 별색 분판 옵션
-        this.spotColors.forEach((colorName, index) => {
-            const checkbox = document.getElementById(`spot-${index}`);
-            if (checkbox && checkbox.checked) {
-                options.separations.push(colorName);
-            }
-        });
-        
+
         return options;
     }
     

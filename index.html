@@ -3,13 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PDF 색상 분판 미리보기</title>
+    <title>분판맨</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>PDF 색상 분판 미리보기</h1>
+            <h1>분판맨</h1>
         </header>
         
         <div class="controls">
@@ -38,21 +38,8 @@
                         <span class="color-label black">K (Black)</span>
                     </label>
                 </div>
-                
-                <div class="spot-colors" id="spot-colors">
-                    <h4>별색 (Spot Colors)</h4>
-                    <div id="spot-controls"></div>
-                </div>
             </div>
-            
-            <div class="advanced-controls">
-                <h3>고급 기능</h3>
-                <label>
-                    <input type="checkbox" id="overprint">
-                    오버프린트 시뮬레이션
-                </label>
-            </div>
-            
+
             <div class="info-panel">
                 <h3>정보</h3>
                 <div class="ink-info">
@@ -74,7 +61,7 @@
                 </div>
                 <div class="page-controls">
                     <button id="prev-page" disabled>◀ 이전</button>
-                    <span id="page-info">페이지 <span id="current-page">1</span> / <span id="total-pages">1</span></span>
+                    <span id="page-info">페이지 <input type="number" id="current-page" value="1" min="1"> / <span id="total-pages">1</span></span>
                     <button id="next-page" disabled>다음 ▶</button>
                 </div>
             </div>

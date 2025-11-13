@@ -38,7 +38,7 @@ h1 {
 
 .controls {
     background: white;
-    padding: 20px;
+    padding: 15px;
     border-radius: 8px;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     height: fit-content;
@@ -46,8 +46,8 @@ h1 {
 }
 
 .file-section {
-    margin-bottom: 30px;
-    padding-bottom: 20px;
+    margin-bottom: 20px;
+    padding-bottom: 15px;
     border-bottom: 1px solid #eee;
 }
 
@@ -66,8 +66,8 @@ h1 {
 }
 
 .separation-controls, .advanced-controls, .info-panel {
-    margin-bottom: 25px;
-    padding-bottom: 20px;
+    margin-bottom: 15px;
+    padding-bottom: 12px;
     border-bottom: 1px solid #eee;
 }
 
@@ -79,8 +79,8 @@ h1 {
 
 h3 {
     color: #2c3e50;
-    margin-bottom: 15px;
-    font-size: 1.1em;
+    margin-bottom: 10px;
+    font-size: 0.95em;
 }
 
 h4 {
@@ -93,14 +93,14 @@ h4 {
 .cmyk-controls {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 6px;
 }
 
 .cmyk-controls label {
     display: flex;
     align-items: center;
     cursor: pointer;
-    padding: 8px;
+    padding: 5px;
     border-radius: 4px;
     transition: background-color 0.2s;
 }
@@ -111,7 +111,7 @@ h4 {
 
 .cmyk-controls input[type="checkbox"] {
     margin-right: 10px;
-    transform: scale(1.2);
+    transform: scale(1.0);
 }
 
 .color-label {
@@ -178,28 +178,28 @@ h4 {
 
 .advanced-controls input[type="checkbox"] {
     margin-right: 10px;
-    transform: scale(1.2);
+    transform: scale(1.0);
 }
 
 .info-panel, .viewer-controls {
-    font-size: 0.9em;
+    font-size: 0.85em;
 }
 
 .ink-info, .cursor-position {
     margin-bottom: 8px;
-    padding: 8px;
+    padding: 6px;
     background: #f8f9fa;
     border-radius: 4px;
 }
 
 .viewer-controls {
-    margin-bottom: 25px;
-    padding-bottom: 20px;
+    margin-bottom: 15px;
+    padding-bottom: 12px;
 }
 
 .zoom-controls {
-    margin-bottom: 15px;
-    padding: 10px;
+    margin-bottom: 10px;
+    padding: 7px;
     background: #f8f9fa;
     border-radius: 4px;
 }
@@ -225,7 +225,7 @@ h4 {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 10px;
+    gap: 8px;
     padding: 10px;
     background: #f8f9fa;
     border-radius: 4px;
@@ -240,6 +240,7 @@ h4 {
     cursor: pointer;
     font-size: 0.9em;
     transition: background-color 0.2s;
+    font-weight: 500;
 }
 
 .page-controls button:hover:not(:disabled) {
@@ -249,11 +250,34 @@ h4 {
 .page-controls button:disabled {
     background: #bdc3c7;
     cursor: not-allowed;
+    opacity: 0.6;
 }
 
 #page-info {
     font-size: 0.9em;
     white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+#current-page {
+    width: 50px;
+    min-width: 50px;
+    max-width: 50px;
+    text-align: center;
+    border: 1px solid #ddd;
+    border-radius: 3px;
+    padding: 4px;
+    font-size: 0.9em;
+    font-weight: 600;
+    flex-shrink: 0;
+}
+
+#current-page:focus {
+    outline: none;
+    border-color: #3498db;
+    box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.2);
 }
 
 .canvas-container {
