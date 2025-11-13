@@ -77,6 +77,11 @@ class PDFSeparationViewer {
         this.loadingIndicator = document.getElementById('loading-indicator');
         this.loadingText = document.getElementById('loading-text');
         this.loadingProgress = document.getElementById('loading-progress');
+
+        // 스캔 진행률 요소
+        this.scanProgressSection = document.getElementById('scan-progress-section');
+        this.scanProgressFill = document.getElementById('scan-progress-fill');
+        this.scanProgressText = document.getElementById('scan-progress-text');
     }
 
     showLoading(text = '로딩 중...', progress = '') {
@@ -87,6 +92,17 @@ class PDFSeparationViewer {
 
     hideLoading() {
         this.loadingIndicator.classList.add('hidden');
+    }
+
+    updateScanProgress(current, total) {
+        const percentage = Math.round((current / total) * 100);
+        this.scanProgressFill.style.width = `${percentage}%`;
+        this.scanProgressText.textContent = `${current}/${total} 페이지 (${percentage}%)`;
+        this.scanProgressSection.classList.remove('hidden');
+    }
+
+    hideScanProgress() {
+        this.scanProgressSection.classList.add('hidden');
     }
     
     bindEvents() {
@@ -580,8 +596,8 @@ class PDFSeparationViewer {
         }
 
         try {
-            // 로딩 시작
-            this.showLoading('PDF 로딩 중...');
+            // 1단계: PDF 로딩 (33%)
+            this.showLoading('PDF 로딩 중...', '33%');
 
             const result = await this.ghostscript.loadPDF(data);
             if (result.success) {
@@ -594,17 +610,18 @@ class PDFSeparationViewer {
                 this.totalChannelCounts = { cyan: 0, magenta: 0, yellow: 0, black: 0 };
                 this.totalPixelCount = 0;
 
-                this.showLoading('초기화 중...');
+                // 2단계: 초기화 (66%)
+                this.showLoading('초기화 중...', '66%');
                 await this.loadSpotColors();
 
-                // 첫 페이지 렌더링
-                this.showLoading('첫 페이지 렌더링 중...', `페이지 1/${this.totalPages}`);
+                // 3단계: 첫 페이지 렌더링 (100%)
+                this.showLoading('첫 페이지 렌더링 중...', '100%');
                 await this.renderCurrentPage();
 
                 // 렌더링 완료 후 로딩 숨김
                 this.hideLoading();
 
-                // 백그라운드에서 모든 페이지 스캔 (비동기, 로딩 표시 없이)
+                // 백그라운드에서 모든 페이지 스캔 (비동기)
                 this.scanAllPagesInBackground();
 
                 console.log('PDF 로딩 성공');
@@ -646,6 +663,9 @@ class PDFSeparationViewer {
                     // 매 페이지마다 UI 업데이트
                     const ratios = this.calculateTotalChannelRatios();
                     this.updateChannelRatios(ratios);
+
+                    // 왼쪽 패널 진행률 업데이트
+                    this.updateScanProgress(pageNum, this.totalPages);
                 }
 
                 console.log(`페이지 ${pageNum}/${this.totalPages} 스캔 완료`);
@@ -655,6 +675,9 @@ class PDFSeparationViewer {
         }
 
         console.log('전체 페이지 CMYK 스캔 완료');
+
+        // 완료 후 3초 뒤에 진행률 바 숨김
+        setTimeout(() => this.hideScanProgress(), 3000);
     }
     
 

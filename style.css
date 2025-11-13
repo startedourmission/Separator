@@ -173,6 +173,47 @@ h4 {
     text-decoration: underline;
 }
 
+/* 스캔 진행률 표시 */
+.scan-progress-section {
+    margin-top: 15px;
+    padding: 10px;
+    background: #f8f9fa;
+    border-radius: 4px;
+}
+
+.scan-progress-section.hidden {
+    display: none;
+}
+
+.scan-progress-section h4 {
+    font-size: 0.85em;
+    margin-bottom: 8px;
+    color: #2c3e50;
+    font-weight: 600;
+}
+
+.progress-bar {
+    width: 100%;
+    height: 18px;
+    background: #e0e0e0;
+    border-radius: 9px;
+    overflow: hidden;
+    margin-bottom: 6px;
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(to right, #3498db, #2980b9);
+    transition: width 0.3s ease;
+    width: 0%;
+}
+
+.progress-text {
+    font-size: 0.8em;
+    color: #7f8c8d;
+    text-align: center;
+}
+
 #spot-controls {
     display: flex;
     flex-direction: column;
