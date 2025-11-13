@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "main.js",
   "scripts": {
+    "start": "npx serve -s . -l $PORT",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -12,6 +13,7 @@
   "dependencies": {
     "@jspawn/ghostscript-wasm": "^0.0.2",
     "playwright": "^1.56.1",
-    "utif": "^3.1.0"
+    "utif": "^3.1.0",
+    "serve": "^14.2.1"
   }
 }
