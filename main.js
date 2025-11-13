@@ -72,6 +72,21 @@ class PDFSeparationViewer {
         this.nextPageBtn = document.getElementById('next-page');
         this.currentPageInput = document.getElementById('current-page');
         this.totalPagesSpan = document.getElementById('total-pages');
+
+        // 로딩 인디케이터
+        this.loadingIndicator = document.getElementById('loading-indicator');
+        this.loadingText = document.getElementById('loading-text');
+        this.loadingProgress = document.getElementById('loading-progress');
+    }
+
+    showLoading(text = '로딩 중...', progress = '') {
+        this.loadingText.textContent = text;
+        this.loadingProgress.textContent = progress;
+        this.loadingIndicator.classList.remove('hidden');
+    }
+
+    hideLoading() {
+        this.loadingIndicator.classList.add('hidden');
     }
     
     bindEvents() {
@@ -565,6 +580,9 @@ class PDFSeparationViewer {
         }
 
         try {
+            // 로딩 시작
+            this.showLoading('PDF 로딩 중...');
+
             const result = await this.ghostscript.loadPDF(data);
             if (result.success) {
                 this.currentPDF = data;
@@ -576,19 +594,26 @@ class PDFSeparationViewer {
                 this.totalChannelCounts = { cyan: 0, magenta: 0, yellow: 0, black: 0 };
                 this.totalPixelCount = 0;
 
+                this.showLoading('초기화 중...');
                 await this.loadSpotColors();
 
-                // 백그라운드에서 모든 페이지 스캔 (비동기)
+                // 첫 페이지 렌더링
+                this.showLoading('첫 페이지 렌더링 중...', `페이지 1/${this.totalPages}`);
+                await this.renderCurrentPage();
+
+                // 렌더링 완료 후 로딩 숨김
+                this.hideLoading();
+
+                // 백그라운드에서 모든 페이지 스캔 (비동기, 로딩 표시 없이)
                 this.scanAllPagesInBackground();
 
-                // 첫 페이지는 즉시 렌더링
-                await this.renderCurrentPage();
                 console.log('PDF 로딩 성공');
             } else {
                 throw new Error('PDF 로딩 실패');
             }
         } catch (error) {
             console.error('PDF 로딩 오류:', error);
+            this.hideLoading();
             this.showError('PDF를 로딩할 수 없습니다.');
         }
     }
@@ -677,6 +702,12 @@ class PDFSeparationViewer {
             return;
         }
 
+        // 페이지 이동 시에만 로딩 표시 (초기 로딩은 loadPDF에서 처리)
+        const isInitialLoad = this.currentPage === 1 && !this.baseImageData;
+        if (!isInitialLoad) {
+            this.showLoading('페이지 렌더링 중...', `페이지 ${this.currentPage}/${this.totalPages}`);
+        }
+
         try {
             // PDF 페이지의 실제 크기 가져오기 (포인트 단위)
             let pageSize;
@@ -725,8 +756,14 @@ class PDFSeparationViewer {
             this.applyZoomAndSeparation();
             this.updatePageControls();
             this.lastZoomLevel = this.zoomLevel;
+
+            // 페이지 이동 시에만 로딩 숨김 (초기 로딩은 loadPDF에서 처리)
+            if (!isInitialLoad) {
+                this.hideLoading();
+            }
         } catch (error) {
             console.error('페이지 렌더링 실패:', error);
+            this.hideLoading();
             this.showError('페이지를 렌더링할 수 없습니다.');
         }
     }
