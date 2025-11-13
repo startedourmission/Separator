@@ -160,28 +160,73 @@ async function processPDF(pdfData, options, pageNum = 1) {
     const outputWidth = options.width || 800;
     const outputHeight = options.height || 600;
     const targetPage = pageNum || options.pageNum || 1;
-    const ghostscriptArgs = buildGhostscriptArgs(options, outputWidth, outputHeight, targetPage);
+    const useCMYK = options.useCMYK || false;
 
     try {
         const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
-
         moduleInstance.FS.writeFile("input.pdf", new Uint8Array(pdfData));
 
-        try {
-            moduleInstance.callMain(ghostscriptArgs);
-        } catch (error) {
-            // Emscripten throws ExitStatus on normal termination; ignore status 0
-            if (error?.name !== 'ExitStatus' || error.status !== 0) {
-                throw error;
-            }
-        }
+        if (useCMYK) {
+            // CMYK TIFF 생성 (정확한 분판용)
+            const tiffArgs = buildTiffCMYKArgs(options, outputWidth, outputHeight, targetPage);
 
-        const outputData = moduleInstance.FS.readFile("output.png", { encoding: "binary" });
-        return outputData;
+            try {
+                moduleInstance.callMain(tiffArgs);
+            } catch (error) {
+                if (error?.name !== 'ExitStatus' || error.status !== 0) {
+                    throw error;
+                }
+            }
+
+            const tiffData = moduleInstance.FS.readFile("output.tif", { encoding: "binary" });
+            return { format: 'tiff', data: tiffData };
+        } else {
+            // 기존 PNG 렌더링
+            const ghostscriptArgs = buildGhostscriptArgs(options, outputWidth, outputHeight, targetPage);
+
+            try {
+                moduleInstance.callMain(ghostscriptArgs);
+            } catch (error) {
+                if (error?.name !== 'ExitStatus' || error.status !== 0) {
+                    throw error;
+                }
+            }
+
+            const outputData = moduleInstance.FS.readFile("output.png", { encoding: "binary" });
+            return { format: 'png', data: outputData };
+        }
     } catch (error) {
         console.error('Ghostscript 처리 실패:', error);
         throw error;
     }
+}
+
+function buildTiffCMYKArgs(options, width, height, pageNum = 1) {
+    // tiff32nc 디바이스로 CMYK TIFF 생성
+    const pdfWidth = options.pdfWidth || width;
+    const pdfHeight = options.pdfHeight || height;
+    const dpi = Math.max(1, Math.round((width / pdfWidth) * 72));
+
+    const args = [
+        '-dNOPAUSE',
+        '-dBATCH',
+        '-dSAFER',
+        '-sDEVICE=tiff32nc',  // 32-bit CMYK TIFF
+        `-r${dpi}`,
+        `-dFirstPage=${pageNum}`,
+        `-dLastPage=${pageNum}`,
+        '-sOutputFile=output.tif'
+    ];
+
+    console.log('TIFF CMYK 렌더링 DPI:', dpi, `페이지: ${pageNum}`);
+
+    // 오버프린트 지원
+    if (options.overprint) {
+        args.push('-dOverprint=/enable');
+    }
+
+    args.push('input.pdf');
+    return args;
 }
 
 function buildGhostscriptArgs(options, width, height, pageNum = 1) {
@@ -205,13 +250,8 @@ function buildGhostscriptArgs(options, width, height, pageNum = 1) {
 
     console.log('Ghostscript DPI:', dpi, `페이지: ${pageNum}`, '(PDF:', pdfWidth, 'x', pdfHeight, '→ 출력:', width, 'x', height + ')');
 
-    // CMYK 분판 제어 (실제 Ghostscript 옵션 사용)
-    // 주의: Ghostscript의 CMYK 분판은 복잡하므로 일단 기본 렌더링만 수행
-    // 향후 tiffsep 또는 psdcmyk 디바이스를 사용하여 분판 구현 가능
-
     // 오버프린트 시뮬레이션
     if (options.overprint) {
-        // 실제 Ghostscript 오버프린트 옵션
         args.push('-dOverprint=/enable');
     }
 
@@ -469,16 +509,17 @@ self.addEventListener('message', async function(e) {
         } else if (type === 'process') {
             const { pdfData, options, pageNum } = data;
             const targetPage = pageNum || options?.pageNum || 1;
-            console.log('Worker: PDF 처리 시작', { width: options.width, height: options.height, page: targetPage });
+            console.log('Worker: PDF 처리 시작', { width: options.width, height: options.height, page: targetPage, useCMYK: options.useCMYK });
 
-            const outputData = await processPDF(pdfData, options, targetPage);
-            console.log('Worker: PDF 처리 완료, 출력 크기:', outputData.length);
+            const result = await processPDF(pdfData, options, targetPage);
+            console.log('Worker: PDF 처리 완료, 형식:', result.format, '출력 크기:', result.data.length);
 
             self.postMessage({
                 type: 'result',
                 requestId: requestId,
                 success: true,
-                data: outputData,
+                format: result.format,
+                data: result.data,
                 width: options.width || 800,
                 height: options.height || 600
             });

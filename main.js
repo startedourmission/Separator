@@ -1,4 +1,5 @@
 // WebWorker 기반 Ghostscript 사용
+// UTIF는 HTML에서 전역 스크립트로 로드됨 (window.UTIF)
 
 class PDFSeparationViewer {
     constructor() {
@@ -91,7 +92,7 @@ class PDFSeparationViewer {
 
             // Worker 메시지 핸들러를 한 번만 설정
             this.worker.onmessage = (e) => {
-                const { type, requestId, success, data, width, height, message, pageSize, pageCount, supported, files, devices, rawOutput, fileSize } = e.data;
+                const { type, requestId, success, data, width, height, message, pageSize, pageCount, supported, files, devices, rawOutput, fileSize, format } = e.data;
 
                 if (type === 'init') {
                     const pending = this.pendingRequests.get('init');
@@ -137,12 +138,23 @@ class PDFSeparationViewer {
                     const pending = this.pendingRequests.get(requestId);
                     if (pending) {
                         if (success) {
-                            this.convertPNGToImageData(data, width, height)
-                                .then(imageData => pending.resolve(imageData))
-                                .catch(error => {
-                                    console.error('이미지 변환 실패:', error);
-                                    pending.resolve(this.createDummyImageData(width, height));
-                                });
+                            if (format === 'tiff') {
+                                // TIFF CMYK 데이터 처리
+                                this.convertTIFFToCMYK(data, width, height)
+                                    .then(cmykData => pending.resolve(cmykData))
+                                    .catch(error => {
+                                        console.error('TIFF 변환 실패:', error);
+                                        pending.resolve(this.createDummyImageData(width, height));
+                                    });
+                            } else {
+                                // PNG 데이터 처리 (기존)
+                                this.convertPNGToImageData(data, width, height)
+                                    .then(imageData => pending.resolve(imageData))
+                                    .catch(error => {
+                                        console.error('이미지 변환 실패:', error);
+                                        pending.resolve(this.createDummyImageData(width, height));
+                                    });
+                            }
                         } else {
                             console.error('Worker 처리 오류:', message);
                             pending.resolve(this.createDummyImageData(width, height));
@@ -317,6 +329,59 @@ class PDFSeparationViewer {
         }
     }
     
+    async convertTIFFToCMYK(tiffData, width, height) {
+        return new Promise((resolve, reject) => {
+            try {
+                console.log('TIFF 파싱 시작, 크기:', tiffData.length);
+
+                // UTIF로 TIFF 디코딩
+                const ifds = UTIF.decode(tiffData.buffer);
+                console.log('TIFF IFD 개수:', ifds.length);
+
+                const page = ifds[0];
+                UTIF.decodeImage(tiffData.buffer, page);
+
+                console.log('TIFF 이미지 정보:', {
+                    width: page.width,
+                    height: page.height,
+                    bitsPerSample: page.t258,
+                    samplesPerPixel: page.t277,
+                    photometric: page.t262
+                });
+
+                // page.data는 CMYK 픽셀 배열 (각 픽셀당 4바이트: C, M, Y, K)
+                const cmykPixels = new Uint8Array(page.data);
+
+                // CMYK 채널 분리
+                const pixelCount = page.width * page.height;
+                const cyan = new Uint8Array(pixelCount);
+                const magenta = new Uint8Array(pixelCount);
+                const yellow = new Uint8Array(pixelCount);
+                const black = new Uint8Array(pixelCount);
+
+                for (let i = 0; i < pixelCount; i++) {
+                    cyan[i] = cmykPixels[i * 4 + 0];
+                    magenta[i] = cmykPixels[i * 4 + 1];
+                    yellow[i] = cmykPixels[i * 4 + 2];
+                    black[i] = cmykPixels[i * 4 + 3];
+                }
+
+                console.log('CMYK 채널 분리 완료');
+
+                // CMYK 데이터를 포함한 객체 반환
+                resolve({
+                    type: 'cmyk',
+                    width: page.width,
+                    height: page.height,
+                    channels: { cyan, magenta, yellow, black }
+                });
+            } catch (error) {
+                console.error('TIFF 파싱 실패:', error);
+                reject(error);
+            }
+        });
+    }
+
     async convertPNGToImageData(pngData, width, height) {
         return new Promise((resolve, reject) => {
             const blob = new Blob([pngData], { type: 'image/png' });
@@ -517,10 +582,9 @@ class PDFSeparationViewer {
             renderOptions.pdfWidth = pageSize?.width || renderWidth;
             renderOptions.pdfHeight = pageSize?.height || renderHeight;
             renderOptions.pageNum = this.currentPage;
+            renderOptions.useCMYK = true;  // CMYK TIFF 모드 사용
 
-            // 디버그 로그 제거 (필요시 주석 해제)
-            // console.log('PDF 렌더링:', renderWidth, 'x', renderHeight);
-            // console.log('100% 표시 크기:', baseWidth, 'x', baseHeight);
+            console.log('PDF 렌더링 (CMYK 모드):', renderWidth, 'x', renderHeight);
 
             const imageData = await this.ghostscript.renderPage(this.currentPage, renderOptions);
 
@@ -547,27 +611,28 @@ class PDFSeparationViewer {
         const scaledWidth = Math.floor(this.baseWidth * this.zoomLevel);
         const scaledHeight = Math.floor(this.baseHeight * this.zoomLevel);
 
-        // 캔버스 크기를 줌 적용된 이미지 크기로 설정 (스크롤 가능하게)
+        // 캔버스 크기 설정
         this.canvas.width = scaledWidth;
         this.canvas.height = scaledHeight;
 
-        // 이미지 스케일링하여 그리기
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = this.baseImageData.width;
-        tempCanvas.height = this.baseImageData.height;
-        const tempCtx = tempCanvas.getContext('2d');
-        tempCtx.putImageData(this.baseImageData, 0, 0);
+        // CMYK 데이터인 경우
+        if (this.baseImageData.type === 'cmyk') {
+            this.renderCMYKWithSeparation(this.baseImageData, scaledWidth, scaledHeight);
+        } else {
+            // 기존 RGB ImageData 처리
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = this.baseImageData.width;
+            tempCanvas.height = this.baseImageData.height;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.putImageData(this.baseImageData, 0, 0);
 
-        // 스케일링된 크기로 그리기 (캔버스 전체에)
-        this.ctx.imageSmoothingEnabled = true;
-        this.ctx.imageSmoothingQuality = 'high';
-        this.ctx.drawImage(tempCanvas, 0, 0, scaledWidth, scaledHeight);
+            this.ctx.imageSmoothingEnabled = true;
+            this.ctx.imageSmoothingQuality = 'high';
+            this.ctx.drawImage(tempCanvas, 0, 0, scaledWidth, scaledHeight);
 
-        // 전체 캔버스의 이미지 데이터 추출 (분판 필터용)
-        this.originalImageData = this.ctx.getImageData(0, 0, scaledWidth, scaledHeight);
-
-        // 분판 필터 적용
-        this.applyColorSeparation(this.originalImageData);
+            this.originalImageData = this.ctx.getImageData(0, 0, scaledWidth, scaledHeight);
+            this.applyColorSeparation(this.originalImageData);
+        }
     }
 
     goToPreviousPage() {
@@ -622,6 +687,62 @@ class PDFSeparationViewer {
     displayImageData(imageData) {
         // 이 함수는 applyZoomAndSeparation에서 처리됨
         // 호환성을 위해 유지
+    }
+
+    renderCMYKWithSeparation(cmykData, targetWidth, targetHeight) {
+        const { width, height, channels } = cmykData;
+        const { cyan, magenta, yellow, black } = channels;
+
+        // 현재 선택된 분판 옵션 가져오기
+        const renderOptions = this.buildRenderOptions();
+        const separations = renderOptions.separations || [];
+
+        console.log('CMYK 분판 렌더링:', separations);
+
+        // RGB 이미지로 변환 (선택된 채널만 사용)
+        const pixelCount = width * height;
+        const rgbData = new Uint8ClampedArray(pixelCount * 4);
+
+        for (let i = 0; i < pixelCount; i++) {
+            // CMYK 값 (0-255, 255 = 100% 잉크)
+            const c = separations.includes('cyan') ? cyan[i] : 0;
+            const m = separations.includes('magenta') ? magenta[i] : 0;
+            const y = separations.includes('yellow') ? yellow[i] : 0;
+            const k = separations.includes('black') ? black[i] : 0;
+
+            // CMYK → RGB 변환
+            // CMYK는 0-255 범위이고, 255 = 100% 잉크
+            // RGB로 변환 시: R = 255 * (1 - C/255) * (1 - K/255)
+            const cNorm = c / 255;
+            const mNorm = m / 255;
+            const yNorm = y / 255;
+            const kNorm = k / 255;
+
+            rgbData[i * 4 + 0] = Math.round(255 * (1 - cNorm) * (1 - kNorm)); // R
+            rgbData[i * 4 + 1] = Math.round(255 * (1 - mNorm) * (1 - kNorm)); // G
+            rgbData[i * 4 + 2] = Math.round(255 * (1 - yNorm) * (1 - kNorm)); // B
+            rgbData[i * 4 + 3] = 255; // Alpha
+        }
+
+        // ImageData 생성
+        const imageData = new ImageData(rgbData, width, height);
+
+        // 임시 캔버스에 그리기
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = width;
+        tempCanvas.height = height;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.putImageData(imageData, 0, 0);
+
+        // 스케일링하여 메인 캔버스에 그리기
+        this.ctx.imageSmoothingEnabled = true;
+        this.ctx.imageSmoothingQuality = 'high';
+        this.ctx.fillStyle = 'white';
+        this.ctx.fillRect(0, 0, targetWidth, targetHeight);
+        this.ctx.drawImage(tempCanvas, 0, 0, targetWidth, targetHeight);
+
+        // 원본 CMYK 데이터 저장 (TAC 계산용)
+        this.originalCMYKData = cmykData;
     }
 
     applyColorSeparation(imageData) {
@@ -721,52 +842,87 @@ class PDFSeparationViewer {
     }
     
     async updateSeparation() {
-        if (this.currentPDF && this.originalImageData) {
-            // 원본 이미지에 필터만 다시 적용 (재렌더링하지 않음)
-            this.applyColorSeparation(this.originalImageData);
+        if (this.currentPDF && this.baseImageData) {
+            // CMYK 데이터인 경우
+            if (this.baseImageData.type === 'cmyk') {
+                const scaledWidth = Math.floor(this.baseWidth * this.zoomLevel);
+                const scaledHeight = Math.floor(this.baseHeight * this.zoomLevel);
+                this.renderCMYKWithSeparation(this.baseImageData, scaledWidth, scaledHeight);
+            } else if (this.originalImageData) {
+                // 기존 RGB 데이터 처리
+                this.applyColorSeparation(this.originalImageData);
+            }
         }
     }
     
     async handleMouseMove(event) {
-        if (!this.currentPDF || !this.originalImageData) return;
+        if (!this.currentPDF) return;
 
         const rect = this.canvas.getBoundingClientRect();
         const x = event.clientX - rect.left;
         const y = event.clientY - rect.top;
 
-        // 캔버스 좌표를 실제 PDF 좌표로 변환
-        const canvasX = Math.floor((x / rect.width) * this.canvas.width);
-        const canvasY = Math.floor((y / rect.height) * this.canvas.height);
+        // 화면 좌표를 원본 이미지 좌표로 변환
+        const scaledWidth = Math.floor(this.baseWidth * this.zoomLevel);
+        const scaledHeight = Math.floor(this.baseHeight * this.zoomLevel);
 
-        // 캔버스 범위 체크
-        if (canvasX < 0 || canvasX >= this.canvas.width || canvasY < 0 || canvasY >= this.canvas.height) {
+        const xRatio = x / rect.width;
+        const yRatio = y / rect.height;
+
+        const canvasX = Math.floor(xRatio * scaledWidth);
+        const canvasY = Math.floor(yRatio * scaledHeight);
+
+        // 범위 체크
+        if (canvasX < 0 || canvasX >= scaledWidth || canvasY < 0 || canvasY >= scaledHeight) {
             return;
         }
 
         this.cursorCoordsElement.textContent = `${canvasX}, ${canvasY}`;
 
         try {
-            // 원본 이미지에서 픽셀 색상 가져오기
-            const pixelIndex = (canvasY * this.originalImageData.width + canvasX) * 4;
-            const r = this.originalImageData.data[pixelIndex];
-            const g = this.originalImageData.data[pixelIndex + 1];
-            const b = this.originalImageData.data[pixelIndex + 2];
+            let inkValues;
 
-            // RGB를 CMYK로 변환
-            const k = 1 - Math.max(r, g, b) / 255;
-            const c = k >= 1 ? 0 : (1 - r / 255 - k) / (1 - k);
-            const m = k >= 1 ? 0 : (1 - g / 255 - k) / (1 - k);
-            const y = k >= 1 ? 0 : (1 - b / 255 - k) / (1 - k);
+            // CMYK 데이터가 있으면 직접 사용
+            if (this.originalCMYKData) {
+                const { width, height, channels } = this.originalCMYKData;
 
-            const inkValues = {
-                cyan: c * 100,
-                magenta: m * 100,
-                yellow: y * 100,
-                black: k * 100
-            };
+                // 스케일 역보정 (화면 좌표 → 원본 TIFF 좌표)
+                const origX = Math.floor((canvasX / scaledWidth) * width);
+                const origY = Math.floor((canvasY / scaledHeight) * height);
+                const pixelIndex = origY * width + origX;
 
-            const tac = this.calculateTAC(inkValues);
-            this.tacValueElement.textContent = tac.toFixed(1);
+                if (pixelIndex >= 0 && pixelIndex < width * height) {
+                    inkValues = {
+                        cyan: (channels.cyan[pixelIndex] / 255) * 100,
+                        magenta: (channels.magenta[pixelIndex] / 255) * 100,
+                        yellow: (channels.yellow[pixelIndex] / 255) * 100,
+                        black: (channels.black[pixelIndex] / 255) * 100
+                    };
+                }
+            } else if (this.originalImageData) {
+                // 기존 RGB → CMYK 변환 방식
+                const pixelIndex = (canvasY * this.originalImageData.width + canvasX) * 4;
+                const r = this.originalImageData.data[pixelIndex];
+                const g = this.originalImageData.data[pixelIndex + 1];
+                const b = this.originalImageData.data[pixelIndex + 2];
+
+                const k = 1 - Math.max(r, g, b) / 255;
+                const c = k >= 1 ? 0 : (1 - r / 255 - k) / (1 - k);
+                const m = k >= 1 ? 0 : (1 - g / 255 - k) / (1 - k);
+                const y = k >= 1 ? 0 : (1 - b / 255 - k) / (1 - k);
+
+                inkValues = {
+                    cyan: c * 100,
+                    magenta: m * 100,
+                    yellow: y * 100,
+                    black: k * 100
+                };
+            }
+
+            if (inkValues) {
+                const tac = this.calculateTAC(inkValues);
+                this.tacValueElement.textContent = tac.toFixed(1);
+            }
         } catch (error) {
             console.error('잉크값 조회 실패:', error);
         }
