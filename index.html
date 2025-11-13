@@ -21,22 +21,30 @@
             <div class="separation-controls">
                 <h3>CMYK 분판 제어</h3>
                 <div class="cmyk-controls">
-                    <label>
+                    <div class="control-row">
+                        <input type="checkbox" id="select-all" checked>
+                        <label for="select-all" class="select-all-label">전체 선택</label>
+                    </div>
+                    <div class="control-row">
                         <input type="checkbox" id="cyan" checked>
-                        <span class="color-label cyan">C (Cyan)</span>
-                    </label>
-                    <label>
+                        <label for="cyan" class="color-label cyan">C (Cyan)</label>
+                        <span class="channel-ratio" id="cyan-ratio">-</span>
+                    </div>
+                    <div class="control-row">
                         <input type="checkbox" id="magenta" checked>
-                        <span class="color-label magenta">M (Magenta)</span>
-                    </label>
-                    <label>
+                        <label for="magenta" class="color-label magenta">M (Magenta)</label>
+                        <span class="channel-ratio" id="magenta-ratio">-</span>
+                    </div>
+                    <div class="control-row">
                         <input type="checkbox" id="yellow" checked>
-                        <span class="color-label yellow">Y (Yellow)</span>
-                    </label>
-                    <label>
+                        <label for="yellow" class="color-label yellow">Y (Yellow)</label>
+                        <span class="channel-ratio" id="yellow-ratio">-</span>
+                    </div>
+                    <div class="control-row">
                         <input type="checkbox" id="black" checked>
-                        <span class="color-label black">K (Black)</span>
-                    </label>
+                        <label for="black" class="color-label black">K (Black)</label>
+                        <span class="channel-ratio" id="black-ratio">-</span>
+                    </div>
                 </div>
             </div>
 
@@ -69,6 +77,15 @@
 
         <div class="canvas-container">
             <canvas id="pdf-canvas"></canvas>
+        </div>
+    </div>
+
+    <!-- 페이지 목록 모달 -->
+    <div id="page-list-modal" class="modal hidden">
+        <div class="modal-content">
+            <h4><span id="modal-channel-name">Cyan</span>을 사용하는 페이지</h4>
+            <div id="page-list"></div>
+            <button id="close-modal">닫기</button>
         </div>
     </div>
 

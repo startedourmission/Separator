@@ -13,6 +13,18 @@ class PDFSeparationViewer {
         this.totalPages = 1;
         this.zoomLevel = 1.0;
 
+        // 전체 페이지 CMYK 채널 누적 데이터
+        this.totalChannelCounts = {
+            cyan: 0,
+            magenta: 0,
+            yellow: 0,
+            black: 0
+        };
+        this.totalPixelCount = 0;
+
+        // 페이지별 CMYK 채널 사용량 저장
+        this.pageChannelData = {};
+
         this.initializeElements();
         this.bindEvents();
         this.initializeCanvas();
@@ -37,11 +49,18 @@ class PDFSeparationViewer {
     
     initializeElements() {
         this.fileInput = document.getElementById('pdf-file');
+        this.selectAllCheckbox = document.getElementById('select-all');
         this.cmykCheckboxes = {
             cyan: document.getElementById('cyan'),
             magenta: document.getElementById('magenta'),
             yellow: document.getElementById('yellow'),
             black: document.getElementById('black')
+        };
+        this.channelRatioElements = {
+            cyan: document.getElementById('cyan-ratio'),
+            magenta: document.getElementById('magenta-ratio'),
+            yellow: document.getElementById('yellow-ratio'),
+            black: document.getElementById('black-ratio')
         };
         this.tacValueElement = document.getElementById('tac-value');
         this.cursorCoordsElement = document.getElementById('cursor-coords');
@@ -58,8 +77,23 @@ class PDFSeparationViewer {
     bindEvents() {
         this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
 
+        // 전체 선택 체크박스
+        this.selectAllCheckbox.addEventListener('change', () => {
+            const isChecked = this.selectAllCheckbox.checked;
+            Object.values(this.cmykCheckboxes).forEach(checkbox => {
+                checkbox.checked = isChecked;
+            });
+            this.updateSeparation();
+        });
+
+        // 개별 CMYK 체크박스
         Object.values(this.cmykCheckboxes).forEach(checkbox => {
-            checkbox.addEventListener('change', () => this.updateSeparation());
+            checkbox.addEventListener('change', () => {
+                this.updateSeparation();
+                // 전체 선택 체크박스 상태 업데이트
+                const allChecked = Object.values(this.cmykCheckboxes).every(cb => cb.checked);
+                this.selectAllCheckbox.checked = allChecked;
+            });
         });
 
         this.canvas.addEventListener('mousemove', (e) => this.handleMouseMove(e));
@@ -92,6 +126,40 @@ class PDFSeparationViewer {
                 e.target.blur(); // Enter 후 포커스 해제
             }
         });
+
+        // 채널 비율 클릭 이벤트 (이벤트 전파 차단하여 체크박스 해제 방지)
+        this.channelRatioElements.cyan.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.showChannelPageList('cyan');
+        });
+        this.channelRatioElements.magenta.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.showChannelPageList('magenta');
+        });
+        this.channelRatioElements.yellow.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.showChannelPageList('yellow');
+        });
+        this.channelRatioElements.black.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.showChannelPageList('black');
+        });
+
+        // 모달 닫기 버튼
+        const closeModalBtn = document.getElementById('close-modal');
+        if (closeModalBtn) {
+            closeModalBtn.addEventListener('click', () => this.closeChannelPageList());
+        }
+
+        // 모달 배경 클릭 시 닫기
+        const modal = document.getElementById('page-list-modal');
+        if (modal) {
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) {
+                    this.closeChannelPageList();
+                }
+            });
+        }
     }
     
     async loadGhostscript() {
@@ -504,7 +572,16 @@ class PDFSeparationViewer {
                 this.currentPage = 1;
                 console.log('PDF 총 페이지:', this.totalPages);
 
+                // 전체 페이지 CMYK 데이터 수집 초기화
+                this.totalChannelCounts = { cyan: 0, magenta: 0, yellow: 0, black: 0 };
+                this.totalPixelCount = 0;
+
                 await this.loadSpotColors();
+
+                // 백그라운드에서 모든 페이지 스캔 (비동기)
+                this.scanAllPagesInBackground();
+
+                // 첫 페이지는 즉시 렌더링
                 await this.renderCurrentPage();
                 console.log('PDF 로딩 성공');
             } else {
@@ -515,7 +592,47 @@ class PDFSeparationViewer {
             this.showError('PDF를 로딩할 수 없습니다.');
         }
     }
+
+    async scanAllPagesInBackground() {
+        console.log(`전체 ${this.totalPages} 페이지 CMYK 스캔 시작 (백그라운드)...`);
+
+        for (let pageNum = 1; pageNum <= this.totalPages; pageNum++) {
+            try {
+                // 매우 낮은 해상도로 빠른 스캔 (비율 계산용)
+                const scanWidth = 200;  // 작은 크기로 빠르게
+                const scanHeight = 280; // A4 비율 대략
+
+                const renderOptions = {
+                    width: scanWidth,
+                    height: scanHeight,
+                    pdfWidth: scanWidth,
+                    pdfHeight: scanHeight,
+                    pageNum: pageNum,
+                    useCMYK: true,
+                    separations: []
+                };
+
+                const imageData = await this.ghostscript.renderPage(pageNum, renderOptions);
+
+                // CMYK 데이터 누적 (페이지 번호 전달)
+                if (imageData && imageData.type === 'cmyk') {
+                    this.accumulateChannelData(imageData, pageNum);
+
+                    // 매 페이지마다 UI 업데이트
+                    const ratios = this.calculateTotalChannelRatios();
+                    this.updateChannelRatios(ratios);
+                }
+
+                console.log(`페이지 ${pageNum}/${this.totalPages} 스캔 완료`);
+            } catch (error) {
+                console.error(`페이지 ${pageNum} 스캔 실패:`, error);
+            }
+        }
+
+        console.log('전체 페이지 CMYK 스캔 완료');
+    }
     
+
     async loadSpotColors() {
         try {
             this.spotColors = await this.ghostscript.getSpotColors();
@@ -810,6 +927,100 @@ class PDFSeparationViewer {
         this.ctx.putImageData(filteredData, 0, 0);
     }
     
+    accumulateChannelData(cmykData, pageNum) {
+        // 페이지별 CMYK 데이터를 누적
+        if (!cmykData || cmykData.type !== 'cmyk') {
+            return;
+        }
+
+        const { width, height, channels } = cmykData;
+        const { cyan, magenta, yellow, black } = channels;
+        const totalPixels = width * height;
+
+        // 페이지별 카운트 초기화
+        if (!this.pageChannelData[pageNum]) {
+            this.pageChannelData[pageNum] = {
+                cyan: 0,
+                magenta: 0,
+                yellow: 0,
+                black: 0,
+                totalPixels: totalPixels
+            };
+        }
+
+        // 각 채널에서 잉크가 있는 픽셀 수 카운트 (0이 아닌 값)
+        for (let i = 0; i < totalPixels; i++) {
+            if (cyan[i] > 0) {
+                this.totalChannelCounts.cyan++;
+                this.pageChannelData[pageNum].cyan++;
+            }
+            if (magenta[i] > 0) {
+                this.totalChannelCounts.magenta++;
+                this.pageChannelData[pageNum].magenta++;
+            }
+            if (yellow[i] > 0) {
+                this.totalChannelCounts.yellow++;
+                this.pageChannelData[pageNum].yellow++;
+            }
+            if (black[i] > 0) {
+                this.totalChannelCounts.black++;
+                this.pageChannelData[pageNum].black++;
+            }
+        }
+
+        this.totalPixelCount += totalPixels;
+    }
+
+    calculateTotalChannelRatios() {
+        // 전체 페이지의 누적된 데이터로부터 비율 계산
+        if (this.totalPixelCount === 0) {
+            return null;
+        }
+
+        return {
+            cyan: (this.totalChannelCounts.cyan / this.totalPixelCount) * 100,
+            magenta: (this.totalChannelCounts.magenta / this.totalPixelCount) * 100,
+            yellow: (this.totalChannelCounts.yellow / this.totalPixelCount) * 100,
+            black: (this.totalChannelCounts.black / this.totalPixelCount) * 100
+        };
+    }
+
+    updateChannelRatios(ratios) {
+        if (!ratios) {
+            // 비율 정보가 없으면 '-' 표시
+            Object.values(this.channelRatioElements).forEach(el => {
+                el.textContent = '-';
+            });
+            // progress bar 초기화
+            Object.keys(this.channelRatioElements).forEach(channel => {
+                const label = document.querySelector(`.color-label.${channel}`);
+                if (label) {
+                    label.style.backgroundSize = '0% 100%';
+                }
+            });
+            return;
+        }
+
+        // 각 채널의 비율을 소수점 1자리까지 표시
+        this.channelRatioElements.cyan.textContent = `${ratios.cyan.toFixed(1)}%`;
+        this.channelRatioElements.magenta.textContent = `${ratios.magenta.toFixed(1)}%`;
+        this.channelRatioElements.yellow.textContent = `${ratios.yellow.toFixed(1)}%`;
+        this.channelRatioElements.black.textContent = `${ratios.black.toFixed(1)}%`;
+
+        // progress bar 업데이트 (각 채널의 비율만큼 배경 표시)
+        const updateProgress = (channel, ratio) => {
+            const label = document.querySelector(`.color-label.${channel}`);
+            if (label) {
+                label.style.backgroundSize = `${ratio}% 100%`;
+            }
+        };
+
+        updateProgress('cyan', ratios.cyan);
+        updateProgress('magenta', ratios.magenta);
+        updateProgress('yellow', ratios.yellow);
+        updateProgress('black', ratios.black);
+    }
+
     createDummyImageData(width = 800, height = 600) {
         // 개발/테스트 목적의 더미 이미지 데이터 생성
         console.log(`더미 이미지 생성: ${width}x${height}`);
@@ -954,6 +1165,63 @@ class PDFSeparationViewer {
         this.tacValueElement.textContent = '-';
     }
     
+    showChannelPageList(channel) {
+        // 해당 채널을 사용하는 페이지 목록 표시
+        const channelNames = {
+            cyan: 'Cyan (C)',
+            magenta: 'Magenta (M)',
+            yellow: 'Yellow (Y)',
+            black: 'Black (K)'
+        };
+
+        // 페이지별 사용량 수집 및 정렬
+        const pageList = [];
+        for (const pageNum in this.pageChannelData) {
+            const pageData = this.pageChannelData[pageNum];
+            const usage = pageData[channel];
+            if (usage > 0) {
+                const ratio = (usage / pageData.totalPixels) * 100;
+                pageList.push({ pageNum: parseInt(pageNum), usage, ratio });
+            }
+        }
+
+        // 사용량 많은 순으로 정렬
+        pageList.sort((a, b) => b.usage - a.usage);
+
+        // 모달에 표시
+        const modal = document.getElementById('page-list-modal');
+        const channelNameEl = document.getElementById('modal-channel-name');
+        const pageListEl = document.getElementById('page-list');
+
+        channelNameEl.textContent = channelNames[channel];
+
+        if (pageList.length === 0) {
+            pageListEl.innerHTML = '<p class="no-pages">이 채널을 사용하는 페이지가 없습니다.</p>';
+        } else {
+            pageListEl.innerHTML = pageList.map(item =>
+                `<div class="page-item" data-page="${item.pageNum}">
+                    페이지 ${item.pageNum} <span class="page-ratio">(${item.ratio.toFixed(1)}%)</span>
+                </div>`
+            ).join('');
+
+            // 페이지 아이템 클릭 이벤트
+            pageListEl.querySelectorAll('.page-item').forEach(el => {
+                el.addEventListener('click', () => {
+                    const pageNum = parseInt(el.dataset.page);
+                    this.goToPage(pageNum);
+                    this.closeChannelPageList();
+                });
+            });
+        }
+
+        modal.classList.remove('hidden');
+    }
+
+    closeChannelPageList() {
+        const modal = document.getElementById('page-list-modal');
+        modal.classList.add('hidden');
+    }
+
     showError(message) {
         // 간단한 오류 표시 (실제 구현에서는 더 정교한 UI 사용)
         alert(message);
