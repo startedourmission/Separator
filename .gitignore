@@ -28,3 +28,6 @@ npm-debug.log*
 *.temp
 .cache/
 _*.pdf
+
+# docs
+_docs/

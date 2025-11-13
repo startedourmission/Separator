@@ -91,7 +91,7 @@ class PDFSeparationViewer {
 
             // Worker 메시지 핸들러를 한 번만 설정
             this.worker.onmessage = (e) => {
-                const { type, requestId, success, data, width, height, message, pageSize, pageCount } = e.data;
+                const { type, requestId, success, data, width, height, message, pageSize, pageCount, supported, files, devices, rawOutput, fileSize } = e.data;
 
                 if (type === 'init') {
                     const pending = this.pendingRequests.get('init');
@@ -102,6 +102,24 @@ class PDFSeparationViewer {
                             pending.reject(new Error(message || 'Worker 초기화 실패'));
                         }
                         this.pendingRequests.delete('init');
+                    }
+                } else if (type === 'testTiffsep') {
+                    const pending = this.pendingRequests.get(requestId);
+                    if (pending) {
+                        pending.resolve({ supported, files, message });
+                        this.pendingRequests.delete(requestId);
+                    }
+                } else if (type === 'listDevices') {
+                    const pending = this.pendingRequests.get(requestId);
+                    if (pending) {
+                        pending.resolve({ devices, rawOutput });
+                        this.pendingRequests.delete(requestId);
+                    }
+                } else if (type === 'testDevice') {
+                    const pending = this.pendingRequests.get(requestId);
+                    if (pending) {
+                        pending.resolve({ supported, files, message, fileSize });
+                        this.pendingRequests.delete(requestId);
                     }
                 } else if (type === 'pageCount') {
                     const pending = this.pendingRequests.get(requestId);
@@ -237,6 +255,58 @@ class PDFSeparationViewer {
                         yellow: Math.random() * 100,
                         black: Math.random() * 100
                     };
+                },
+
+                testTiffsep: async () => {
+                    if (!this.currentPDFData) {
+                        throw new Error('PDF를 먼저 로딩해주세요');
+                    }
+
+                    return new Promise((resolve, reject) => {
+                        const reqId = ++this.requestId;
+                        this.pendingRequests.set(reqId, { resolve, reject });
+
+                        this.worker.postMessage({
+                            type: 'testTiffsep',
+                            requestId: reqId,
+                            data: {
+                                pdfData: this.currentPDFData
+                            }
+                        });
+                    });
+                },
+
+                listDevices: async () => {
+                    return new Promise((resolve, reject) => {
+                        const reqId = ++this.requestId;
+                        this.pendingRequests.set(reqId, { resolve, reject });
+
+                        this.worker.postMessage({
+                            type: 'listDevices',
+                            requestId: reqId
+                        });
+                    });
+                },
+
+                testDevice: async (device, outputFile) => {
+                    if (!this.currentPDFData) {
+                        throw new Error('PDF를 먼저 로딩해주세요');
+                    }
+
+                    return new Promise((resolve, reject) => {
+                        const reqId = ++this.requestId;
+                        this.pendingRequests.set(reqId, { resolve, reject });
+
+                        this.worker.postMessage({
+                            type: 'testDevice',
+                            requestId: reqId,
+                            data: {
+                                pdfData: this.currentPDFData,
+                                device: device,
+                                outputFile: outputFile
+                            }
+                        });
+                    });
                 }
             };
 
@@ -716,9 +786,82 @@ class PDFSeparationViewer {
         alert(message);
         console.error(message);
     }
+
+    // 전역 접근용 tiffsep 테스트 메서드
+    async testTiffsep() {
+        try {
+            console.log('🧪 tiffsep 지원 테스트 시작...');
+            const result = await this.ghostscript.testTiffsep();
+
+            if (result.supported) {
+                console.log('✅ tiffsep 지원됨!');
+                console.log('생성된 파일:', result.files);
+                return { supported: true, files: result.files };
+            } else {
+                console.log('❌ tiffsep 미지원');
+                console.log('메시지:', result.message);
+                return { supported: false, message: result.message };
+            }
+        } catch (error) {
+            console.error('❌ 테스트 실패:', error);
+            return { supported: false, error: error.message };
+        }
+    }
+
+    // 사용 가능한 디바이스 목록 조회
+    async listDevices() {
+        try {
+            console.log('📋 Ghostscript 디바이스 목록 조회 중...');
+            const result = await this.ghostscript.listDevices();
+
+            console.log('사용 가능한 디바이스:', result.devices);
+
+            // CMYK 관련 디바이스 필터링
+            const cmykDevices = result.devices.filter(d =>
+                d.toLowerCase().includes('cmyk') ||
+                d.toLowerCase().includes('tiff') ||
+                d.toLowerCase().includes('psd') ||
+                d.toLowerCase().includes('sep')
+            );
+
+            if (cmykDevices.length > 0) {
+                console.log('🎨 CMYK/분판 관련 디바이스:', cmykDevices);
+            }
+
+            return result;
+        } catch (error) {
+            console.error('❌ 디바이스 목록 조회 실패:', error);
+            return { devices: [], error: error.message };
+        }
+    }
+
+    // 특정 디바이스 테스트
+    async testDevice(device, outputFile) {
+        try {
+            console.log(`🧪 ${device} 디바이스 테스트 중...`);
+            const result = await this.ghostscript.testDevice(device, outputFile);
+
+            if (result.supported) {
+                console.log(`✅ ${device} 성공!`);
+                console.log('생성된 파일:', result.files);
+                console.log('파일 크기:', result.fileSize, 'bytes');
+                return { supported: true, files: result.files, fileSize: result.fileSize };
+            } else {
+                console.log(`❌ ${device} 실패`);
+                console.log('메시지:', result.message);
+                return { supported: false, message: result.message };
+            }
+        } catch (error) {
+            console.error(`❌ ${device} 테스트 실패:`, error);
+            return { supported: false, error: error.message };
+        }
+    }
 }
 
 // 페이지 로딩 완료 시 애플리케이션 초기화
+let viewer;
 document.addEventListener('DOMContentLoaded', () => {
-    new PDFSeparationViewer();
+    viewer = new PDFSeparationViewer();
+    // 콘솔에서 viewer.testTiffsep() 호출 가능하도록 전역 변수로 노출
+    window.viewer = viewer;
 });

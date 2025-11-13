@@ -227,6 +227,219 @@ self.addEventListener('message', async function(e) {
         if (type === 'init') {
             await initGhostscript();
             self.postMessage({ type: 'init', success: true });
+        } else if (type === 'testTiffsep') {
+            console.log('=== tiffsep 지원 테스트 시작 ===');
+
+            try {
+                const { pdfData } = data;
+                const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
+
+                // PDF 파일 작성
+                moduleInstance.FS.writeFile("input.pdf", new Uint8Array(pdfData));
+
+                // tiffsep 디바이스로 렌더링 시도
+                // 주의: tiffsep은 %s를 색상명으로 치환 (Cyan, Magenta, Yellow, Black)
+                const args = [
+                    '-dNOPAUSE',
+                    '-dBATCH',
+                    '-dSAFER',
+                    '-sDEVICE=tiffsep',
+                    '-r72',
+                    '-dFirstPage=1',
+                    '-dLastPage=1',
+                    '-sOutputFile=plate%s.tif',  // %s 앞뒤 공백 제거
+                    'input.pdf'
+                ];
+
+                console.log('tiffsep 명령 실행:', args.join(' '));
+
+                try {
+                    moduleInstance.callMain(args);
+                } catch (error) {
+                    if (error?.name !== 'ExitStatus' || error.status !== 0) {
+                        throw error;
+                    }
+                }
+
+                // 생성된 파일 확인
+                const files = moduleInstance.FS.readdir('/');
+                console.log('생성된 파일 목록:', files);
+
+                const tiffFiles = files.filter(f => f.endsWith('.tif'));
+                console.log('TIFF 파일:', tiffFiles);
+
+                if (tiffFiles.length > 0) {
+                    console.log('✅ tiffsep 지원됨! 생성된 분판 파일:', tiffFiles);
+                    self.postMessage({
+                        type: 'testTiffsep',
+                        requestId: requestId,
+                        success: true,
+                        supported: true,
+                        files: tiffFiles
+                    });
+                } else {
+                    console.log('❌ tiffsep 실행됐지만 파일 생성 실패');
+                    self.postMessage({
+                        type: 'testTiffsep',
+                        requestId: requestId,
+                        success: true,
+                        supported: false,
+                        message: 'TIFF 파일이 생성되지 않음'
+                    });
+                }
+            } catch (error) {
+                console.error('❌ tiffsep 테스트 실패:', error);
+                self.postMessage({
+                    type: 'testTiffsep',
+                    requestId: requestId,
+                    success: false,
+                    supported: false,
+                    message: error.message
+                });
+            }
+        } else if (type === 'listDevices') {
+            console.log('=== Ghostscript 디바이스 목록 조회 ===');
+
+            try {
+                const outputs = [];
+                const captureOutput = (text) => {
+                    if (typeof text === 'string') {
+                        outputs.push(text);
+                    }
+                };
+
+                const restoreConsole = interceptConsole(captureOutput);
+                let moduleInstance;
+
+                try {
+                    moduleInstance = await Module(createModuleConfig({
+                        noExitRuntime: false,
+                        print: captureOutput,
+                        printErr: captureOutput
+                    }));
+
+                    const args = ['-h'];
+                    console.log('명령 실행: gs -h');
+
+                    try {
+                        moduleInstance.callMain(args);
+                    } catch (error) {
+                        // -h는 항상 종료 코드를 반환하므로 무시
+                    }
+                } finally {
+                    restoreConsole();
+                }
+
+                // "Available devices:" 섹션 추출
+                const allOutput = outputs.join('\n');
+                console.log('=== Ghostscript 출력 ===');
+                console.log(allOutput);
+
+                // 디바이스 목록 파싱
+                const deviceSection = allOutput.split('Available devices:')[1];
+                const devices = deviceSection ? deviceSection.split('\n')
+                    .map(line => line.trim())
+                    .filter(line => line.length > 0 && !line.startsWith('Search'))
+                    .flatMap(line => line.split(/\s+/))
+                    .filter(d => d.length > 0)
+                    : [];
+
+                console.log('파싱된 디바이스:', devices);
+
+                self.postMessage({
+                    type: 'listDevices',
+                    requestId: requestId,
+                    success: true,
+                    devices: devices,
+                    rawOutput: allOutput
+                });
+            } catch (error) {
+                console.error('디바이스 목록 조회 실패:', error);
+                self.postMessage({
+                    type: 'listDevices',
+                    requestId: requestId,
+                    success: false,
+                    message: error.message
+                });
+            }
+        } else if (type === 'testDevice') {
+            console.log('=== 디바이스 테스트 시작 ===');
+
+            try {
+                const { pdfData, device, outputFile } = data;
+                const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
+
+                // PDF 파일 작성
+                moduleInstance.FS.writeFile("input.pdf", new Uint8Array(pdfData));
+
+                const args = [
+                    '-dNOPAUSE',
+                    '-dBATCH',
+                    '-dSAFER',
+                    `-sDEVICE=${device}`,
+                    '-r72',
+                    '-dFirstPage=1',
+                    '-dLastPage=1',
+                    `-sOutputFile=${outputFile}`,
+                    'input.pdf'
+                ];
+
+                console.log(`${device} 명령 실행:`, args.join(' '));
+
+                try {
+                    moduleInstance.callMain(args);
+                } catch (error) {
+                    if (error?.name !== 'ExitStatus' || error.status !== 0) {
+                        throw error;
+                    }
+                }
+
+                // 생성된 파일 확인
+                const files = moduleInstance.FS.readdir('/');
+                console.log('생성된 파일 목록:', files);
+
+                const outputFiles = files.filter(f =>
+                    f.endsWith('.tif') ||
+                    f.endsWith('.psd') ||
+                    f.endsWith('.pam') ||
+                    f.endsWith('.bmp')
+                );
+
+                if (outputFiles.length > 0) {
+                    console.log(`✅ ${device} 성공! 생성된 파일:`, outputFiles);
+
+                    // 첫 번째 파일의 크기 확인
+                    const fileData = moduleInstance.FS.readFile(outputFiles[0]);
+                    console.log(`파일 크기: ${fileData.length} bytes`);
+
+                    self.postMessage({
+                        type: 'testDevice',
+                        requestId: requestId,
+                        success: true,
+                        supported: true,
+                        files: outputFiles,
+                        fileSize: fileData.length
+                    });
+                } else {
+                    console.log(`❌ ${device} 파일 생성 실패`);
+                    self.postMessage({
+                        type: 'testDevice',
+                        requestId: requestId,
+                        success: true,
+                        supported: false,
+                        message: '출력 파일이 생성되지 않음'
+                    });
+                }
+            } catch (error) {
+                console.error('❌ 디바이스 테스트 실패:', error);
+                self.postMessage({
+                    type: 'testDevice',
+                    requestId: requestId,
+                    success: false,
+                    supported: false,
+                    message: error.message
+                });
+            }
         } else if (type === 'getPageCount') {
             const { pdfData } = data;
             console.log('Worker: PDF 페이지 수 조회 중...');

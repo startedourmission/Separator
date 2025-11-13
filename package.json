@@ -11,6 +11,7 @@
   "description": "",
   "dependencies": {
     "@jspawn/ghostscript-wasm": "^0.0.2",
-    "playwright": "^1.56.1"
+    "playwright": "^1.56.1",
+    "utif": "^3.1.0"
   }
 }
