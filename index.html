@@ -47,6 +47,12 @@
                     </div>
                 </div>
 
+                <!-- 별색 분판 제어 (Task 2.4) -->
+                <h3>별색 감지 (랜더링과 잉크 비율은 아직 안돼요)</h3>
+                <div id="spot-color-controls" class="spot-controls" style="display: none;">
+                    <!-- 동적으로 생성됨 -->
+                </div>
+
                 <!-- 스캔 진행률 표시 -->
                 <div class="scan-progress-section hidden" id="scan-progress-section">
                     <h4>CMYK 데이터 수집</h4>
@@ -66,6 +72,10 @@
                 <div class="cursor-position">
                     <span>좌표: </span>
                     <span id="cursor-coords">-</span>
+                </div>
+                <!-- Task 5.2: 별색 잉크량 표시 영역 -->
+                <div id="spot-ink-info" class="spot-ink-info">
+                    <!-- 동적으로 생성됨 -->
                 </div>
             </div>
 
@@ -107,6 +117,11 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+        // PDF.js worker 설정
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    </script>
     <script src="main.js" type="module"></script>
 </body>
 </html>

@@ -6,7 +6,7 @@ let gsModule = null;
 function createModuleConfig(overrides = {}) {
     return Object.assign({
         locateFile: (path) => new URL(path, self.location.href).href,
-        print: () => {},
+        print: () => { },
         printErr: (text) => console.warn('GS:', text)
     }, overrides);
 }
@@ -84,10 +84,7 @@ async function getPDFPageSize(pdfData, pageNum = 1) {
         const width = view.getUint32(16);
         const height = view.getUint32(20);
 
-        console.log('72 DPI 렌더링 크기:', width, 'x', height);
-
         const result = { width, height };
-        console.log('최종 페이지 크기:', result);
         return result;
     } catch (error) {
         console.error('PDF 페이지 크기 가져오기 실패:', error);
@@ -148,7 +145,7 @@ async function getPDFPageCount(pdfData) {
             }
         }
 
-        console.log('최종 페이지 수:', pageCount);
+
         return pageCount;
     } catch (error) {
         console.error('PDF 페이지 수 조회 실패:', error);
@@ -218,7 +215,7 @@ function buildTiffCMYKArgs(options, width, height, pageNum = 1) {
         '-sOutputFile=output.tif'
     ];
 
-    console.log('TIFF CMYK 렌더링 DPI:', dpi, `페이지: ${pageNum}`);
+
 
     // 오버프린트 지원
     if (options.overprint) {
@@ -248,7 +245,7 @@ function buildGhostscriptArgs(options, width, height, pageNum = 1) {
         '-sOutputFile=output.png'
     ];
 
-    console.log('Ghostscript DPI:', dpi, `페이지: ${pageNum}`, '(PDF:', pdfWidth, 'x', pdfHeight, '→ 출력:', width, 'x', height + ')');
+
 
     // 오버프린트 시뮬레이션
     if (options.overprint) {
@@ -260,38 +257,37 @@ function buildGhostscriptArgs(options, width, height, pageNum = 1) {
 }
 
 // WebWorker 메시지 처리
-self.addEventListener('message', async function(e) {
+self.addEventListener('message', async function (e) {
     const { type, requestId, data } = e.data;
 
     try {
         if (type === 'init') {
             await initGhostscript();
             self.postMessage({ type: 'init', success: true });
-        } else if (type === 'testTiffsep') {
-            console.log('=== tiffsep 지원 테스트 시작 ===');
+        } else if (type === 'processTiffsep') {
+
 
             try {
-                const { pdfData } = data;
+                const { pdfData, pageNum, dpi } = data;
                 const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
 
                 // PDF 파일 작성
                 moduleInstance.FS.writeFile("input.pdf", new Uint8Array(pdfData));
 
-                // tiffsep 디바이스로 렌더링 시도
-                // 주의: tiffsep은 %s를 색상명으로 치환 (Cyan, Magenta, Yellow, Black)
+                // tiffsep 디바이스로 렌더링 (1비트 분판용)
                 const args = [
                     '-dNOPAUSE',
                     '-dBATCH',
                     '-dSAFER',
                     '-sDEVICE=tiffsep',
-                    '-r72',
-                    '-dFirstPage=1',
-                    '-dLastPage=1',
-                    '-sOutputFile=plate%s.tif',  // %s 앞뒤 공백 제거
+                    `-r${dpi || 72}`,
+                    `-dFirstPage=${pageNum || 1}`,
+                    `-dLastPage=${pageNum || 1}`,
+                    '-sOutputFile=plate%s.tif',
                     'input.pdf'
                 ];
 
-                console.log('tiffsep 명령 실행:', args.join(' '));
+
 
                 try {
                     moduleInstance.callMain(args);
@@ -301,39 +297,71 @@ self.addEventListener('message', async function(e) {
                     }
                 }
 
-                // 생성된 파일 확인
+                // 생성된 파일 목록 조회
                 const files = moduleInstance.FS.readdir('/');
-                console.log('생성된 파일 목록:', files);
+                const plateFiles = files.filter(f => f.startsWith('plate') && f.endsWith('.tif'));
 
-                const tiffFiles = files.filter(f => f.endsWith('.tif'));
-                console.log('TIFF 파일:', tiffFiles);
 
-                if (tiffFiles.length > 0) {
-                    console.log('✅ tiffsep 지원됨! 생성된 분판 파일:', tiffFiles);
-                    self.postMessage({
-                        type: 'testTiffsep',
-                        requestId: requestId,
-                        success: true,
-                        supported: true,
-                        files: tiffFiles
-                    });
-                } else {
-                    console.log('❌ tiffsep 실행됐지만 파일 생성 실패');
-                    self.postMessage({
-                        type: 'testTiffsep',
-                        requestId: requestId,
-                        success: true,
-                        supported: false,
-                        message: 'TIFF 파일이 생성되지 않음'
-                    });
+
+                // 각 파일에서 색상명 추출 및 데이터 읽기
+                const channels = {};
+                const spotColors = [];
+                let width = 0;
+                let height = 0;
+
+                for (const file of plateFiles) {
+                    // 파일명 패턴: plate(ColorName).tif 또는 plateCyan.tif 등
+                    let colorName = null;
+
+                    // 패턴 1: plate(ColorName).tif
+                    let match = file.match(/plate\((.+?)\)\.tif/);
+                    if (match) {
+                        colorName = match[1];
+                    } else {
+                        // 패턴 2: plateCyan.tif, plateMagenta.tif 등
+                        match = file.match(/plate(.+?)\.tif/);
+                        if (match) {
+                            colorName = match[1];
+                        }
+                    }
+
+                    if (colorName) {
+                        const tiffData = moduleInstance.FS.readFile(file, { encoding: "binary" });
+
+                        // 첫 번째 파일에서 이미지 크기 추출 (헤더 파싱 없이 파일 크기만 체크하거나, 나중에 메인 스레드에서 파싱)
+                        // 여기서는 메인 스레드에서 파싱하도록 원본 데이터 전송
+
+                        channels[colorName] = tiffData;
+
+                        // CMYK가 아닌 색상은 별색으로 분류
+                        const normalizedColorName = colorName.toLowerCase();
+                        if (!['cyan', 'magenta', 'yellow', 'black'].includes(normalizedColorName)) {
+                            spotColors.push(colorName);
+                        }
+                    }
                 }
-            } catch (error) {
-                console.error('❌ tiffsep 테스트 실패:', error);
+
+                // 정리 (파일 삭제)
+                try {
+                    moduleInstance.FS.unlink("input.pdf");
+                    plateFiles.forEach(f => moduleInstance.FS.unlink(f));
+                } catch (e) {
+                    console.warn('파일 정리 중 오류:', e);
+                }
+
                 self.postMessage({
-                    type: 'testTiffsep',
+                    type: 'tiffsepResult',
+                    requestId: requestId,
+                    success: true,
+                    channels: channels,
+                    spotColors: spotColors
+                });
+            } catch (error) {
+                console.error('❌ tiffsep 처리 실패:', error);
+                self.postMessage({
+                    type: 'tiffsepResult',
                     requestId: requestId,
                     success: false,
-                    supported: false,
                     message: error.message
                 });
             }
@@ -482,10 +510,7 @@ self.addEventListener('message', async function(e) {
             }
         } else if (type === 'getPageCount') {
             const { pdfData } = data;
-            console.log('Worker: PDF 페이지 수 조회 중...');
-
             const pageCount = await getPDFPageCount(pdfData);
-            console.log('Worker: PDF 페이지 수:', pageCount);
 
             self.postMessage({
                 type: 'pageCount',
@@ -495,10 +520,7 @@ self.addEventListener('message', async function(e) {
             });
         } else if (type === 'getPageSize') {
             const { pdfData, pageNum } = data;
-            console.log('Worker: PDF 페이지 크기 조회 중...');
-
             const pageSize = await getPDFPageSize(pdfData, pageNum);
-            console.log('Worker: PDF 페이지 크기:', pageSize);
 
             self.postMessage({
                 type: 'pageSize',
@@ -509,10 +531,7 @@ self.addEventListener('message', async function(e) {
         } else if (type === 'process') {
             const { pdfData, options, pageNum } = data;
             const targetPage = pageNum || options?.pageNum || 1;
-            console.log('Worker: PDF 처리 시작', { width: options.width, height: options.height, page: targetPage, useCMYK: options.useCMYK });
-
             const result = await processPDF(pdfData, options, targetPage);
-            console.log('Worker: PDF 처리 완료, 형식:', result.format, '출력 크기:', result.data.length);
 
             self.postMessage({
                 type: 'result',

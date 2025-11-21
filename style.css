@@ -214,17 +214,23 @@ h4 {
     text-align: center;
 }
 
-#spot-controls {
+/* 별색 분판 제어 스타일 (Task 8.3) */
+.spot-controls {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.spot-controls:empty {
+    display: none;
 }
 
 .spot-color-control {
     display: flex;
     align-items: center;
-    cursor: pointer;
-    padding: 6px;
+    gap: 10px;
+    padding: 5px;
     border-radius: 4px;
     transition: background-color 0.2s;
 }
@@ -234,7 +240,71 @@ h4 {
 }
 
 .spot-color-control input[type="checkbox"] {
-    margin-right: 8px;
+    transform: scale(1.0);
+    cursor: pointer;
+}
+
+.spot-color-control label {
+    cursor: pointer;
+}
+
+/* 별색 레이블 스타일 (CMYK와 일관된 디자인) */
+.color-label.spot-color {
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    position: relative;
+    background-repeat: no-repeat;
+    background-position: left center;
+    background-size: var(--progress, 0%) 100%;
+    transition: background-size 0.3s ease;
+    background-color: rgba(128, 128, 128, 0.1);
+}
+
+/* 별색 비율 표시 */
+.spot-color-ratio {
+    font-size: 0.8em;
+    color: #7f8c8d;
+    font-weight: 500;
+    margin-left: auto;
+    padding-left: 8px;
+    cursor: pointer;
+    transition: color 0.2s;
+}
+
+.spot-color-ratio:hover {
+    color: #3498db;
+    text-decoration: underline;
+}
+
+/* 팬톤 RGB 매핑 없는 색상 경고 메시지 */
+.spot-color-warning {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    margin-top: 8px;
+    background: #fff3cd;
+    border-left: 3px solid #ffc107;
+    border-radius: 4px;
+    font-size: 0.8em;
+    color: #856404;
+}
+
+.spot-color-warning::before {
+    content: "⚠️";
+    font-size: 1.2em;
+}
+
+.spot-color-warning-text {
+    flex: 1;
+    line-height: 1.4;
+}
+
+#spot-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
 }
 
 .advanced-controls label {
@@ -264,6 +334,46 @@ h4 {
     padding: 6px;
     background: #f8f9fa;
     border-radius: 4px;
+}
+
+/* Task 5.2: 별색 잉크량 표시 스타일 */
+.spot-ink-info {
+    margin-top: 8px;
+    padding: 8px;
+    background: #f0f8ff;
+    border-radius: 4px;
+    border-left: 3px solid #3498db;
+}
+
+.spot-ink-info:empty {
+    display: none;
+}
+
+.spot-ink-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+    font-size: 0.85em;
+}
+
+.spot-ink-item:not(:last-child) {
+    border-bottom: 1px solid #e3f2fd;
+}
+
+.spot-ink-label {
+    font-weight: 600;
+    color: #2c3e50;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.spot-ink-value {
+    font-weight: 700;
+    color: #3498db;
+    margin-left: 8px;
 }
 
 .viewer-controls {

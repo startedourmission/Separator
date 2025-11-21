@@ -1,6 +1,33 @@
 // WebWorker 기반 Ghostscript 사용
 // UTIF는 HTML에서 전역 스크립트로 로드됨 (window.UTIF)
 
+
+// 팬톤 RGB 근사값 매핑 (주요 색상만)
+const PANTONE_RGB_MAP = {
+    'PANTONE 186 C': { r: 200, g: 16, b: 46 },    // 빨강
+    'PANTONE 287 C': { r: 0, g: 51, b: 160 },     // 파랑
+    'PANTONE 354 C': { r: 0, g: 135, b: 81 },     // 초록
+    'PANTONE 021 C': { r: 254, g: 80, b: 0 },     // 오렌지
+    'PANTONE 2925 C': { r: 0, g: 159, b: 227 },   // 하늘색
+    'PANTONE 7737 C': { r: 209, g: 0, b: 116 },   // 마젠타
+    'PANTONE 109 C': { r: 255, g: 214, b: 0 },    // 노랑
+    'PANTONE Cool Gray 11 C': { r: 83, g: 86, b: 90 },  // 회색
+    'PANTONE 485 C': { r: 218, g: 41, b: 28 },    // 밝은 빨강
+    'PANTONE 300 C': { r: 0, g: 87, b: 184 }      // 진한 파랑
+};
+
+// 팬톤 색상의 RGB 근사값 조회
+function getSpotColorRGB(colorName) {
+    // 매핑 테이블에서 조회
+    if (PANTONE_RGB_MAP[colorName]) {
+        return PANTONE_RGB_MAP[colorName];
+    }
+
+    // 매핑되지 않은 색상은 기본 회색으로 표시
+    console.warn(`팬톤 색상 "${colorName}"의 RGB 근사값이 없습니다. 기본 회색으로 표시합니다.`);
+    return { r: 128, g: 128, b: 128 };
+}
+
 class PDFSeparationViewer {
     constructor() {
         this.canvas = document.getElementById('pdf-canvas');
@@ -25,6 +52,14 @@ class PDFSeparationViewer {
         // 페이지별 CMYK 채널 사용량 저장
         this.pageChannelData = {};
 
+        // 별색 관련 속성
+        this.spotColors = [];           // 감지된 별색 이름 목록
+        this.spotColorData = {};        // { 'PANTONE 186 C': Uint8Array (그레이스케일) }
+        this.spotColorCheckboxes = {};  // { 'PANTONE 186 C': HTMLInputElement }
+        this.spotColorRatios = {};      // { 'PANTONE 186 C': 15.3 }
+        this.pageSpotColorData = {};    // { pageNum: { 'PANTONE 186 C': count } }
+
+
         this.initializeElements();
         this.bindEvents();
         this.initializeCanvas();
@@ -46,7 +81,7 @@ class PDFSeparationViewer {
         this.ctx.textBaseline = 'middle';
         this.ctx.fillText('PDF 파일을 선택해주세요', this.canvas.width / 2, this.canvas.height / 2);
     }
-    
+
     initializeElements() {
         this.fileInput = document.getElementById('pdf-file');
         this.selectAllCheckbox = document.getElementById('select-all');
@@ -82,6 +117,12 @@ class PDFSeparationViewer {
         this.scanProgressSection = document.getElementById('scan-progress-section');
         this.scanProgressFill = document.getElementById('scan-progress-fill');
         this.scanProgressText = document.getElementById('scan-progress-text');
+
+        // 별색 컨트롤 컨테이너 (Task 2.4)
+        this.spotControlsContainer = document.getElementById('spot-color-controls');
+
+        // Task 5.2: 별색 잉크량 정보 컨테이너
+        this.spotInkInfoContainer = document.getElementById('spot-ink-info');
     }
 
     showLoading(text = '로딩 중...', progress = '') {
@@ -94,24 +135,36 @@ class PDFSeparationViewer {
         this.loadingIndicator.classList.add('hidden');
     }
 
-    updateScanProgress(current, total) {
+    updateScanProgress(current, total, estimatedTimeText = '') {
         const percentage = Math.round((current / total) * 100);
         this.scanProgressFill.style.width = `${percentage}%`;
-        this.scanProgressText.textContent = `${current}/${total} 페이지 (${percentage}%)`;
+
+        // Task 6.2: 예상 시간 표시
+        let progressText = `${current}/${total} 페이지 (${percentage}%)`;
+        if (estimatedTimeText && current === 1) {
+            progressText += ` - ${estimatedTimeText}`;
+        }
+
+        this.scanProgressText.textContent = progressText;
         this.scanProgressSection.classList.remove('hidden');
     }
 
     hideScanProgress() {
         this.scanProgressSection.classList.add('hidden');
     }
-    
+
     bindEvents() {
         this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
 
         // 전체 선택 체크박스
         this.selectAllCheckbox.addEventListener('change', () => {
             const isChecked = this.selectAllCheckbox.checked;
+            // CMYK 체크박스 선택/해제
             Object.values(this.cmykCheckboxes).forEach(checkbox => {
+                checkbox.checked = isChecked;
+            });
+            // Task 7: 별색 체크박스도 함께 선택/해제
+            Object.values(this.spotColorCheckboxes).forEach(checkbox => {
                 checkbox.checked = isChecked;
             });
             this.updateSeparation();
@@ -121,9 +174,8 @@ class PDFSeparationViewer {
         Object.values(this.cmykCheckboxes).forEach(checkbox => {
             checkbox.addEventListener('change', () => {
                 this.updateSeparation();
-                // 전체 선택 체크박스 상태 업데이트
-                const allChecked = Object.values(this.cmykCheckboxes).every(cb => cb.checked);
-                this.selectAllCheckbox.checked = allChecked;
+                // Task 7: 전체 선택 체크박스 상태 업데이트 (CMYK + 별색 모두 체크)
+                this.updateSelectAllCheckbox();
             });
         });
 
@@ -147,12 +199,12 @@ class PDFSeparationViewer {
             this.goToPage(pageNum);
         });
         this.currentPageInput.addEventListener('keydown', (e) => {
-            console.log('키 입력 감지:', e.key); // 디버깅용
+
             if (e.key === 'Enter') {
                 e.preventDefault(); // 폼 제출 방지
                 e.stopPropagation(); // 이벤트 전파 차단
                 const pageNum = parseInt(e.target.value);
-                console.log('페이지 이동:', pageNum);
+
                 this.goToPage(pageNum);
                 e.target.blur(); // Enter 후 포커스 해제
             }
@@ -192,10 +244,10 @@ class PDFSeparationViewer {
             });
         }
     }
-    
+
     async loadGhostscript() {
         try {
-            console.log('Ghostscript WebWorker 초기화 중...');
+
 
             this.worker = new Worker('./ghostscript-worker.js', { type: 'module' });
             this.currentPDFData = null;
@@ -204,7 +256,7 @@ class PDFSeparationViewer {
 
             // Worker 메시지 핸들러를 한 번만 설정
             this.worker.onmessage = (e) => {
-                const { type, requestId, success, data, width, height, message, pageSize, pageCount, supported, files, devices, rawOutput, fileSize, format } = e.data;
+                const { type, requestId, success, data, width, height, message, pageSize, pageCount, supported, files, devices, rawOutput, fileSize, format, channels, spotColors } = e.data;
 
                 if (type === 'init') {
                     const pending = this.pendingRequests.get('init');
@@ -216,10 +268,15 @@ class PDFSeparationViewer {
                         }
                         this.pendingRequests.delete('init');
                     }
-                } else if (type === 'testTiffsep') {
+
+                } else if (type === 'tiffsepResult') {
                     const pending = this.pendingRequests.get(requestId);
                     if (pending) {
-                        pending.resolve({ supported, files, message });
+                        if (success) {
+                            pending.resolve({ channels, spotColors, width, height });
+                        } else {
+                            pending.reject(new Error(message || 'tiffsep 처리 실패'));
+                        }
                         this.pendingRequests.delete(requestId);
                     }
                 } else if (type === 'listDevices') {
@@ -294,7 +351,7 @@ class PDFSeparationViewer {
                 loadPDF: async (data) => {
                     try {
                         this.currentPDFData = new Uint8Array(data);
-                        console.log('PDF 로딩 완료, 크기:', this.currentPDFData.length);
+
 
                         // 페이지 수 조회
                         const pageCount = await this.ghostscript.getPageCount();
@@ -381,24 +438,7 @@ class PDFSeparationViewer {
                     };
                 },
 
-                testTiffsep: async () => {
-                    if (!this.currentPDFData) {
-                        throw new Error('PDF를 먼저 로딩해주세요');
-                    }
 
-                    return new Promise((resolve, reject) => {
-                        const reqId = ++this.requestId;
-                        this.pendingRequests.set(reqId, { resolve, reject });
-
-                        this.worker.postMessage({
-                            type: 'testTiffsep',
-                            requestId: reqId,
-                            data: {
-                                pdfData: this.currentPDFData
-                            }
-                        });
-                    });
-                },
 
                 listDevices: async () => {
                     return new Promise((resolve, reject) => {
@@ -431,35 +471,48 @@ class PDFSeparationViewer {
                             }
                         });
                     });
+                },
+
+                processTiffsep: async (pdfData, pageNum, dpi) => {
+                    const dataToUse = pdfData || this.currentPDFData;
+                    if (!dataToUse) {
+                        throw new Error('PDF 데이터가 없습니다');
+                    }
+
+                    return new Promise((resolve, reject) => {
+                        const reqId = ++this.requestId;
+                        this.pendingRequests.set(reqId, { resolve, reject });
+
+                        this.worker.postMessage({
+                            type: 'processTiffsep',
+                            requestId: reqId,
+                            data: {
+                                pdfData: dataToUse,
+                                pageNum: pageNum || 1,
+                                dpi: dpi || 72
+                            }
+                        });
+                    });
                 }
             };
 
-            console.log('Ghostscript WebWorker 준비 완료');
+
         } catch (error) {
             console.error('Ghostscript WebWorker 초기화 실패:', error);
             this.showError('Ghostscript를 초기화할 수 없습니다.');
         }
     }
-    
+
     async convertTIFFToCMYK(tiffData, width, height) {
         return new Promise((resolve, reject) => {
             try {
-                console.log('TIFF 파싱 시작, 크기:', tiffData.length);
-
                 // UTIF로 TIFF 디코딩
                 const ifds = UTIF.decode(tiffData.buffer);
-                console.log('TIFF IFD 개수:', ifds.length);
 
                 const page = ifds[0];
                 UTIF.decodeImage(tiffData.buffer, page);
 
-                console.log('TIFF 이미지 정보:', {
-                    width: page.width,
-                    height: page.height,
-                    bitsPerSample: page.t258,
-                    samplesPerPixel: page.t277,
-                    photometric: page.t262
-                });
+
 
                 // page.data는 CMYK 픽셀 배열 (각 픽셀당 4바이트: C, M, Y, K)
                 const cmykPixels = new Uint8Array(page.data);
@@ -478,7 +531,7 @@ class PDFSeparationViewer {
                     black[i] = cmykPixels[i * 4 + 3];
                 }
 
-                console.log('CMYK 채널 분리 완료');
+
 
                 // CMYK 데이터를 포함한 객체 반환
                 resolve({
@@ -490,6 +543,65 @@ class PDFSeparationViewer {
             } catch (error) {
                 console.error('TIFF 파싱 실패:', error);
                 reject(error);
+            }
+        });
+    }
+
+
+
+    async parseSpotColorTIFF(tiffData, colorName) {
+        return new Promise((resolve, reject) => {
+            try {
+                if (!tiffData) {
+                    console.warn(`별색 ${colorName} 데이터가 없습니다. 빈 채널로 처리합니다.`);
+                    const emptyData = new Uint8Array((this.baseWidth || 800) * (this.baseHeight || 600)).fill(0);
+                    resolve({
+                        width: this.baseWidth || 800,
+                        height: this.baseHeight || 600,
+                        data: emptyData
+                    });
+                    return;
+                }
+
+
+
+                // UTIF로 TIFF 디코딩
+                // Uint8Array의 buffer를 slice하여 올바른 범위만 전달
+                const arrayBuffer = tiffData.buffer.slice(
+                    tiffData.byteOffset,
+                    tiffData.byteOffset + tiffData.byteLength
+                );
+                const ifds = UTIF.decode(arrayBuffer);
+
+                if (!ifds || ifds.length === 0) {
+                    throw new Error('TIFF IFD를 찾을 수 없습니다');
+                }
+
+                const page = ifds[0];
+                UTIF.decodeImage(arrayBuffer, page);
+
+
+
+                // 그레이스케일 채널 데이터 추출 (0-255)
+                const pixelCount = page.width * page.height;
+                const channelData = new Uint8Array(page.data);
+
+
+
+                resolve({
+                    width: page.width,
+                    height: page.height,
+                    data: channelData
+                });
+            } catch (error) {
+                console.error(`별색 ${colorName} TIFF 파싱 실패:`, error);
+                // 에러 처리: 파싱 실패 시 빈 채널 반환
+                const emptyData = new Uint8Array(this.baseWidth * this.baseHeight).fill(0);
+                resolve({
+                    width: this.baseWidth || 800,
+                    height: this.baseHeight || 600,
+                    data: emptyData
+                });
             }
         });
     }
@@ -520,7 +632,7 @@ class PDFSeparationViewer {
             img.src = URL.createObjectURL(blob);
         });
     }
-    
+
     buildGhostscriptArgs(options, width, height) {
         const args = [
             '-dNOPAUSE',
@@ -533,12 +645,12 @@ class PDFSeparationViewer {
             `-g${width}x${height}`,
             '-sOutputFile=output.png'
         ];
-        
+
         // CMYK 분판 제어 - Ghostscript의 실제 분판 옵션 사용
         if (options.separations && options.separations.length > 0) {
             // 모든 색상을 끄고 선택된 것만 켜는 방식
             args.push('-dUseCIEColor=true');
-            
+
             if (!options.separations.includes('cyan')) {
                 args.push('-dCyan=0');
             }
@@ -551,7 +663,7 @@ class PDFSeparationViewer {
             if (!options.separations.includes('black')) {
                 args.push('-dBlack=0');
             }
-            
+
             // 별색 처리
             options.separations.forEach(spot => {
                 if (!['cyan', 'magenta', 'yellow', 'black'].includes(spot)) {
@@ -559,28 +671,28 @@ class PDFSeparationViewer {
                 }
             });
         }
-        
+
         // 오버프린트 시뮬레이션
         if (options.overprint) {
             args.push('-dOverprint=true');
             args.push('-dOverprintMode=1');
         }
-        
+
         // PDF 파일 입력
         args.push('input.pdf');
-        
+
         return args;
     }
-    
+
     async handleFileSelect(event) {
         const file = event.target.files[0];
         if (!file || file.type !== 'application/pdf') {
             this.showError('PDF 파일을 선택해 주세요.');
             return;
         }
-        
+
         try {
-            console.log('PDF 파일 로딩:', file.name);
+
             const arrayBuffer = await file.arrayBuffer();
             await this.loadPDF(arrayBuffer);
         } catch (error) {
@@ -588,7 +700,7 @@ class PDFSeparationViewer {
             this.showError('PDF 파일을 로딩할 수 없습니다.');
         }
     }
-    
+
     async loadPDF(data) {
         if (!this.ghostscript) {
             this.showError('Ghostscript가 준비되지 않았습니다.');
@@ -604,7 +716,7 @@ class PDFSeparationViewer {
                 this.currentPDF = data;
                 this.totalPages = result.pages;
                 this.currentPage = 1;
-                console.log('PDF 총 페이지:', this.totalPages);
+
 
                 // 전체 페이지 CMYK 데이터 수집 초기화
                 this.totalChannelCounts = { cyan: 0, magenta: 0, yellow: 0, black: 0 };
@@ -624,7 +736,7 @@ class PDFSeparationViewer {
                 // 백그라운드에서 모든 페이지 스캔 (비동기)
                 this.scanAllPagesInBackground();
 
-                console.log('PDF 로딩 성공');
+
             } else {
                 throw new Error('PDF 로딩 실패');
             }
@@ -636,83 +748,257 @@ class PDFSeparationViewer {
     }
 
     async scanAllPagesInBackground() {
-        console.log(`전체 ${this.totalPages} 페이지 CMYK 스캔 시작 (백그라운드)...`);
+
+
+        // 별색이 있는지 확인
+        const hasSpotColors = this.spotColors && this.spotColors.length > 0;
+
+        // Task 6.2: 예상 시간 계산 및 표시
+        let estimatedTimeText = '';
+        if (hasSpotColors) {
+            const estimatedTimePerPage = 7; // tiffsep은 페이지당 약 5-10초 예상
+            const estimatedTotalSeconds = this.totalPages * estimatedTimePerPage;
+            const estimatedMinutes = Math.ceil(estimatedTotalSeconds / 60);
+            estimatedTimeText = `약 ${estimatedMinutes}분 소요`;
+
+        } else {
+            const estimatedTimePerPage = 2; // CMYK 렌더링은 빠름
+            const estimatedTotalSeconds = this.totalPages * estimatedTimePerPage;
+            const estimatedMinutes = Math.ceil(estimatedTotalSeconds / 60);
+            estimatedTimeText = `약 ${estimatedMinutes}분 소요`;
+
+        }
 
         for (let pageNum = 1; pageNum <= this.totalPages; pageNum++) {
             try {
-                // 매우 낮은 해상도로 빠른 스캔 (비율 계산용)
-                const scanWidth = 200;  // 작은 크기로 빠르게
-                const scanHeight = 280; // A4 비율 대략
+                // 별색이 있으면 tiffsep으로 스캔, 없으면 기존 방식 사용
+                if (hasSpotColors) {
+                    // Task 6.1: tiffsep으로 저해상도 렌더링 (Task 6.2: 72 DPI 사용)
+                    const result = await this.ghostscript.processTiffsep(
+                        this.currentPDFData,
+                        pageNum,
+                        72  // 저해상도 (성능 최적화)
+                    );
 
-                const renderOptions = {
-                    width: scanWidth,
-                    height: scanHeight,
-                    pdfWidth: scanWidth,
-                    pdfHeight: scanHeight,
-                    pageNum: pageNum,
-                    useCMYK: true,
-                    separations: []
-                };
+                    if (result && result.channels) {
+                        const { channels, width, height } = result;
 
-                const imageData = await this.ghostscript.renderPage(pageNum, renderOptions);
+                        // CMYK 채널 데이터 추출 및 누적
+                        const cmykChannels = {
+                            cyan: channels['Cyan'],
+                            magenta: channels['Magenta'],
+                            yellow: channels['Yellow'],
+                            black: channels['Black']
+                        };
 
-                // CMYK 데이터 누적 (페이지 번호 전달)
-                if (imageData && imageData.type === 'cmyk') {
-                    this.accumulateChannelData(imageData, pageNum);
+                        // CMYK 데이터가 있으면 누적
+                        if (cmykChannels.cyan && cmykChannels.magenta && cmykChannels.yellow && cmykChannels.black) {
+                            const cmykData = {
+                                type: 'cmyk',
+                                width: width,
+                                height: height,
+                                channels: cmykChannels
+                            };
+                            this.accumulateChannelData(cmykData, pageNum);
+                        }
 
-                    // 매 페이지마다 UI 업데이트
-                    const ratios = this.calculateTotalChannelRatios();
-                    this.updateChannelRatios(ratios);
+                        // Task 6.1: 별색 채널 데이터 추출 및 누적
+                        const spotColorChannels = {};
+                        for (const colorName of this.spotColors) {
+                            if (channels[colorName]) {
+                                spotColorChannels[colorName] = channels[colorName];
+                            }
+                        }
 
-                    // 왼쪽 패널 진행률 업데이트
-                    this.updateScanProgress(pageNum, this.totalPages);
+                        // 별색 데이터 누적
+                        if (Object.keys(spotColorChannels).length > 0) {
+                            this.accumulateSpotColorData(spotColorChannels, pageNum, width, height);
+                        }
+
+                        // 매 페이지마다 UI 업데이트
+                        const cmykRatios = this.calculateTotalChannelRatios();
+                        this.updateChannelRatios(cmykRatios);
+
+                        const spotRatios = this.calculateSpotColorRatios();
+                        this.updateSpotColorRatios(spotRatios);
+
+                        // Task 6.1: 페이지별 진행률 업데이트 (Task 6.2: 예상 시간 표시)
+                        this.updateScanProgress(pageNum, this.totalPages, estimatedTimeText);
+                    }
+                } else {
+                    const scanWidth = 200;  // 작은 크기로 빠르게
+                    const scanHeight = 280; // A4 비율 대략
+
+                    const renderOptions = {
+                        width: scanWidth,
+                        height: scanHeight,
+                        pdfWidth: scanWidth,
+                        pdfHeight: scanHeight,
+                        pageNum: pageNum,
+                        useCMYK: true,
+                        separations: []
+                    };
+
+                    const imageData = await this.ghostscript.renderPage(pageNum, renderOptions);
+
+                    // CMYK 데이터 누적 (페이지 번호 전달)
+                    if (imageData && imageData.type === 'cmyk') {
+                        this.accumulateChannelData(imageData, pageNum);
+
+                        // 매 페이지마다 UI 업데이트
+                        const ratios = this.calculateTotalChannelRatios();
+                        this.updateChannelRatios(ratios);
+
+                        // 왼쪽 패널 진행률 업데이트
+                        this.updateScanProgress(pageNum, this.totalPages, estimatedTimeText);
+                    }
                 }
 
-                console.log(`페이지 ${pageNum}/${this.totalPages} 스캔 완료`);
+
             } catch (error) {
                 console.error(`페이지 ${pageNum} 스캔 실패:`, error);
             }
         }
 
-        console.log('전체 페이지 CMYK 스캔 완료');
+
 
         // 완료 후 3초 뒤에 진행률 바 숨김
         setTimeout(() => this.hideScanProgress(), 3000);
     }
-    
+
 
     async loadSpotColors() {
         try {
-            this.spotColors = await this.ghostscript.getSpotColors();
+
+            const spotColors = new Set();
+
+            // PDF 데이터에서 /Separation 검색 (제미나이 방식)
+            const data = this.currentPDFData;
+            const len = data.length;
+
+            const CHUNK_SIZE = 1024 * 1024; // 1MB
+            const decoder = new TextDecoder('utf-8', { fatal: false });
+
+            let position = 0;
+            while (position < len) {
+                const chunk = data.subarray(position, Math.min(position + CHUNK_SIZE, len));
+                const text = decoder.decode(chunk);
+
+                // /Separation /Name 검색
+                const separationRegex = /\/Separation\s*\/([^\s\[\]\/\(\)<>]+)/g;
+                let match;
+                while ((match = separationRegex.exec(text)) !== null) {
+                    let name = match[1];
+                    // PDF Name 이스케이프 처리 (#20 -> space)
+                    name = name.replace(/#([0-9A-Fa-f]{2})/g, (m, code) => String.fromCharCode(parseInt(code, 16)));
+
+                    if (name !== 'All' && name !== 'None' && !['Cyan', 'Magenta', 'Yellow', 'Black'].includes(name)) {
+                        spotColors.add(name);
+                    }
+                }
+
+                position += CHUNK_SIZE - 100; // 오버랩 (경계면 절단 방지)
+            }
+
+            this.spotColors = Array.from(spotColors).sort();
+
+
+            // 별색 데이터는 나중에 renderCurrentPage에서 tiffsep으로 로드
+            // (제미나이가 만든 구조 유지)
+            this.spotColorData = {};
+
             this.updateSpotColorControls();
+
         } catch (error) {
-            console.error('별색 정보 로딩 실패:', error);
+            console.error('별색 감지 실패:', error);
+            this.spotColors = [];
+            this.spotColorData = {};
+            this.updateSpotColorControls();
         }
     }
-    
+
     updateSpotColorControls() {
+        // 별색 컨트롤 컨테이너가 없으면 생성하지 않음
+        if (!this.spotControlsContainer) {
+            console.warn('별색 컨트롤 컨테이너가 없습니다.');
+            return;
+        }
+
+        // 기존 컨트롤 초기화
         this.spotControlsContainer.innerHTML = '';
-        
+        this.spotColorCheckboxes = {};
+
+        // 별색이 없으면 섹션 숨김
+        if (!this.spotColors || this.spotColors.length === 0) {
+            this.spotControlsContainer.style.display = 'none';
+            return;
+        }
+
+        // 별색이 있으면 섹션 표시
+        this.spotControlsContainer.style.display = 'block';
+
+        // 각 별색에 대한 컨트롤 생성
         this.spotColors.forEach((colorName, index) => {
             const controlDiv = document.createElement('div');
-            controlDiv.className = 'spot-color-control';
-            
+            controlDiv.className = 'control-row';
+
+            // 체크박스 생성
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
-            checkbox.id = `spot-${index}`;
+            const safeId = colorName.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
+            checkbox.id = `spot-${safeId}`;
             checkbox.checked = true;
-            checkbox.addEventListener('change', () => this.updateSeparation());
-            
+            // Task 7: 별색 체크박스 변경 시 렌더링 업데이트 및 전체 선택 상태 업데이트
+            checkbox.addEventListener('change', () => {
+                this.updateSeparation();
+                this.updateSelectAllCheckbox();
+            });
+
+            // 레이블 생성 (CMYK와 동일한 스타일)
             const label = document.createElement('label');
-            label.htmlFor = `spot-${index}`;
+            label.htmlFor = checkbox.id;
+            label.className = 'color-label spot-color';
             label.textContent = colorName;
-            
+
+            // 비율 표시 요소 생성
+            const ratioSpan = document.createElement('span');
+            ratioSpan.className = 'channel-ratio';
+            ratioSpan.id = `${checkbox.id}-ratio`;
+            ratioSpan.textContent = '-';
+
+            // 별색 비율 클릭 이벤트 (이벤트 전파 차단하여 체크박스 해제 방지)
+            ratioSpan.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.showSpotColorPageList(colorName);
+            });
+
+            // 체크박스 참조 저장
+            this.spotColorCheckboxes[colorName] = checkbox;
+
+            // DOM에 추가
             controlDiv.appendChild(checkbox);
             controlDiv.appendChild(label);
+            controlDiv.appendChild(ratioSpan);
             this.spotControlsContainer.appendChild(controlDiv);
         });
+
+
     }
-    
+
+    // Task 7: 전체 선택 체크박스 상태 업데이트 헬퍼 메서드
+    updateSelectAllCheckbox() {
+        // CMYK 체크박스가 모두 체크되어 있는지 확인
+        const allCMYKChecked = Object.values(this.cmykCheckboxes).every(cb => cb.checked);
+
+        // 별색 체크박스가 모두 체크되어 있는지 확인
+        // 빈 객체일 경우 true로 처리 (별색 없으면 CMYK만 체크)
+        const spotCheckboxes = Object.values(this.spotColorCheckboxes);
+        const allSpotColorsChecked = spotCheckboxes.length === 0 || spotCheckboxes.every(cb => cb.checked);
+
+        // CMYK와 별색 모두 체크되어 있으면 전체 선택 체크박스도 체크
+        this.selectAllCheckbox.checked = allCMYKChecked && allSpotColorsChecked;
+    }
+
     async renderCurrentPage() {
         if (!this.currentPDF || !this.ghostscript) {
             return;
@@ -739,7 +1025,6 @@ class PDFSeparationViewer {
             try {
                 pageSize = await this.ghostscript.getPageSize(this.currentPage);
                 pdfAspectRatio = pageSize.width / pageSize.height;
-                console.log('PDF 실제 크기:', pageSize.width, 'x', pageSize.height, '(비율:', pdfAspectRatio.toFixed(2) + ')');
             } catch (error) {
                 console.warn('PDF 크기 조회 실패, 기본 비율 사용:', error);
                 // 기본값: A4 비율
@@ -760,21 +1045,83 @@ class PDFSeparationViewer {
             const renderWidth = baseWidth;
             const renderHeight = baseHeight;
 
-            const renderOptions = this.buildRenderOptions();
-            renderOptions.width = renderWidth;
-            renderOptions.height = renderHeight;
-            renderOptions.pdfWidth = pageSize?.width || renderWidth;
-            renderOptions.pdfHeight = pageSize?.height || renderHeight;
-            renderOptions.pageNum = this.currentPage;
-            renderOptions.useCMYK = true;  // CMYK TIFF 모드 사용
+            // 별색이 있으면 tiffsep으로 렌더링 시도
+            const hasSpotColors = this.spotColors && this.spotColors.length > 0;
+            let tiffsepSuccessful = false;
 
-            console.log('PDF 렌더링 (CMYK 모드):', renderWidth, 'x', renderHeight);
+            if (hasSpotColors) {
+                try {
 
-            const imageData = await this.ghostscript.renderPage(this.currentPage, renderOptions);
+                    const result = await this.ghostscript.processTiffsep(
+                        this.currentPDFData,
+                        this.currentPage,
+                        150  // 고해상도 (표시용)
+                    );
 
-            this.baseImageData = imageData;
-            this.baseWidth = baseWidth;  // 100% 줌일 때의 표시 크기
-            this.baseHeight = baseHeight;
+                    if (result && result.channels && Object.keys(result.channels).length > 0) {
+                        const { channels, width, height } = result;
+
+                        // CMYK 채널 데이터 추출 및 파싱 (TIFF 형식)
+                        const cyanParsed = await this.parseSpotColorTIFF(channels['Cyan'], 'Cyan');
+                        const magentaParsed = await this.parseSpotColorTIFF(channels['Magenta'], 'Magenta');
+                        const yellowParsed = await this.parseSpotColorTIFF(channels['Yellow'], 'Yellow');
+                        const blackParsed = await this.parseSpotColorTIFF(channels['Black'], 'Black');
+
+                        const cmykChannels = {
+                            cyan: cyanParsed.data,
+                            magenta: magentaParsed.data,
+                            yellow: yellowParsed.data,
+                            black: blackParsed.data
+                        };
+
+                        // CMYK 데이터 생성
+                        const imageData = {
+                            type: 'cmyk',
+                            width: width || cyanParsed.width, // width가 없으면 파싱된 너비 사용
+                            height: height || cyanParsed.height,
+                            channels: cmykChannels
+                        };
+
+                        // 별색 채널 데이터 추출 및 저장
+                        this.spotColorData = {};
+                        for (const colorName of this.spotColors) {
+                            if (channels[colorName]) {
+                                // TIFF 데이터를 파싱하여 그레이스케일 채널 추출
+                                const parsed = await this.parseSpotColorTIFF(channels[colorName], colorName);
+                                this.spotColorData[colorName] = parsed.data;
+                            }
+                        }
+
+
+                        this.baseImageData = imageData;
+                        this.baseWidth = baseWidth;
+                        this.baseHeight = baseHeight;
+                        tiffsepSuccessful = true;
+                    } else {
+                        console.warn('tiffsep 렌더링 결과가 비어있습니다. CMYK 모드로 전환합니다.');
+                    }
+                } catch (error) {
+                    console.error('tiffsep 렌더링 중 오류 발생, CMYK 모드로 전환합니다:', error);
+                }
+            }
+
+            // 별색이 없거나 tiffsep 렌더링 실패 시 기존 CMYK 전용 렌더링 방식 사용
+            if (!tiffsepSuccessful) {
+                const renderOptions = this.buildRenderOptions();
+                renderOptions.width = renderWidth;
+                renderOptions.height = renderHeight;
+                renderOptions.pdfWidth = pageSize?.width || renderWidth;
+                renderOptions.pdfHeight = pageSize?.height || renderHeight;
+                renderOptions.pageNum = this.currentPage;
+                renderOptions.useCMYK = true;  // CMYK TIFF 모드 사용
+
+
+                const imageData = await this.ghostscript.renderPage(this.currentPage, renderOptions);
+
+                this.baseImageData = imageData;
+                this.baseWidth = baseWidth;  // 100% 줌일 때의 표시 크기
+                this.baseHeight = baseHeight;
+            }
 
             this.applyZoomAndSeparation();
             this.updatePageControls();
@@ -807,7 +1154,18 @@ class PDFSeparationViewer {
 
         // CMYK 데이터인 경우
         if (this.baseImageData.type === 'cmyk') {
-            this.renderCMYKWithSeparation(this.baseImageData, scaledWidth, scaledHeight);
+            // 별색 데이터가 있고 선택된 별색이 있으면 renderWithSpotColors 사용
+            const hasSpotColorData = this.spotColorData && Object.keys(this.spotColorData).length > 0;
+            const hasSelectedSpotColors = this.spotColors.some(colorName => {
+                const checkbox = this.spotColorCheckboxes[colorName];
+                return checkbox && checkbox.checked;
+            });
+
+            if (hasSpotColorData && hasSelectedSpotColors) {
+                this.renderWithSpotColors(this.baseImageData, scaledWidth, scaledHeight);
+            } else {
+                this.renderCMYKWithSeparation(this.baseImageData, scaledWidth, scaledHeight);
+            }
         } else {
             // 기존 RGB ImageData 처리
             const tempCanvas = document.createElement('canvas');
@@ -860,7 +1218,7 @@ class PDFSeparationViewer {
         this.prevPageBtn.disabled = this.currentPage <= 1;
         this.nextPageBtn.disabled = this.currentPage >= this.totalPages;
     }
-    
+
     buildRenderOptions() {
         const options = {
             width: 800,
@@ -877,7 +1235,7 @@ class PDFSeparationViewer {
 
         return options;
     }
-    
+
     displayImageData(imageData) {
         // 이 함수는 applyZoomAndSeparation에서 처리됨
         // 호환성을 위해 유지
@@ -891,7 +1249,7 @@ class PDFSeparationViewer {
         const renderOptions = this.buildRenderOptions();
         const separations = renderOptions.separations || [];
 
-        console.log('CMYK 분판 렌더링:', separations);
+
 
         // RGB 이미지로 변환 (선택된 채널만 사용)
         const pixelCount = width * height;
@@ -915,6 +1273,172 @@ class PDFSeparationViewer {
             rgbData[i * 4 + 0] = Math.round(255 * (1 - cNorm) * (1 - kNorm)); // R
             rgbData[i * 4 + 1] = Math.round(255 * (1 - mNorm) * (1 - kNorm)); // G
             rgbData[i * 4 + 2] = Math.round(255 * (1 - yNorm) * (1 - kNorm)); // B
+            rgbData[i * 4 + 3] = 255; // Alpha
+        }
+
+        // ImageData 생성
+        const imageData = new ImageData(rgbData, width, height);
+
+        // 임시 캔버스에 그리기
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = width;
+        tempCanvas.height = height;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.putImageData(imageData, 0, 0);
+
+        // 스케일링하여 메인 캔버스에 그리기
+        this.ctx.imageSmoothingEnabled = true;
+        this.ctx.imageSmoothingQuality = 'high';
+        this.ctx.fillStyle = 'white';
+        this.ctx.fillRect(0, 0, targetWidth, targetHeight);
+        this.ctx.drawImage(tempCanvas, 0, 0, targetWidth, targetHeight);
+
+        // 원본 CMYK 데이터 저장 (TAC 계산용)
+        this.originalCMYKData = cmykData;
+    }
+
+    renderWithSpotColors(cmykData, targetWidth, targetHeight) {
+        const { width, height, channels } = cmykData;
+        const { cyan, magenta, yellow, black } = channels;
+
+        // 현재 선택된 분판 옵션 가져오기
+        const renderOptions = this.buildRenderOptions();
+        const separations = renderOptions.separations || [];
+
+        // 선택된 별색 필터링
+        const selectedSpotColors = this.spotColors.filter(colorName => {
+            const checkbox = this.spotColorCheckboxes[colorName];
+            return checkbox && checkbox.checked;
+        });
+
+
+
+        // RGB 이미지로 변환 (CMYK + 별색 합성)
+        const pixelCount = width * height;
+        const rgbData = new Uint8ClampedArray(pixelCount * 4);
+
+        for (let i = 0; i < pixelCount; i++) {
+            // 1. CMYK → RGB 변환 (선택된 채널만)
+            const c = separations.includes('cyan') ? cyan[i] : 0;
+            const m = separations.includes('magenta') ? magenta[i] : 0;
+            const y = separations.includes('yellow') ? yellow[i] : 0;
+            const k = separations.includes('black') ? black[i] : 0;
+
+            const cNorm = c / 255;
+            const mNorm = m / 255;
+            const yNorm = y / 255;
+            const kNorm = k / 255;
+
+            let r = 255 * (1 - cNorm) * (1 - kNorm);
+            let g = 255 * (1 - mNorm) * (1 - kNorm);
+            let b = 255 * (1 - yNorm) * (1 - kNorm);
+
+            // 2. 각 별색 적용 (곱셈 블렌딩으로 오버프린트 효과 시뮬레이션)
+            for (const colorName of selectedSpotColors) {
+                const spotData = this.spotColorData[colorName];
+                if (!spotData) continue;
+
+                // 별색의 그레이스케일 강도 (0-255)
+                const intensity = spotData[i] / 255;  // 0-1 범위로 정규화
+
+                if (intensity > 0) {
+                    // 별색의 RGB 근사값 가져오기
+                    const spotRGB = getSpotColorRGB(colorName);
+
+                    // 곱셈 블렌딩: 별색이 있는 부분은 해당 색상으로 어둡게
+                    // intensity가 1이면 완전히 별색, 0이면 영향 없음
+                    r *= (1 - intensity) + intensity * (spotRGB.r / 255);
+                    g *= (1 - intensity) + intensity * (spotRGB.g / 255);
+                    b *= (1 - intensity) + intensity * (spotRGB.b / 255);
+                }
+            }
+
+            rgbData[i * 4 + 0] = Math.round(Math.max(0, Math.min(255, r))); // R
+            rgbData[i * 4 + 1] = Math.round(Math.max(0, Math.min(255, g))); // G
+            rgbData[i * 4 + 2] = Math.round(Math.max(0, Math.min(255, b))); // B
+            rgbData[i * 4 + 3] = 255; // Alpha
+        }
+
+        // ImageData 생성
+        const imageData = new ImageData(rgbData, width, height);
+
+        // 임시 캔버스에 그리기
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = width;
+        tempCanvas.height = height;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.putImageData(imageData, 0, 0);
+
+        // 스케일링하여 메인 캔버스에 그리기
+        this.ctx.imageSmoothingEnabled = true;
+        this.ctx.imageSmoothingQuality = 'high';
+        this.ctx.fillStyle = 'white';
+        this.ctx.fillRect(0, 0, targetWidth, targetHeight);
+        this.ctx.drawImage(tempCanvas, 0, 0, targetWidth, targetHeight);
+
+        // 원본 CMYK 데이터 저장 (TAC 계산용)
+        this.originalCMYKData = cmykData;
+    }
+
+    renderWithSpotColors(cmykData, targetWidth, targetHeight) {
+        const { width, height, channels } = cmykData;
+        const { cyan, magenta, yellow, black } = channels;
+
+        // 현재 선택된 분판 옵션 가져오기
+        const renderOptions = this.buildRenderOptions();
+        const separations = renderOptions.separations || [];
+
+        // 선택된 별색 필터링
+        const selectedSpotColors = this.spotColors.filter(colorName => {
+            const checkbox = this.spotColorCheckboxes[colorName];
+            return checkbox && checkbox.checked;
+        });
+
+        console.log('CMYK + 별색 렌더링:', separations, '별색:', selectedSpotColors);
+
+        // RGB 이미지로 변환 (CMYK + 별색 합성)
+        const pixelCount = width * height;
+        const rgbData = new Uint8ClampedArray(pixelCount * 4);
+
+        for (let i = 0; i < pixelCount; i++) {
+            // 1. CMYK → RGB 변환 (선택된 채널만)
+            const c = separations.includes('cyan') ? cyan[i] : 0;
+            const m = separations.includes('magenta') ? magenta[i] : 0;
+            const y = separations.includes('yellow') ? yellow[i] : 0;
+            const k = separations.includes('black') ? black[i] : 0;
+
+            const cNorm = c / 255;
+            const mNorm = m / 255;
+            const yNorm = y / 255;
+            const kNorm = k / 255;
+
+            let r = 255 * (1 - cNorm) * (1 - kNorm);
+            let g = 255 * (1 - mNorm) * (1 - kNorm);
+            let b = 255 * (1 - yNorm) * (1 - kNorm);
+
+            // 2. 각 별색 적용 (곱셈 블렌딩으로 오버프린트 효과 시뮬레이션)
+            for (const colorName of selectedSpotColors) {
+                const spotData = this.spotColorData[colorName];
+                if (!spotData) continue;
+
+                // 별색의 그레이스케일 강도 (0-255)
+                const intensity = spotData[i] / 255;  // 0-1 범위로 정규화
+
+                if (intensity > 0) {
+                    // 별색의 RGB 근사값 가져오기
+                    const spotRGB = getSpotColorRGB(colorName);
+
+                    // 곱셈 블렌딩: 별색이 있는 부분은 해당 색상으로 어둡게
+                    // intensity가 1이면 완전히 별색, 0이면 영향 없음
+                    r *= (1 - intensity) + intensity * (spotRGB.r / 255);
+                    g *= (1 - intensity) + intensity * (spotRGB.g / 255);
+                    b *= (1 - intensity) + intensity * (spotRGB.b / 255);
+                }
+            }
+
+            rgbData[i * 4 + 0] = Math.round(Math.max(0, Math.min(255, r))); // R
+            rgbData[i * 4 + 1] = Math.round(Math.max(0, Math.min(255, g))); // G
+            rgbData[i * 4 + 2] = Math.round(Math.max(0, Math.min(255, b))); // B
             rgbData[i * 4 + 3] = 255; // Alpha
         }
 
@@ -986,7 +1510,7 @@ class PDFSeparationViewer {
         // 필터링된 이미지 표시 (캔버스 전체)
         this.ctx.putImageData(filteredData, 0, 0);
     }
-    
+
     accumulateChannelData(cmykData, pageNum) {
         // 페이지별 CMYK 데이터를 누적
         if (!cmykData || cmykData.type !== 'cmyk') {
@@ -1031,6 +1555,90 @@ class PDFSeparationViewer {
         this.totalPixelCount += totalPixels;
     }
 
+    accumulateSpotColorData(spotColorChannels, pageNum, width, height) {
+        // 페이지별 별색 데이터를 누적
+        if (!spotColorChannels || Object.keys(spotColorChannels).length === 0) {
+            return;
+        }
+
+        const totalPixels = width * height;
+
+        // 페이지별 별색 데이터 초기화
+        if (!this.pageSpotColorData[pageNum]) {
+            this.pageSpotColorData[pageNum] = {
+                totalPixels: totalPixels
+            };
+        }
+
+        // 각 별색에 대해 잉크 사용 픽셀 카운트
+        for (const colorName of this.spotColors) {
+            const channelData = spotColorChannels[colorName];
+            if (!channelData) continue;
+
+            // 별색 카운트 초기화
+            if (!this.pageSpotColorData[pageNum][colorName]) {
+                this.pageSpotColorData[pageNum][colorName] = 0;
+            }
+
+            // 전체 문서 별색 카운트 초기화
+            if (!this.totalChannelCounts[colorName]) {
+                this.totalChannelCounts[colorName] = 0;
+            }
+
+            // 잉크가 있는 픽셀 수 카운트 (0이 아닌 값)
+            for (let i = 0; i < totalPixels; i++) {
+                if (channelData[i] > 0) {
+                    this.totalChannelCounts[colorName]++;
+                    this.pageSpotColorData[pageNum][colorName]++;
+                }
+            }
+        }
+
+        console.log(`페이지 ${pageNum} 별색 데이터 누적 완료`);
+    }
+
+    accumulateSpotColorData(spotColorChannels, pageNum, width, height) {
+        // 페이지별 별색 데이터를 누적
+        if (!spotColorChannels || Object.keys(spotColorChannels).length === 0) {
+            return;
+        }
+
+        const totalPixels = width * height;
+
+        // 페이지별 별색 데이터 초기화
+        if (!this.pageSpotColorData[pageNum]) {
+            this.pageSpotColorData[pageNum] = {
+                totalPixels: totalPixels
+            };
+        }
+
+        // 각 별색에 대해 잉크 사용 픽셀 카운트
+        for (const colorName of this.spotColors) {
+            const channelData = spotColorChannels[colorName];
+            if (!channelData) continue;
+
+            // 별색 카운트 초기화
+            if (!this.pageSpotColorData[pageNum][colorName]) {
+                this.pageSpotColorData[pageNum][colorName] = 0;
+            }
+
+            // 전체 문서 별색 카운트 초기화
+            if (!this.totalChannelCounts[colorName]) {
+                this.totalChannelCounts[colorName] = 0;
+            }
+
+            // 잉크가 있는 픽셀 수 카운트 (0이 아닌 값)
+            for (let i = 0; i < totalPixels; i++) {
+                if (channelData[i] > 0) {
+                    this.totalChannelCounts[colorName]++;
+                    this.pageSpotColorData[pageNum][colorName]++;
+                }
+            }
+        }
+
+        console.log(`페이지 ${pageNum} 별색 데이터 누적 완료`);
+    }
+
     calculateTotalChannelRatios() {
         // 전체 페이지의 누적된 데이터로부터 비율 계산
         if (this.totalPixelCount === 0) {
@@ -1043,6 +1651,40 @@ class PDFSeparationViewer {
             yellow: (this.totalChannelCounts.yellow / this.totalPixelCount) * 100,
             black: (this.totalChannelCounts.black / this.totalPixelCount) * 100
         };
+    }
+
+    calculateSpotColorRatios() {
+        // 전체 페이지의 누적 데이터로 별색 비율 계산
+        if (this.totalPixelCount === 0 || !this.spotColors || this.spotColors.length === 0) {
+            return null;
+        }
+
+        const ratios = {};
+
+        // 각 별색의 사용 비율을 백분율로 계산
+        for (const colorName of this.spotColors) {
+            const count = this.totalChannelCounts[colorName] || 0;
+            ratios[colorName] = (count / this.totalPixelCount) * 100;
+        }
+
+        return ratios;
+    }
+
+    calculateSpotColorRatios() {
+        // 전체 페이지의 누적 데이터로 별색 비율 계산
+        if (this.totalPixelCount === 0 || !this.spotColors || this.spotColors.length === 0) {
+            return null;
+        }
+
+        const ratios = {};
+
+        // 각 별색의 사용 비율을 백분율로 계산
+        for (const colorName of this.spotColors) {
+            const count = this.totalChannelCounts[colorName] || 0;
+            ratios[colorName] = (count / this.totalPixelCount) * 100;
+        }
+
+        return ratios;
     }
 
     updateChannelRatios(ratios) {
@@ -1079,6 +1721,55 @@ class PDFSeparationViewer {
         updateProgress('magenta', ratios.magenta);
         updateProgress('yellow', ratios.yellow);
         updateProgress('black', ratios.black);
+    }
+
+    updateSpotColorRatios(ratios) {
+        // 별색 비율 UI 업데이트
+        if (!ratios || !this.spotColors || this.spotColors.length === 0) {
+            // 비율 정보가 없으면 모든 별색 비율을 '-'로 표시
+            this.spotColors.forEach(colorName => {
+                const safeId = colorName.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
+                const ratioElement = document.getElementById(`spot-${safeId}-ratio`);
+                if (ratioElement) {
+                    ratioElement.textContent = '-';
+                }
+
+                // progress bar 초기화
+                const checkbox = this.spotColorCheckboxes[colorName];
+                if (checkbox) {
+                    const label = document.querySelector(`label[for="${checkbox.id}"]`);
+                    if (label) {
+                        label.style.backgroundSize = '0% 100%';
+                    }
+                }
+            });
+            return;
+        }
+
+        // 각 별색의 비율을 소수점 1자리까지 표시
+        this.spotColors.forEach(colorName => {
+            const ratio = ratios[colorName] || 0;
+            const safeId = colorName.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
+            const ratioElement = document.getElementById(`spot-${safeId}-ratio`);
+
+            if (ratioElement) {
+                ratioElement.textContent = `${ratio.toFixed(1)}%`;
+            }
+
+            // progress bar 업데이트 (프로그레스 바 스타일로 시각화)
+            const checkbox = this.spotColorCheckboxes[colorName];
+            if (checkbox) {
+                const label = document.querySelector(`label[for="${checkbox.id}"]`);
+                if (label) {
+                    label.style.backgroundSize = `${ratio}% 100%`;
+                }
+            }
+        });
+
+        // 별색 비율을 spotColorRatios 객체에 저장
+        this.spotColorRatios = ratios;
+
+        console.log('별색 비율 UI 업데이트 완료:', ratios);
     }
 
     createDummyImageData(width = 800, height = 600) {
@@ -1128,21 +1819,33 @@ class PDFSeparationViewer {
 
         return imageData;
     }
-    
+
     async updateSeparation() {
         if (this.currentPDF && this.baseImageData) {
             // CMYK 데이터인 경우
             if (this.baseImageData.type === 'cmyk') {
                 const scaledWidth = Math.floor(this.baseWidth * this.zoomLevel);
                 const scaledHeight = Math.floor(this.baseHeight * this.zoomLevel);
-                this.renderCMYKWithSeparation(this.baseImageData, scaledWidth, scaledHeight);
+
+                // 별색 데이터가 있고 선택된 별색이 있으면 renderWithSpotColors 사용
+                const hasSpotColorData = this.spotColorData && Object.keys(this.spotColorData).length > 0;
+                const hasSelectedSpotColors = this.spotColors.some(colorName => {
+                    const checkbox = this.spotColorCheckboxes[colorName];
+                    return checkbox && checkbox.checked;
+                });
+
+                if (hasSpotColorData && hasSelectedSpotColors) {
+                    this.renderWithSpotColors(this.baseImageData, scaledWidth, scaledHeight);
+                } else {
+                    this.renderCMYKWithSeparation(this.baseImageData, scaledWidth, scaledHeight);
+                }
             } else if (this.originalImageData) {
                 // 기존 RGB 데이터 처리
                 this.applyColorSeparation(this.originalImageData);
             }
         }
     }
-    
+
     async handleMouseMove(event) {
         if (!this.currentPDF) return;
 
@@ -1169,6 +1872,7 @@ class PDFSeparationViewer {
 
         try {
             let inkValues;
+            let spotColorInkValues = {};
 
             // CMYK 데이터가 있으면 직접 사용
             if (this.originalCMYKData) {
@@ -1186,6 +1890,18 @@ class PDFSeparationViewer {
                         yellow: (channels.yellow[pixelIndex] / 255) * 100,
                         black: (channels.black[pixelIndex] / 255) * 100
                     };
+
+                    // Task 5.1: 별색 잉크량 계산
+                    // 커서 위치의 각 별색 채널 값 추출
+                    if (this.spotColorData && Object.keys(this.spotColorData).length > 0) {
+                        for (const colorName of this.spotColors) {
+                            const spotData = this.spotColorData[colorName];
+                            if (spotData && pixelIndex < spotData.length) {
+                                // 별색 잉크량을 백분율로 계산 (0-255 → 0-100%)
+                                spotColorInkValues[colorName] = (spotData[pixelIndex] / 255) * 100;
+                            }
+                        }
+                    }
                 }
             } else if (this.originalImageData) {
                 // 기존 RGB → CMYK 변환 방식
@@ -1210,21 +1926,110 @@ class PDFSeparationViewer {
             if (inkValues) {
                 const tac = this.calculateTAC(inkValues);
                 this.tacValueElement.textContent = tac.toFixed(1);
+
+                // Task 5.2: 별색 잉크량 UI 업데이트
+                this.updateSpotColorInkInfo(spotColorInkValues);
             }
         } catch (error) {
             console.error('잉크값 조회 실패:', error);
         }
     }
-    
+
     calculateTAC(inkValues) {
         return inkValues.cyan + inkValues.magenta + inkValues.yellow + inkValues.black;
     }
-    
+
+    // Task 5.2: 별색 잉크량 UI 업데이트
+    updateSpotColorInkInfo(spotColorInkValues) {
+        // 별색 잉크량을 CMYK TAC 아래에 표시
+        if (!this.spotInkInfoContainer) {
+            return;
+        }
+
+        // 별색이 없거나 별색 데이터가 없으면 숨김
+        if (!this.spotColors || this.spotColors.length === 0 ||
+            !spotColorInkValues || Object.keys(spotColorInkValues).length === 0) {
+            this.spotInkInfoContainer.innerHTML = '';
+            this.spotInkInfoContainer.style.display = 'none';
+            return;
+        }
+
+        // 별색 잉크량 표시
+        this.spotInkInfoContainer.style.display = 'block';
+
+        // 각 별색별로 잉크량 표시
+        const spotColorHTML = this.spotColors.map(colorName => {
+            const inkValue = spotColorInkValues[colorName];
+            if (inkValue !== undefined) {
+                return `
+                    <div class="spot-ink-item">
+                        <span class="spot-ink-label">${colorName}:</span>
+                        <span class="spot-ink-value">${inkValue.toFixed(1)}%</span>
+                    </div>
+                `;
+            }
+            return '';
+        }).filter(html => html !== '').join('');
+
+        // 실시간 업데이트
+        this.spotInkInfoContainer.innerHTML = spotColorHTML;
+    }
+
     clearMouseInfo() {
         this.cursorCoordsElement.textContent = '-';
         this.tacValueElement.textContent = '-';
+
+        // Task 5.2: 별색 잉크량 정보도 초기화
+        if (this.spotInkInfoContainer) {
+            this.spotInkInfoContainer.innerHTML = '';
+            this.spotInkInfoContainer.style.display = 'none';
+        }
     }
-    
+
+    updateSpotColorRatios(ratios) {
+        // 별색 비율 UI 업데이트
+        if (!ratios || !this.spotColors || this.spotColors.length === 0) {
+            // 비율 정보가 없으면 모든 별색 비율을 '-'로 표시
+            this.spotColors.forEach(colorName => {
+                const safeId = colorName.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
+                const ratioElement = document.getElementById(`spot-${safeId}-ratio`);
+                if (ratioElement) {
+                    ratioElement.textContent = '-';
+                }
+
+                // progress bar 초기화
+                const checkbox = this.spotColorCheckboxes[colorName];
+                if (checkbox) {
+                    const label = document.querySelector(`label[for="${checkbox.id}"]`);
+                    if (label) {
+                        label.style.backgroundSize = '0% 100%';
+                    }
+                }
+            });
+            return;
+        }
+
+        // 각 별색의 비율을 소수점 1자리까지 표시
+        this.spotColors.forEach(colorName => {
+            const ratio = ratios[colorName] || 0;
+            const safeId = colorName.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
+            const ratioElement = document.getElementById(`spot-${safeId}-ratio`);
+
+            if (ratioElement) {
+                ratioElement.textContent = `${ratio.toFixed(1)}%`;
+            }
+
+            // progress bar 업데이트
+            const checkbox = this.spotColorCheckboxes[colorName];
+            if (checkbox) {
+                const label = document.querySelector(`label[for="${checkbox.id}"]`);
+                if (label) {
+                    label.style.backgroundSize = `${ratio}% 100%`;
+                }
+            }
+        });
+    }
+
     showChannelPageList(channel) {
         // 해당 채널을 사용하는 페이지 목록 표시
         const channelNames = {
@@ -1271,6 +2076,95 @@ class PDFSeparationViewer {
                     this.goToPage(pageNum);
                     this.closeChannelPageList();
                 });
+            });
+        }
+
+        modal.classList.remove('hidden');
+    }
+
+    showSpotColorPageList(colorName) {
+        // 해당 별색을 사용하는 페이지 목록 표시
+
+        // 페이지별 사용량 수집 및 정렬
+        const pageList = [];
+        for (const pageNum in this.pageSpotColorData) {
+            const pageData = this.pageSpotColorData[pageNum];
+            const usage = pageData[colorName];
+            if (usage && usage > 0) {
+                const ratio = (usage / pageData.totalPixels) * 100;
+                pageList.push({ pageNum: parseInt(pageNum), usage, ratio });
+            }
+        }
+
+        // 사용량 많은 순으로 정렬
+        pageList.sort((a, b) => b.usage - a.usage);
+
+        // 모달에 표시
+        const modal = document.getElementById('page-list-modal');
+        const channelNameEl = document.getElementById('modal-channel-name');
+        const pageListEl = document.getElementById('page-list');
+
+        channelNameEl.textContent = colorName;
+
+        if (pageList.length === 0) {
+            pageListEl.innerHTML = '<p class="no-pages">이 별색을 사용하는 페이지가 없습니다.</p>';
+        } else {
+            pageListEl.innerHTML = pageList.map(item =>
+                `<div class="page-item" data-page="${item.pageNum}">
+                    페이지 ${item.pageNum} <span class="page-ratio">(${item.ratio.toFixed(1)}%)</span>
+                </div>`
+            ).join('');
+
+            // 페이지 아이템 클릭 이벤트
+            pageListEl.querySelectorAll('.page-item').forEach(el => {
+                el.addEventListener('click', () => {
+                    const pageNum = parseInt(el.dataset.page);
+                    this.goToPage(pageNum);
+                    this.closeChannelPageList();
+                });
+            });
+        }
+
+        modal.classList.remove('hidden');
+    }
+
+    showSpotColorPageList(colorName) {
+        const modal = document.getElementById('page-list-modal');
+        const modalTitle = document.getElementById('modal-channel-name');
+        const pageList = document.getElementById('page-list');
+
+        modalTitle.textContent = colorName;
+        pageList.innerHTML = '';
+
+        // 해당 별색을 사용하는 페이지 목록 생성
+        const pages = [];
+        for (let pageNum = 1; pageNum <= this.totalPages; pageNum++) {
+            if (this.pageSpotColorData[pageNum] && this.pageSpotColorData[pageNum][colorName] > 0) {
+                const count = this.pageSpotColorData[pageNum][colorName];
+                const total = this.pageSpotColorData[pageNum].totalPixels;
+                const ratio = (count / total) * 100;
+                pages.push({ pageNum, ratio });
+            }
+        }
+
+        // 사용 비율 내림차순 정렬
+        pages.sort((a, b) => b.ratio - a.ratio);
+
+        if (pages.length === 0) {
+            pageList.innerHTML = '<div class="no-pages">이 색상을 사용하는 페이지가 없습니다.</div>';
+        } else {
+            pages.forEach(item => {
+                const pageItem = document.createElement('div');
+                pageItem.className = 'page-item';
+                pageItem.innerHTML = `
+                    <span class="page-num">페이지 ${item.pageNum}</span>
+                    <span class="page-ratio">${item.ratio.toFixed(2)}%</span>
+                `;
+                pageItem.addEventListener('click', () => {
+                    this.goToPage(item.pageNum);
+                    this.closeChannelPageList();
+                });
+                pageList.appendChild(pageItem);
             });
         }
 

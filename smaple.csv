@@ -1,0 +1,6 @@
+pdf_name,page,total_pages,C,M,Y,K,spot1,spot1_pct,spot2,spot2_pct,detect_time_ms,notes
+sample_document.pdf,1,5,12.5,8.0,0.0,0.0,PANTONE 185,12.3,,0.0,120,Title page with red spot
+sample_document.pdf,2,5,0.0,0.0,0.0,0.0,,, , ,98,No spot colors
+sample_document.pdf,3,5,0.0,10.2,43.1,0.5,PANTONE 299,8.0,PANTONE 123,3.5,210,Two spot colors in graphics
+sample_document.pdf,4,5,2.1,1.0,0.0,95.0,, , , ,134,Mostly black text
+sample_document.pdf,5,5,0.0,25.0,0.0,5.0,PANTONE 802,6.2,,0.0,180,Fluorescent green spot
