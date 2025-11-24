@@ -748,119 +748,44 @@ class PDFSeparationViewer {
     }
 
     async scanAllPagesInBackground() {
-
-
-        // 별색이 있는지 확인
-        const hasSpotColors = this.spotColors && this.spotColors.length > 0;
-
-        // Task 6.2: 예상 시간 계산 및 표시
-        let estimatedTimeText = '';
-        if (hasSpotColors) {
-            const estimatedTimePerPage = 7; // tiffsep은 페이지당 약 5-10초 예상
-            const estimatedTotalSeconds = this.totalPages * estimatedTimePerPage;
-            const estimatedMinutes = Math.ceil(estimatedTotalSeconds / 60);
-            estimatedTimeText = `약 ${estimatedMinutes}분 소요`;
-
-        } else {
-            const estimatedTimePerPage = 2; // CMYK 렌더링은 빠름
-            const estimatedTotalSeconds = this.totalPages * estimatedTimePerPage;
-            const estimatedMinutes = Math.ceil(estimatedTotalSeconds / 60);
-            estimatedTimeText = `약 ${estimatedMinutes}분 소요`;
-
-        }
+        // 항상 기존 방식(tiff32nc)으로 CMYK 스캔 (tiffsep은 WASM에서 실패)
+        const estimatedTimePerPage = 2;
+        const estimatedTotalSeconds = this.totalPages * estimatedTimePerPage;
+        const estimatedMinutes = Math.ceil(estimatedTotalSeconds / 60);
+        const estimatedTimeText = `약 ${estimatedMinutes}분 소요`;
 
         for (let pageNum = 1; pageNum <= this.totalPages; pageNum++) {
             try {
-                // 별색이 있으면 tiffsep으로 스캔, 없으면 기존 방식 사용
-                if (hasSpotColors) {
-                    // Task 6.1: tiffsep으로 저해상도 렌더링 (Task 6.2: 72 DPI 사용)
-                    const result = await this.ghostscript.processTiffsep(
-                        this.currentPDFData,
-                        pageNum,
-                        72  // 저해상도 (성능 최적화)
-                    );
+                const scanWidth = 200;  // 작은 크기로 빠르게
+                const scanHeight = 280; // A4 비율 대략
 
-                    if (result && result.channels) {
-                        const { channels, width, height } = result;
+                const renderOptions = {
+                    width: scanWidth,
+                    height: scanHeight,
+                    pdfWidth: scanWidth,
+                    pdfHeight: scanHeight,
+                    pageNum: pageNum,
+                    useCMYK: true,
+                    separations: []
+                };
 
-                        // CMYK 채널 데이터 추출 및 누적
-                        const cmykChannels = {
-                            cyan: channels['Cyan'],
-                            magenta: channels['Magenta'],
-                            yellow: channels['Yellow'],
-                            black: channels['Black']
-                        };
+                const imageData = await this.ghostscript.renderPage(pageNum, renderOptions);
 
-                        // CMYK 데이터가 있으면 누적
-                        if (cmykChannels.cyan && cmykChannels.magenta && cmykChannels.yellow && cmykChannels.black) {
-                            const cmykData = {
-                                type: 'cmyk',
-                                width: width,
-                                height: height,
-                                channels: cmykChannels
-                            };
-                            this.accumulateChannelData(cmykData, pageNum);
-                        }
+                // CMYK 데이터 누적 (페이지 번호 전달)
+                if (imageData && imageData.type === 'cmyk') {
+                    this.accumulateChannelData(imageData, pageNum);
 
-                        // Task 6.1: 별색 채널 데이터 추출 및 누적
-                        const spotColorChannels = {};
-                        for (const colorName of this.spotColors) {
-                            if (channels[colorName]) {
-                                spotColorChannels[colorName] = channels[colorName];
-                            }
-                        }
+                    // 매 페이지마다 UI 업데이트
+                    const ratios = this.calculateTotalChannelRatios();
+                    this.updateChannelRatios(ratios);
 
-                        // 별색 데이터 누적
-                        if (Object.keys(spotColorChannels).length > 0) {
-                            this.accumulateSpotColorData(spotColorChannels, pageNum, width, height);
-                        }
-
-                        // 매 페이지마다 UI 업데이트
-                        const cmykRatios = this.calculateTotalChannelRatios();
-                        this.updateChannelRatios(cmykRatios);
-
-                        const spotRatios = this.calculateSpotColorRatios();
-                        this.updateSpotColorRatios(spotRatios);
-
-                        // Task 6.1: 페이지별 진행률 업데이트 (Task 6.2: 예상 시간 표시)
-                        this.updateScanProgress(pageNum, this.totalPages, estimatedTimeText);
-                    }
-                } else {
-                    const scanWidth = 200;  // 작은 크기로 빠르게
-                    const scanHeight = 280; // A4 비율 대략
-
-                    const renderOptions = {
-                        width: scanWidth,
-                        height: scanHeight,
-                        pdfWidth: scanWidth,
-                        pdfHeight: scanHeight,
-                        pageNum: pageNum,
-                        useCMYK: true,
-                        separations: []
-                    };
-
-                    const imageData = await this.ghostscript.renderPage(pageNum, renderOptions);
-
-                    // CMYK 데이터 누적 (페이지 번호 전달)
-                    if (imageData && imageData.type === 'cmyk') {
-                        this.accumulateChannelData(imageData, pageNum);
-
-                        // 매 페이지마다 UI 업데이트
-                        const ratios = this.calculateTotalChannelRatios();
-                        this.updateChannelRatios(ratios);
-
-                        // 왼쪽 패널 진행률 업데이트
-                        this.updateScanProgress(pageNum, this.totalPages, estimatedTimeText);
-                    }
+                    // 왼쪽 패널 진행률 업데이트
+                    this.updateScanProgress(pageNum, this.totalPages, estimatedTimeText);
                 }
-
-
             } catch (error) {
                 console.error(`페이지 ${pageNum} 스캔 실패:`, error);
             }
         }
-
-
 
         // 완료 후 3초 뒤에 진행률 바 숨김
         setTimeout(() => this.hideScanProgress(), 3000);
