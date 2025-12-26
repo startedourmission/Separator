@@ -630,3 +630,42 @@ h4 {
         min-height: 400px;
     }
 }
+/* 워터마크 제어 스타일 */
+#watermark-text {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    resize: vertical;
+    font-family: inherit;
+    font-size: 0.9em;
+    margin-bottom: 10px;
+    transition: border-color 0.2s;
+}
+
+#watermark-text:focus {
+    outline: none;
+    border-color: #3498db;
+    box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.2);
+}
+
+#apply-watermark {
+    width: 100%;
+    padding: 10px;
+    background-color: #3498db;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: background-color 0.2s;
+}
+
+#apply-watermark:hover {
+    background-color: #2980b9;
+}
+
+#apply-watermark:disabled {
+    background-color: #bdc3c7;
+    cursor: not-allowed;
+}

@@ -1,23 +1,22 @@
 <!DOCTYPE html>
 <html lang="ko">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>토인비분판</title>
     <link rel="stylesheet" href="style.css">
 </head>
+
 <body>
     <div class="container">
-        <header>
-            <h1>토인비분판</h1>
-        </header>
-        
+
         <div class="controls">
             <div class="file-section">
                 <label for="pdf-file">PDF 파일 선택:</label>
                 <input type="file" id="pdf-file" accept=".pdf">
             </div>
-            
+
             <div class="separation-controls">
                 <h3>CMYK 분판 제어</h3>
                 <div class="cmyk-controls">
@@ -48,7 +47,8 @@
                 </div>
 
                 <!-- 별색 분판 제어 (Task 2.4) -->
-                <h3>별색 감지 (랜더링과 잉크 비율은 아직 안돼요)</h3>
+                <br>
+                <h3>별색 감지</h3>
                 <div id="spot-color-controls" class="spot-controls" style="display: none;">
                     <!-- 동적으로 생성됨 -->
                 </div>
@@ -78,6 +78,12 @@
                     <!-- 동적으로 생성됨 -->
                 </div>
             </div>
+            <div class="viewer-controls">
+                <h3>워터마크 일괄 적용</h3>
+                <textarea id="watermark-text" rows="5"
+                    placeholder="user1@example.com&#13;&#10;user2@example.com&#13;&#10;user3@example.com"></textarea>
+                <button id="apply-watermark" , onclick="downloadWatermarkedPdf()">적용</button>
+            </div>
 
             <div class="viewer-controls">
                 <h3>뷰어 제어</h3>
@@ -88,7 +94,8 @@
                 </div>
                 <div class="page-controls">
                     <button id="prev-page" disabled>◀ 이전</button>
-                    <span id="page-info">페이지 <input type="number" id="current-page" value="1" min="1"> / <span id="total-pages">1</span></span>
+                    <span id="page-info">페이지 <input type="number" id="current-page" value="1" min="1"> / <span
+                            id="total-pages">1</span></span>
                     <button id="next-page" disabled>다음 ▶</button>
                 </div>
             </div>
@@ -117,11 +124,151 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.js"></script>
+    <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script>
         // PDF.js worker 설정
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        // 워터마크 다운로드 함수
+        async function downloadWatermarkedPdf() {
+            const fileInput = document.getElementById('pdf-file');
+            const textInput = document.getElementById('watermark-text');
+            const btn = document.getElementById('apply-watermark');
+            const loading = document.getElementById('loading-indicator');
+            const loadingText = document.getElementById('loading-text');
+
+            if (!fileInput.files[0]) {
+                alert('먼저 PDF 파일을 열어주세요.');
+                return;
+            }
+
+            const texts = textInput.value.split('\n').map(t => t.trim()).filter(t => t.length > 0);
+            if (texts.length === 0) {
+                alert('워터마크 텍스트를 입력해주세요.');
+                return;
+            }
+
+            try {
+                // UI 잠금 및 로딩 표시
+                btn.disabled = true;
+                loading.classList.remove('hidden');
+                loadingText.textContent = '워터마크 생성 중...';
+
+                const fileArrayBuffer = await fileInput.files[0].arrayBuffer();
+                const { PDFDocument, rgb, degrees, StandardFonts } = PDFLib;
+
+                // ZIP 생성 필요 여부 확인 (2개 이상일 때)
+                if (texts.length > 1) {
+                    const zip = new JSZip();
+
+                    for (let i = 0; i < texts.length; i++) {
+                        const text = texts[i];
+                        loadingText.textContent = `생성 중 (${i + 1}/${texts.length}): ${text}...`;
+
+                        // PDF 로드
+                        const pdfDoc = await PDFDocument.load(fileArrayBuffer);
+                        const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+                        const pages = pdfDoc.getPages();
+                        const fontSize = 50;
+
+                        pages.forEach(page => {
+                            const { width, height } = page.getSize();
+
+                            // 중앙 정렬 및 45도 회전 계산
+                            const textWidth = helveticaFont.widthOfTextAtSize(text, fontSize);
+                            const angle = Math.PI / 4; // 45도
+                            const cos = Math.cos(angle);
+                            const sin = Math.sin(angle);
+                            const halfWidth = textWidth / 2;
+                            const halfHeight = fontSize / 2;
+
+                            // 화면 중앙 좌표
+                            const x = width / 2 - (halfWidth * cos) + (halfHeight * sin);
+                            const y = height / 2 - (halfWidth * sin) - (halfHeight * cos);
+
+                            page.drawText(text, {
+                                x: x,
+                                y: y,
+                                size: fontSize,
+                                font: helveticaFont,
+                                color: rgb(0.5, 0.5, 0.5),
+                                opacity: 0.3,
+                                rotate: degrees(45),
+                            });
+                        });
+
+                        const pdfBytes = await pdfDoc.save();
+                        zip.file(`${text}.pdf`, pdfBytes);
+                    }
+
+                    loadingText.textContent = 'ZIP 파일 생성 중...';
+                    const zipContent = await zip.generateAsync({ type: 'blob' });
+                    downloadBlob(zipContent, 'watermarked_files.zip');
+
+                } else {
+                    // 단일 파일 처리
+                    const text = texts[0];
+                    const pdfDoc = await PDFDocument.load(fileArrayBuffer);
+                    const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+                    const pages = pdfDoc.getPages();
+                    const fontSize = 50;
+
+                    pages.forEach(page => {
+                        const { width, height } = page.getSize();
+                        const textWidth = helveticaFont.widthOfTextAtSize(text, fontSize);
+
+                        // 중앙 정렬 및 45도 회전
+                        const angle = Math.PI / 4;
+                        const cos = Math.cos(angle);
+                        const sin = Math.sin(angle);
+                        const halfWidth = textWidth / 2;
+                        const halfHeight = fontSize / 2;
+
+                        const x = width / 2 - (halfWidth * cos) + (halfHeight * sin);
+                        const y = height / 2 - (halfWidth * sin) - (halfHeight * cos);
+
+                        page.drawText(text, {
+                            x: x,
+                            y: y,
+                            size: fontSize,
+                            font: helveticaFont,
+                            color: rgb(0.5, 0.5, 0.5),
+                            opacity: 0.3,
+                            rotate: degrees(45),
+                        });
+                    });
+
+                    const pdfBytes = await pdfDoc.save();
+                    const blob = new Blob([pdfBytes], { type: 'application/octet-stream' });
+                    downloadBlob(blob, `${text}_watermarked.pdf`);
+                }
+
+            } catch (err) {
+                console.error(err);
+                alert('오류가 발생했습니다: ' + err.message);
+            } finally {
+                btn.disabled = false;
+                loading.classList.add('hidden');
+                loadingText.textContent = '로딩 중...'; // 복귀
+            }
+        }
+
+        function downloadBlob(blob, filename) {
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            setTimeout(() => {
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+            }, 60000); // 대용량 다운로드 안정을 위해 60초 대기
+        }
     </script>
     <script src="main.js" type="module"></script>
 </body>
+
 </html>

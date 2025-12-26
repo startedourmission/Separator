@@ -2176,6 +2176,143 @@ class PDFSeparationViewer {
             return { supported: false, error: error.message };
         }
     }
+    // 워터마크 도구 초기화
+    initWatermarkTool() {
+        this.wmModal = document.getElementById('watermark-modal');
+        this.openWmBtn = document.getElementById('open-watermark-btn');
+        this.closeWmBtn = document.getElementById('wm-close-btn');
+        this.startWmBtn = document.getElementById('wm-start-btn');
+        this.wmStatus = document.getElementById('wm-status');
+
+        if (this.openWmBtn) {
+            this.openWmBtn.addEventListener('click', () => {
+                if (!this.currentPDFData) {
+                    this.showError('먼저 PDF 파일을 열어주세요!');
+                    return;
+                }
+                this.wmModal.classList.remove('hidden');
+                // 상태 초기화
+                this.wmStatus.style.display = 'none';
+                this.startWmBtn.disabled = false;
+            });
+        }
+
+        if (this.closeWmBtn) {
+            this.closeWmBtn.addEventListener('click', () => {
+                this.wmModal.classList.add('hidden');
+            });
+        }
+
+        if (this.startWmBtn) {
+            this.startWmBtn.addEventListener('click', () => this.processBulkWatermark());
+        }
+
+        // 모달 배경 클릭 닫기
+        if (this.wmModal) {
+            this.wmModal.addEventListener('click', (e) => {
+                if (e.target === this.wmModal && !this.startWmBtn.disabled) {
+                    this.wmModal.classList.add('hidden');
+                }
+            });
+        }
+    }
+
+    async processBulkWatermark() {
+        const emailInput = document.getElementById('wm-emails');
+        const fontSizeInput = document.getElementById('wm-fontsize');
+        const opacityInput = document.getElementById('wm-opacity');
+
+        const emails = emailInput.value.split('\n').map(e => e.trim()).filter(e => e.length > 0);
+        if (emails.length === 0) {
+            alert('이메일을 하나 이상 입력해주세요.');
+            return;
+        }
+
+        try {
+            this.startWmBtn.disabled = true;
+            this.wmStatus.style.display = 'block';
+            this.wmStatus.textContent = '작업을 시작합니다...';
+            this.wmStatus.style.color = '#333';
+
+            const { PDFDocument, rgb, degrees, StandardFonts } = PDFLib;
+            const JSZip = window.JSZip;
+
+            const zip = new JSZip();
+
+            // 현재 로드된 PDF 데이터 사용
+            const originalPdfBytes = this.currentPDFData; // Uint8Array
+
+            for (let i = 0; i < emails.length; i++) {
+                const email = emails[i];
+                this.wmStatus.textContent = `[${i + 1}/${emails.length}] ${email} 처리 중...`;
+
+                // Load PDF
+                const pdfDoc = await PDFDocument.load(originalPdfBytes);
+                const pages = pdfDoc.getPages();
+                const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+
+                const fontSize = parseInt(fontSizeInput.value) || 50;
+                const opacityVal = parseFloat(opacityInput.value) || 0.3;
+
+                // Draw watermark
+                pages.forEach(page => {
+                    const { width, height } = page.getSize();
+                    const textWidth = helveticaFont.widthOfTextAtSize(email, fontSize);
+
+                    // 중앙 정렬 좌표 계산
+                    const angle = Math.PI / 4;
+                    const cos = Math.cos(angle);
+                    const sin = Math.sin(angle);
+
+                    const halfWidth = textWidth / 2;
+                    const halfHeight = fontSize / 2;
+
+                    const x = width / 2 - (halfWidth * cos) + (halfHeight * sin);
+                    const y = height / 2 - (halfWidth * sin) - (halfHeight * cos);
+
+                    page.drawText(email, {
+                        x: x,
+                        y: y,
+                        size: fontSize,
+                        font: helveticaFont,
+                        color: rgb(0.7, 0.7, 0.7),
+                        opacity: opacityVal,
+                        rotate: degrees(45),
+                    });
+                });
+
+                const pdfBytes = await pdfDoc.save();
+                const idPart = email.split('@')[0];
+                zip.file(`${idPart}.pdf`, pdfBytes);
+            }
+
+            this.wmStatus.textContent = 'ZIP 파일 압축 중...';
+            const content = await zip.generateAsync({ type: 'blob' });
+
+            // 다운로드
+            const zipBlob = new Blob([content], { type: 'application/octet-stream' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(zipBlob);
+            link.href = url;
+            link.download = 'watermarked_pdfs.zip';
+            document.body.appendChild(link);
+            link.click();
+
+            setTimeout(() => {
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+                this.wmStatus.textContent = '완료! 다운로드가 시작되었습니다.';
+                this.wmStatus.style.color = 'green';
+                this.startWmBtn.disabled = false;
+            }, 60000);
+
+        } catch (err) {
+            console.error(err);
+            this.wmStatus.textContent = `오류 발생: ${err.message}`;
+            this.wmStatus.style.color = 'red';
+            this.startWmBtn.disabled = false;
+        }
+    }
 }
 
 // 페이지 로딩 완료 시 애플리케이션 초기화
