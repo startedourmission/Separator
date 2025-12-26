@@ -28,7 +28,7 @@ header {
     padding: 20px 0;
     background: white;
     border-radius: 8px;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
 h1 {
@@ -40,7 +40,7 @@ h1 {
     background: white;
     padding: 15px;
     border-radius: 8px;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
     height: fit-content;
     overflow-y: auto;
 }
@@ -65,7 +65,9 @@ h1 {
     background: #f9f9f9;
 }
 
-.separation-controls, .advanced-controls, .info-panel {
+.separation-controls,
+.advanced-controls,
+.info-panel {
     margin-bottom: 15px;
     padding-bottom: 12px;
     border-bottom: 1px solid #eee;
@@ -325,11 +327,13 @@ h4 {
     transform: scale(1.0);
 }
 
-.info-panel, .viewer-controls {
+.info-panel,
+.viewer-controls {
     font-size: 0.85em;
 }
 
-.ink-info, .cursor-position {
+.ink-info,
+.cursor-position {
     margin-bottom: 8px;
     padding: 6px;
     background: #f8f9fa;
@@ -467,7 +471,7 @@ h4 {
 .canvas-container {
     background: #e0e0e0;
     border-radius: 8px;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
     padding: 0;
     overflow: auto;
     position: relative;
@@ -597,8 +601,13 @@ h4 {
 }
 
 @keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
+    0% {
+        transform: rotate(0deg);
+    }
+
+    100% {
+        transform: rotate(360deg);
+    }
 }
 
 #loading-text {
@@ -630,6 +639,7 @@ h4 {
         min-height: 400px;
     }
 }
+
 /* 워터마크 제어 스타일 */
 #watermark-text {
     width: 100%;
