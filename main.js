@@ -47,6 +47,7 @@ class VirtualScrollManager {
         this.isRendering = false;
         this.maxConcurrentRenders = 2;
         this.activeRenders = 0;
+        this.displayMode = 'single'; // 'single' | 'two-page'
     }
 
     // 초기화
@@ -68,10 +69,30 @@ class VirtualScrollManager {
             this.updateCurrentPage();
         }, 100));
 
+        // 창 크기 변경 시 리사이징
+        window.addEventListener('resize', this.debounce(() => {
+            this.updateZoom(this.viewer.zoomLevel);
+        }, 200));
+
         // 초기 첫 페이지 즉시 렌더링 (로딩 완료 직후 바로 표시)
         this.priorityRenderFirstPages();
 
         console.log(`VirtualScrollManager 초기화: ${totalPages}페이지, 비율 ${aspectRatio.toFixed(3)}`);
+    }
+
+    // 모드 설정
+    setDisplayMode(mode) {
+        if (this.displayMode === mode) return;
+        this.displayMode = mode;
+
+        if (mode === 'two-page') {
+            this.content.classList.add('two-page-view');
+        } else {
+            this.content.classList.remove('two-page-view');
+        }
+
+        // 줌 업데이트 호출하여 크기 재계산 및 리렌더링
+        this.updateZoom(this.viewer.zoomLevel);
     }
 
     // 첫 페이지들 우선 렌더링
@@ -97,7 +118,17 @@ class VirtualScrollManager {
     recalculatePageDimensions() {
         const viewportWidth = this.viewport.clientWidth;
         const padding = 40; // 좌우 패딩
-        this.pageWidth = Math.floor((viewportWidth - padding) * this.viewer.zoomLevel);
+
+        if (this.displayMode === 'two-page') {
+            // 2페이지 모드: 뷰포트 너비의 절반 (여백 고려)
+            // gap 고려: (width - padding - gap) / 2
+            const availableWidth = viewportWidth - padding - 20; // 20 is grid gap
+            this.pageWidth = Math.floor((availableWidth / 2) * this.viewer.zoomLevel);
+        } else {
+            // 싱글 모드: 기존 로직
+            this.pageWidth = Math.floor((viewportWidth - padding) * this.viewer.zoomLevel);
+        }
+
         this.pageHeight = Math.floor(this.pageWidth / this.pageAspectRatio);
     }
 
@@ -112,6 +143,10 @@ class VirtualScrollManager {
             wrapper.dataset.page = i;
             wrapper.style.width = `${this.pageWidth}px`;
             wrapper.style.height = `${this.pageHeight}px`;
+
+            if (i === 1) {
+                wrapper.classList.add('cover-page');
+            }
 
             const pageLabel = document.createElement('div');
             pageLabel.className = 'page-label';
@@ -547,6 +582,9 @@ class PDFSeparationViewer {
         this.scanProgressFill = document.getElementById('scan-progress-fill');
         this.scanProgressText = document.getElementById('scan-progress-text');
 
+        // 보기 모드 요소
+        this.viewModeSelect = document.getElementById('view-mode');
+
         // 별색 컨트롤 컨테이너 (Task 2.4)
         this.spotControlsContainer = document.getElementById('spot-color-controls');
 
@@ -618,6 +656,14 @@ class PDFSeparationViewer {
             // 스크롤 뷰어 줌 업데이트
             if (this.scrollManager && this.scrollManager.totalPages > 0) {
                 this.scrollManager.updateZoom(this.zoomLevel);
+            }
+        });
+
+        // 보기 모드 변경
+        this.viewModeSelect.addEventListener('change', (e) => {
+            const mode = e.target.value;
+            if (this.scrollManager) {
+                this.scrollManager.setDisplayMode(mode);
             }
         });
 
@@ -1622,7 +1668,7 @@ class PDFSeparationViewer {
                 .then(pageData => {
                     this.addToCache(pageNum, pageData);
                 })
-                .catch(() => {})
+                .catch(() => { })
                 .finally(() => {
                     this.preloadingPages.delete(pageNum);
                 });

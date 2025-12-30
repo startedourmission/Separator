@@ -742,3 +742,41 @@ h4 {
     background-color: #bdc3c7;
     cursor: not-allowed;
 }
+
+/* 보기 모드 제어 */
+.view-mode-controls {
+    margin-bottom: 10px;
+    padding: 7px;
+    background: #f8f9fa;
+    border-radius: 4px;
+}
+
+.view-mode-controls label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 600;
+}
+
+.view-mode-controls select {
+    width: 100%;
+    padding: 6px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+
+/* 두 페이지 보기 스타일 */
+.scroll-content.two-page-view {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    align-items: start;
+    justify-items: center;
+    /* Grid layout overrides previous flex column behavior */
+}
+
+/* 첫 페이지 (표지) 중앙 정렬 스타일 */
+.page-wrapper.cover-page {
+    grid-column: 1 / -1;
+    /* 전체 너비 차지 */
+    justify-self: center;
+}
