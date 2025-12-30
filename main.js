@@ -1,5 +1,6 @@
 // WebWorker 기반 Ghostscript 사용
 // UTIF는 HTML에서 전역 스크립트로 로드됨 (window.UTIF)
+import { WorkerPool } from './worker-pool.js';
 
 
 // 팬톤 RGB 근사값 매핑 (주요 색상만)
@@ -28,9 +29,421 @@ function getSpotColorRGB(colorName) {
     return { r: 128, g: 128, b: 128 };
 }
 
+// Virtual Scroll Manager - 스크롤 기반 PDF 뷰어
+class VirtualScrollManager {
+    constructor(viewer) {
+        this.viewer = viewer;
+        this.viewport = document.getElementById('scroll-viewport');
+        this.content = document.getElementById('scroll-content');
+        this.pageElements = new Map(); // pageNum -> { wrapper, canvas, status }
+        this.observer = null;
+        this.pageWidth = 0;
+        this.pageHeight = 0;
+        this.pageGap = 20;
+        this.bufferPages = 2;
+        this.totalPages = 0;
+        this.pageAspectRatio = 1 / 1.414; // A4 기본값
+        this.renderQueue = new Set(); // 렌더링 대기 큐
+        this.isRendering = false;
+        this.maxConcurrentRenders = 2;
+        this.activeRenders = 0;
+    }
+
+    // 초기화
+    init(totalPages, aspectRatio) {
+        this.totalPages = totalPages;
+        this.pageAspectRatio = aspectRatio || 1 / 1.414;
+
+        // 페이지 크기 계산
+        this.recalculatePageDimensions();
+
+        // placeholder 생성
+        this.createPagePlaceholders();
+
+        // Intersection Observer 설정
+        this.setupIntersectionObserver();
+
+        // 스크롤 이벤트 (현재 페이지 추적)
+        this.viewport.addEventListener('scroll', this.debounce(() => {
+            this.updateCurrentPage();
+        }, 100));
+
+        // 초기 첫 페이지 즉시 렌더링 (로딩 완료 직후 바로 표시)
+        this.priorityRenderFirstPages();
+
+        console.log(`VirtualScrollManager 초기화: ${totalPages}페이지, 비율 ${aspectRatio.toFixed(3)}`);
+    }
+
+    // 첫 페이지들 우선 렌더링
+    async priorityRenderFirstPages() {
+        const pagesToRender = Math.min(3, this.totalPages);
+        for (let i = 1; i <= pagesToRender; i++) {
+            const pageEl = this.pageElements.get(i);
+            if (pageEl && pageEl.status === 'placeholder') {
+                // 렌더링 큐 대신 직접 렌더링
+                this.activeRenders++;
+                try {
+                    await this.renderPage(i);
+                } catch (error) {
+                    console.error(`초기 페이지 ${i} 렌더링 실패:`, error);
+                } finally {
+                    this.activeRenders--;
+                }
+            }
+        }
+    }
+
+    // 페이지 크기 재계산
+    recalculatePageDimensions() {
+        const viewportWidth = this.viewport.clientWidth;
+        const padding = 40; // 좌우 패딩
+        this.pageWidth = Math.floor((viewportWidth - padding) * this.viewer.zoomLevel);
+        this.pageHeight = Math.floor(this.pageWidth / this.pageAspectRatio);
+    }
+
+    // 모든 페이지 placeholder 생성
+    createPagePlaceholders() {
+        this.content.innerHTML = '';
+        this.pageElements.clear();
+
+        for (let i = 1; i <= this.totalPages; i++) {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'page-wrapper loading';
+            wrapper.dataset.page = i;
+            wrapper.style.width = `${this.pageWidth}px`;
+            wrapper.style.height = `${this.pageHeight}px`;
+
+            const pageLabel = document.createElement('div');
+            pageLabel.className = 'page-label';
+            pageLabel.textContent = `${i} / ${this.totalPages}`;
+            wrapper.appendChild(pageLabel);
+
+            this.content.appendChild(wrapper);
+
+            this.pageElements.set(i, {
+                wrapper,
+                canvas: null,
+                status: 'placeholder' // 'placeholder' | 'loading' | 'rendered'
+            });
+        }
+    }
+
+    // Intersection Observer 설정
+    setupIntersectionObserver() {
+        if (this.observer) {
+            this.observer.disconnect();
+        }
+
+        const options = {
+            root: this.viewport,
+            rootMargin: `${this.bufferPages * this.pageHeight}px 0px`,
+            threshold: 0.01
+        };
+
+        this.observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                const pageNum = parseInt(entry.target.dataset.page);
+
+                if (entry.isIntersecting) {
+                    this.queuePageRender(pageNum);
+                } else {
+                    this.handlePageHidden(pageNum);
+                }
+            });
+        }, options);
+
+        this.pageElements.forEach((el) => {
+            this.observer.observe(el.wrapper);
+        });
+    }
+
+    // 렌더링 큐에 페이지 추가
+    queuePageRender(pageNum) {
+        const pageEl = this.pageElements.get(pageNum);
+        if (!pageEl || pageEl.status !== 'placeholder') return;
+
+        this.renderQueue.add(pageNum);
+        this.processRenderQueue();
+    }
+
+    // 렌더링 큐 처리
+    async processRenderQueue() {
+        if (this.activeRenders >= this.maxConcurrentRenders) return;
+        if (this.renderQueue.size === 0) return;
+
+        // 현재 뷰포트에 가장 가까운 페이지 우선
+        const currentPage = this.getCurrentVisiblePage();
+        const sortedQueue = Array.from(this.renderQueue).sort((a, b) => {
+            return Math.abs(a - currentPage) - Math.abs(b - currentPage);
+        });
+
+        const pageNum = sortedQueue[0];
+        this.renderQueue.delete(pageNum);
+
+        this.activeRenders++;
+        try {
+            await this.renderPage(pageNum);
+        } finally {
+            this.activeRenders--;
+            this.processRenderQueue();
+        }
+    }
+
+    // 페이지 렌더링
+    async renderPage(pageNum) {
+        const pageEl = this.pageElements.get(pageNum);
+        if (!pageEl || pageEl.status === 'rendered') return;
+
+        pageEl.status = 'loading';
+
+        try {
+            // 캐시 확인
+            let pageData = this.viewer.pageCache.get(pageNum);
+
+            if (!pageData) {
+                // 렌더링 데이터 가져오기
+                pageData = await this.viewer.renderPageData(pageNum);
+                this.viewer.addToCache(pageNum, pageData);
+            }
+
+            // 캔버스 생성
+            const canvas = document.createElement('canvas');
+            canvas.className = 'page-canvas';
+            canvas.width = this.pageWidth;
+            canvas.height = this.pageHeight;
+
+            // 분판 적용하여 캔버스에 렌더링
+            this.renderToCanvas(canvas, pageData);
+
+            // DOM에 삽입
+            pageEl.wrapper.innerHTML = '';
+            pageEl.wrapper.appendChild(canvas);
+            pageEl.wrapper.classList.remove('loading');
+            pageEl.canvas = canvas;
+            pageEl.pageData = pageData;
+            pageEl.status = 'rendered';
+
+            // 마우스 이벤트 바인딩
+            canvas.addEventListener('mousemove', (e) => {
+                this.viewer.handleCanvasMouseMove(e, pageNum, canvas, pageData);
+            });
+            canvas.addEventListener('mouseleave', () => {
+                this.viewer.clearMouseInfo();
+            });
+
+        } catch (error) {
+            console.error(`페이지 ${pageNum} 렌더링 실패:`, error);
+            pageEl.status = 'placeholder';
+        }
+    }
+
+    // 캔버스에 렌더링 (분판 적용)
+    renderToCanvas(canvas, pageData) {
+        const ctx = canvas.getContext('2d');
+        const { imageData } = pageData;
+
+        if (!imageData || imageData.type !== 'cmyk') {
+            ctx.fillStyle = '#f0f0f0';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            return;
+        }
+
+        // 현재 분판 설정 가져오기
+        const separations = this.viewer.getCurrentSeparations();
+        const spotColorData = pageData.spotColorData || {};
+
+        // CMYK 렌더링
+        const srcWidth = imageData.width;
+        const srcHeight = imageData.height;
+        const dstWidth = canvas.width;
+        const dstHeight = canvas.height;
+
+        // 임시 캔버스에 원본 크기로 렌더링
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = srcWidth;
+        tempCanvas.height = srcHeight;
+        const tempCtx = tempCanvas.getContext('2d');
+        const tempImageData = tempCtx.createImageData(srcWidth, srcHeight);
+
+        const { cyan, magenta, yellow, black } = imageData.channels;
+        const pixels = tempImageData.data;
+
+        for (let i = 0; i < srcWidth * srcHeight; i++) {
+            let c = separations.cyan ? cyan[i] : 0;
+            let m = separations.magenta ? magenta[i] : 0;
+            let y = separations.yellow ? yellow[i] : 0;
+            let k = separations.black ? black[i] : 0;
+
+            // 별색 합성
+            for (const [colorName, colorData] of Object.entries(spotColorData)) {
+                if (separations.spotColors && separations.spotColors[colorName]) {
+                    const spotValue = colorData[i] || 0;
+                    if (spotValue > 0) {
+                        const rgb = getSpotColorRGB(colorName);
+                        const spotK = spotValue / 255;
+                        c = Math.min(255, c + (255 - rgb.r) * spotK);
+                        m = Math.min(255, m + (255 - rgb.g) * spotK);
+                        y = Math.min(255, y + (255 - rgb.b) * spotK);
+                    }
+                }
+            }
+
+            // CMYK to RGB
+            const kFactor = 1 - k / 255;
+            const r = Math.max(0, Math.min(255, 255 * (1 - c / 255) * kFactor));
+            const g = Math.max(0, Math.min(255, 255 * (1 - m / 255) * kFactor));
+            const b = Math.max(0, Math.min(255, 255 * (1 - y / 255) * kFactor));
+
+            const idx = i * 4;
+            pixels[idx] = r;
+            pixels[idx + 1] = g;
+            pixels[idx + 2] = b;
+            pixels[idx + 3] = 255;
+        }
+
+        tempCtx.putImageData(tempImageData, 0, 0);
+
+        // 스케일링하여 최종 캔버스에 그리기
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(tempCanvas, 0, 0, dstWidth, dstHeight);
+    }
+
+    // 페이지 언마운트
+    handlePageHidden(pageNum) {
+        const pageEl = this.pageElements.get(pageNum);
+        if (!pageEl || pageEl.status === 'placeholder') return;
+
+        // 렌더링 큐에서 제거
+        this.renderQueue.delete(pageNum);
+
+        // 메모리 해제 (단, 일정 범위는 유지)
+        const currentPage = this.getCurrentVisiblePage();
+        const distance = Math.abs(pageNum - currentPage);
+
+        if (distance > this.bufferPages + 2) {
+            if (pageEl.canvas) {
+                const ctx = pageEl.canvas.getContext('2d');
+                ctx.clearRect(0, 0, pageEl.canvas.width, pageEl.canvas.height);
+                pageEl.canvas.width = 0;
+                pageEl.canvas.height = 0;
+                pageEl.wrapper.innerHTML = '';
+
+                const pageLabel = document.createElement('div');
+                pageLabel.className = 'page-label';
+                pageLabel.textContent = `${pageNum} / ${this.totalPages}`;
+                pageEl.wrapper.appendChild(pageLabel);
+                pageEl.wrapper.classList.add('loading');
+
+                pageEl.canvas = null;
+                pageEl.pageData = null;
+                pageEl.status = 'placeholder';
+            }
+        }
+    }
+
+    // 현재 보이는 페이지 계산
+    getCurrentVisiblePage() {
+        const scrollTop = this.viewport.scrollTop;
+        const viewportHeight = this.viewport.clientHeight;
+        const pageFullHeight = this.pageHeight + this.pageGap;
+
+        // 화면 중앙에 있는 페이지
+        const centerY = scrollTop + viewportHeight / 2;
+        const pageNum = Math.floor(centerY / pageFullHeight) + 1;
+
+        return Math.max(1, Math.min(this.totalPages, pageNum));
+    }
+
+    // 현재 페이지 업데이트
+    updateCurrentPage() {
+        const newPage = this.getCurrentVisiblePage();
+        if (newPage !== this.viewer.currentPage) {
+            this.viewer.currentPage = newPage;
+            this.viewer.updatePageControls();
+        }
+    }
+
+    // 특정 페이지로 스크롤
+    scrollToPage(pageNum) {
+        const pageEl = this.pageElements.get(pageNum);
+        if (!pageEl) return;
+
+        const pageFullHeight = this.pageHeight + this.pageGap;
+        const targetY = (pageNum - 1) * pageFullHeight;
+
+        this.viewport.scrollTo({
+            top: targetY,
+            behavior: 'smooth'
+        });
+    }
+
+    // 줌 변경
+    updateZoom(zoomLevel) {
+        const currentPage = this.getCurrentVisiblePage();
+
+        // 크기 재계산
+        this.recalculatePageDimensions();
+
+        // 모든 wrapper 크기 업데이트
+        this.pageElements.forEach((el, pageNum) => {
+            el.wrapper.style.width = `${this.pageWidth}px`;
+            el.wrapper.style.height = `${this.pageHeight}px`;
+
+            if (el.canvas) {
+                el.canvas.width = this.pageWidth;
+                el.canvas.height = this.pageHeight;
+
+                // 리렌더링
+                if (el.pageData) {
+                    this.renderToCanvas(el.canvas, el.pageData);
+                }
+            }
+        });
+
+        // Observer 재설정 (rootMargin 변경)
+        this.setupIntersectionObserver();
+
+        // 현재 페이지로 스크롤 복원
+        requestAnimationFrame(() => {
+            this.scrollToPage(currentPage);
+        });
+    }
+
+    // 모든 보이는 페이지 리렌더링 (분판 변경 시)
+    updateAllVisiblePages() {
+        this.pageElements.forEach((el) => {
+            if (el.status === 'rendered' && el.canvas && el.pageData) {
+                this.renderToCanvas(el.canvas, el.pageData);
+            }
+        });
+    }
+
+    // 디바운스 유틸리티
+    debounce(func, wait) {
+        let timeout;
+        return (...args) => {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => func.apply(this, args), wait);
+        };
+    }
+
+    // 정리
+    destroy() {
+        if (this.observer) {
+            this.observer.disconnect();
+        }
+        this.pageElements.clear();
+        this.renderQueue.clear();
+        this.content.innerHTML = '';
+    }
+}
+
 class PDFSeparationViewer {
     constructor() {
-        this.canvas = document.getElementById('pdf-canvas');
+        // 스크롤 뷰어에서는 개별 페이지마다 캔버스가 동적 생성됨
+        // 기존 호환성을 위해 더미 캔버스 생성
+        this.canvas = document.createElement('canvas');
         this.ctx = this.canvas.getContext('2d');
         this.currentPDF = null;
         this.ghostscript = null;
@@ -52,6 +465,15 @@ class PDFSeparationViewer {
         // 페이지별 CMYK 채널 사용량 저장
         this.pageChannelData = {};
 
+        // 병렬 처리용 WorkerPool 설정
+        this.workerPool = null;
+        this.workerPoolSize = navigator.hardwareConcurrency || 4; // CPU 코어 수 기반
+
+        // 페이지 캐시 (빠른 페이지 전환용)
+        this.pageCache = new Map(); // pageNum -> { imageData, baseWidth, baseHeight, spotColorData }
+        this.pageCacheSize = 5; // 최대 캐시 페이지 수
+        this.preloadingPages = new Set(); // 현재 프리로딩 중인 페이지
+
         // 별색 관련 속성
         this.spotColors = [];           // 감지된 별색 이름 목록
         this.spotColorData = {};        // { 'PANTONE 186 C': Uint8Array (그레이스케일) }
@@ -59,11 +481,18 @@ class PDFSeparationViewer {
         this.spotColorRatios = {};      // { 'PANTONE 186 C': 15.3 }
         this.pageSpotColorData = {};    // { pageNum: { 'PANTONE 186 C': count } }
 
+        // 스크롤 뷰어 매니저
+        this.scrollManager = null;
 
         this.initializeElements();
         this.bindEvents();
-        this.initializeCanvas();
+        this.initializeScrollViewer();
         this.loadGhostscript();
+    }
+
+    // 스크롤 뷰어 초기화
+    initializeScrollViewer() {
+        this.scrollManager = new VirtualScrollManager(this);
     }
 
     initializeCanvas() {
@@ -186,10 +615,13 @@ class PDFSeparationViewer {
         this.zoomSlider.addEventListener('input', (e) => {
             this.zoomLevel = parseInt(e.target.value) / 100;
             this.zoomValue.textContent = e.target.value + '%';
-            this.renderCurrentPage();
+            // 스크롤 뷰어 줌 업데이트
+            if (this.scrollManager && this.scrollManager.totalPages > 0) {
+                this.scrollManager.updateZoom(this.zoomLevel);
+            }
         });
 
-        // 페이지 네비게이션
+        // 페이지 네비게이션 (스크롤 방식)
         this.prevPageBtn.addEventListener('click', () => this.goToPreviousPage());
         this.nextPageBtn.addEventListener('click', () => this.goToNextPage());
 
@@ -346,6 +778,11 @@ class PDFSeparationViewer {
                 this.pendingRequests.set('init', { resolve, reject });
                 this.worker.postMessage({ type: 'init' });
             });
+
+            // 병렬 스캔용 WorkerPool 초기화
+            this.workerPool = new WorkerPool('./ghostscript-worker.js', this.workerPoolSize);
+            await this.workerPool.init();
+            console.log(`WorkerPool initialized with ${this.workerPoolSize} workers for parallel scanning`);
 
             this.ghostscript = {
                 loadPDF: async (data) => {
@@ -718,6 +1155,9 @@ class PDFSeparationViewer {
                 this.currentPage = 1;
 
 
+                // 페이지 캐시 클리어
+                this.clearPageCache();
+
                 // 전체 페이지 CMYK 데이터 수집 초기화
                 this.totalChannelCounts = { cyan: 0, magenta: 0, yellow: 0, black: 0 };
                 this.totalPixelCount = 0;
@@ -726,9 +1166,21 @@ class PDFSeparationViewer {
                 this.showLoading('초기화 중...', '66%');
                 await this.loadSpotColors();
 
-                // 3단계: 첫 페이지 렌더링 (100%)
-                this.showLoading('첫 페이지 렌더링 중...', '100%');
-                await this.renderCurrentPage();
+                // 3단계: 스크롤 뷰어 초기화 (100%)
+                this.showLoading('뷰어 초기화 중...', '100%');
+
+                // 첫 페이지 크기 가져오기
+                let aspectRatio = 1 / 1.414; // A4 기본값
+                try {
+                    const pageSize = await this.ghostscript.getPageSize(1);
+                    aspectRatio = pageSize.width / pageSize.height;
+                } catch (e) {
+                    console.warn('페이지 크기 조회 실패, 기본 비율 사용');
+                }
+
+                // 스크롤 뷰어 초기화
+                this.scrollManager.init(this.totalPages, aspectRatio);
+                this.updatePageControls();
 
                 // 렌더링 완료 후 로딩 숨김
                 this.hideLoading();
@@ -748,43 +1200,112 @@ class PDFSeparationViewer {
     }
 
     async scanAllPagesInBackground() {
-        // 항상 기존 방식(tiff32nc)으로 CMYK 스캔 (tiffsep은 WASM에서 실패)
+        // 병렬 처리를 위해 WorkerPool 사용
+        const startTime = performance.now();
+
+        // 예상 시간 계산 (병렬 처리로 인해 더 빠름)
         const estimatedTimePerPage = 2;
-        const estimatedTotalSeconds = this.totalPages * estimatedTimePerPage;
+        const parallelFactor = Math.min(this.workerPoolSize, this.totalPages);
+        const estimatedTotalSeconds = Math.ceil((this.totalPages * estimatedTimePerPage) / parallelFactor);
         const estimatedMinutes = Math.ceil(estimatedTotalSeconds / 60);
-        const estimatedTimeText = `약 ${estimatedMinutes}분 소요`;
+        const estimatedTimeText = `약 ${estimatedMinutes}분 소요 (${this.workerPoolSize}개 병렬 처리)`;
 
-        for (let pageNum = 1; pageNum <= this.totalPages; pageNum++) {
-            try {
-                const scanWidth = 200;  // 작은 크기로 빠르게
-                const scanHeight = 280; // A4 비율 대략
+        // WorkerPool에 PDF 데이터 설정
+        if (this.workerPool && this.currentPDFData) {
+            this.workerPool.setPDFData(this.currentPDFData);
+        }
 
-                const renderOptions = {
-                    width: scanWidth,
-                    height: scanHeight,
-                    pdfWidth: scanWidth,
-                    pdfHeight: scanHeight,
-                    pageNum: pageNum,
-                    useCMYK: true,
-                    separations: []
-                };
+        const scanWidth = 200;  // 작은 크기로 빠르게
+        const scanHeight = 280; // A4 비율 대략
 
-                const imageData = await this.ghostscript.renderPage(pageNum, renderOptions);
+        // 페이지 번호 배열 생성
+        const pageNumbers = Array.from({ length: this.totalPages }, (_, i) => i + 1);
 
-                // CMYK 데이터 누적 (페이지 번호 전달)
-                if (imageData && imageData.type === 'cmyk') {
-                    this.accumulateChannelData(imageData, pageNum);
+        // 완료된 페이지 카운터
+        let completedPages = 0;
 
-                    // 매 페이지마다 UI 업데이트
-                    const ratios = this.calculateTotalChannelRatios();
-                    this.updateChannelRatios(ratios);
+        // 옵션 생성 함수
+        const optionsGenerator = (pageNum) => ({
+            width: scanWidth,
+            height: scanHeight,
+            pdfWidth: scanWidth,
+            pdfHeight: scanHeight,
+            pageNum: pageNum,
+            useCMYK: true,
+            separations: []
+        });
 
-                    // 왼쪽 패널 진행률 업데이트
-                    this.updateScanProgress(pageNum, this.totalPages, estimatedTimeText);
+        // 페이지 완료 콜백 (TIFF 변환 및 UI 업데이트)
+        const onPageComplete = async (result) => {
+            completedPages++;
+
+            if (result.success && result.result) {
+                try {
+                    const { format, data, width, height } = result.result;
+
+                    if (format === 'tiff' && data) {
+                        // TIFF를 CMYK로 변환
+                        const imageData = await this.convertTIFFToCMYK(data, width, height);
+
+                        if (imageData && imageData.type === 'cmyk') {
+                            this.accumulateChannelData(imageData, result.pageNum);
+                        }
+                    }
+                } catch (error) {
+                    console.error(`페이지 ${result.pageNum} 변환 실패:`, error);
                 }
-            } catch (error) {
-                console.error(`페이지 ${pageNum} 스캔 실패:`, error);
+            } else {
+                console.error(`페이지 ${result.pageNum} 스캔 실패:`, result.error);
             }
+
+            // UI 업데이트 (throttle: 5페이지마다 또는 마지막 페이지)
+            if (completedPages % 5 === 0 || completedPages === this.totalPages) {
+                const ratios = this.calculateTotalChannelRatios();
+                this.updateChannelRatios(ratios);
+                this.updateScanProgress(completedPages, this.totalPages, estimatedTimeText);
+            }
+        };
+
+        try {
+            // WorkerPool이 있으면 병렬 처리, 없으면 순차 처리
+            if (this.workerPool) {
+                console.log(`병렬 스캔 시작: ${this.totalPages}페이지, ${this.workerPoolSize}개 Worker`);
+
+                // 배치 크기를 Worker 수의 2배로 설정 (메모리와 성능 균형)
+                const batchSize = this.workerPoolSize * 2;
+
+                const results = await this.workerPool.renderPagesInBatches(
+                    pageNumbers,
+                    optionsGenerator,
+                    batchSize,
+                    onPageComplete
+                );
+
+                const endTime = performance.now();
+                const elapsedSeconds = ((endTime - startTime) / 1000).toFixed(1);
+                console.log(`병렬 스캔 완료: ${this.totalPages}페이지, ${elapsedSeconds}초 소요`);
+
+            } else {
+                // Fallback: 기존 순차 처리
+                console.log('WorkerPool 없음, 순차 스캔으로 대체');
+                for (const pageNum of pageNumbers) {
+                    const options = optionsGenerator(pageNum);
+                    try {
+                        const result = await this.ghostscript.renderPage(pageNum, options);
+                        await onPageComplete({ pageNum, result: { format: 'tiff', data: result?.data, width: options.width, height: options.height }, success: true });
+                    } catch (error) {
+                        await onPageComplete({ pageNum, error, success: false });
+                    }
+                }
+            }
+
+            // 최종 UI 업데이트
+            const ratios = this.calculateTotalChannelRatios();
+            this.updateChannelRatios(ratios);
+            this.updateScanProgress(this.totalPages, this.totalPages, '완료!');
+
+        } catch (error) {
+            console.error('병렬 스캔 중 오류:', error);
         }
 
         // 완료 후 3초 뒤에 진행률 바 숨김
@@ -936,131 +1457,182 @@ class PDFSeparationViewer {
             return;
         }
 
-        // 페이지 이동 시에만 로딩 표시 (초기 로딩은 loadPDF에서 처리)
-        const isInitialLoad = this.currentPage === 1 && !this.baseImageData;
-        if (!isInitialLoad) {
-            this.showLoading('페이지 렌더링 중...', `페이지 ${this.currentPage}/${this.totalPages}`);
+        // 캐시에서 페이지 데이터 확인
+        const cached = this.pageCache.get(this.currentPage);
+        if (cached) {
+            this.baseImageData = cached.imageData;
+            this.baseWidth = cached.baseWidth;
+            this.baseHeight = cached.baseHeight;
+            this.spotColorData = cached.spotColorData || {};
+            this.applyZoomAndSeparation();
+            this.updatePageControls();
+            this.lastZoomLevel = this.zoomLevel;
+            // 인접 페이지 프리로드
+            this.preloadAdjacentPages();
+            return;
         }
 
         try {
-            // PDF 페이지의 실제 크기 가져오기 (포인트 단위)
-            let pageSize;
-            let pdfAspectRatio;
+            // 페이지 렌더링 및 캐싱
+            const pageData = await this.renderPageData(this.currentPage);
 
-            try {
-                pageSize = await this.ghostscript.getPageSize(this.currentPage);
-                pdfAspectRatio = pageSize.width / pageSize.height;
-            } catch (error) {
-                console.warn('PDF 크기 조회 실패, 기본 비율 사용:', error);
-                // 기본값: A4 비율
-                pdfAspectRatio = 1 / 1.414;
-            }
+            this.baseImageData = pageData.imageData;
+            this.baseWidth = pageData.baseWidth;
+            this.baseHeight = pageData.baseHeight;
+            this.spotColorData = pageData.spotColorData || {};
 
-            // 컨테이너 크기 확인 (padding 제거했으므로 전체 크기 사용)
-            const container = this.canvas.parentElement;
-            const containerWidth = container.clientWidth;
-            const containerHeight = container.clientHeight;
-
-            // 100% 줌일 때 컨테이너 가로에 꽉 차게 표시 (세로는 스크롤)
-            let baseWidth = containerWidth;
-            let baseHeight = Math.floor(baseWidth / pdfAspectRatio);
-
-            // Ghostscript 렌더링은 실제 표시 크기와 동일하게 (1:1)
-            // DPI를 높여서 고해상도를 얻는 방식으로 변경
-            const renderWidth = baseWidth;
-            const renderHeight = baseHeight;
-
-            // 별색이 있으면 tiffsep으로 렌더링 시도
-            const hasSpotColors = this.spotColors && this.spotColors.length > 0;
-            let tiffsepSuccessful = false;
-
-            if (hasSpotColors) {
-                try {
-
-                    const result = await this.ghostscript.processTiffsep(
-                        this.currentPDFData,
-                        this.currentPage,
-                        150  // 고해상도 (표시용)
-                    );
-
-                    if (result && result.channels && Object.keys(result.channels).length > 0) {
-                        const { channels, width, height } = result;
-
-                        // CMYK 채널 데이터 추출 및 파싱 (TIFF 형식)
-                        const cyanParsed = await this.parseSpotColorTIFF(channels['Cyan'], 'Cyan');
-                        const magentaParsed = await this.parseSpotColorTIFF(channels['Magenta'], 'Magenta');
-                        const yellowParsed = await this.parseSpotColorTIFF(channels['Yellow'], 'Yellow');
-                        const blackParsed = await this.parseSpotColorTIFF(channels['Black'], 'Black');
-
-                        const cmykChannels = {
-                            cyan: cyanParsed.data,
-                            magenta: magentaParsed.data,
-                            yellow: yellowParsed.data,
-                            black: blackParsed.data
-                        };
-
-                        // CMYK 데이터 생성
-                        const imageData = {
-                            type: 'cmyk',
-                            width: width || cyanParsed.width, // width가 없으면 파싱된 너비 사용
-                            height: height || cyanParsed.height,
-                            channels: cmykChannels
-                        };
-
-                        // 별색 채널 데이터 추출 및 저장
-                        this.spotColorData = {};
-                        for (const colorName of this.spotColors) {
-                            if (channels[colorName]) {
-                                // TIFF 데이터를 파싱하여 그레이스케일 채널 추출
-                                const parsed = await this.parseSpotColorTIFF(channels[colorName], colorName);
-                                this.spotColorData[colorName] = parsed.data;
-                            }
-                        }
-
-
-                        this.baseImageData = imageData;
-                        this.baseWidth = baseWidth;
-                        this.baseHeight = baseHeight;
-                        tiffsepSuccessful = true;
-                    } else {
-                        console.warn('tiffsep 렌더링 결과가 비어있습니다. CMYK 모드로 전환합니다.');
-                    }
-                } catch (error) {
-                    console.error('tiffsep 렌더링 중 오류 발생, CMYK 모드로 전환합니다:', error);
-                }
-            }
-
-            // 별색이 없거나 tiffsep 렌더링 실패 시 기존 CMYK 전용 렌더링 방식 사용
-            if (!tiffsepSuccessful) {
-                const renderOptions = this.buildRenderOptions();
-                renderOptions.width = renderWidth;
-                renderOptions.height = renderHeight;
-                renderOptions.pdfWidth = pageSize?.width || renderWidth;
-                renderOptions.pdfHeight = pageSize?.height || renderHeight;
-                renderOptions.pageNum = this.currentPage;
-                renderOptions.useCMYK = true;  // CMYK TIFF 모드 사용
-
-
-                const imageData = await this.ghostscript.renderPage(this.currentPage, renderOptions);
-
-                this.baseImageData = imageData;
-                this.baseWidth = baseWidth;  // 100% 줌일 때의 표시 크기
-                this.baseHeight = baseHeight;
-            }
+            // 캐시에 저장
+            this.addToCache(this.currentPage, pageData);
 
             this.applyZoomAndSeparation();
             this.updatePageControls();
             this.lastZoomLevel = this.zoomLevel;
 
-            // 페이지 이동 시에만 로딩 숨김 (초기 로딩은 loadPDF에서 처리)
-            if (!isInitialLoad) {
-                this.hideLoading();
-            }
+            // 인접 페이지 프리로드
+            this.preloadAdjacentPages();
+
         } catch (error) {
             console.error('페이지 렌더링 실패:', error);
-            this.hideLoading();
             this.showError('페이지를 렌더링할 수 없습니다.');
         }
+    }
+
+    // 페이지 데이터 렌더링 (캐시/프리로드용)
+    async renderPageData(pageNum) {
+        // PDF 페이지의 실제 크기 가져오기 (포인트 단위)
+        let pageSize;
+        let pdfAspectRatio;
+
+        try {
+            pageSize = await this.ghostscript.getPageSize(pageNum);
+            pdfAspectRatio = pageSize.width / pageSize.height;
+        } catch (error) {
+            console.warn('PDF 크기 조회 실패, 기본 비율 사용:', error);
+            pdfAspectRatio = 1 / 1.414;
+        }
+
+        // 컨테이너 크기 확인 (스크롤 뷰포트 사용)
+        const container = document.getElementById('scroll-viewport');
+        const containerWidth = container ? container.clientWidth - 40 : 800; // 40px 패딩
+
+        // 100% 줌일 때 컨테이너 가로에 꽉 차게 표시
+        const baseWidth = containerWidth;
+        const baseHeight = Math.floor(baseWidth / pdfAspectRatio);
+        const renderWidth = baseWidth;
+        const renderHeight = baseHeight;
+
+        let imageData = null;
+        let spotColorData = {};
+
+        // 별색이 있으면 tiffsep으로 렌더링 시도
+        const hasSpotColors = this.spotColors && this.spotColors.length > 0;
+        let tiffsepSuccessful = false;
+
+        if (hasSpotColors) {
+            try {
+                const result = await this.ghostscript.processTiffsep(
+                    this.currentPDFData,
+                    pageNum,
+                    150
+                );
+
+                if (result && result.channels && Object.keys(result.channels).length > 0) {
+                    const { channels, width, height } = result;
+
+                    const cyanParsed = await this.parseSpotColorTIFF(channels['Cyan'], 'Cyan');
+                    const magentaParsed = await this.parseSpotColorTIFF(channels['Magenta'], 'Magenta');
+                    const yellowParsed = await this.parseSpotColorTIFF(channels['Yellow'], 'Yellow');
+                    const blackParsed = await this.parseSpotColorTIFF(channels['Black'], 'Black');
+
+                    imageData = {
+                        type: 'cmyk',
+                        width: width || cyanParsed.width,
+                        height: height || cyanParsed.height,
+                        channels: {
+                            cyan: cyanParsed.data,
+                            magenta: magentaParsed.data,
+                            yellow: yellowParsed.data,
+                            black: blackParsed.data
+                        }
+                    };
+
+                    for (const colorName of this.spotColors) {
+                        if (channels[colorName]) {
+                            const parsed = await this.parseSpotColorTIFF(channels[colorName], colorName);
+                            spotColorData[colorName] = parsed.data;
+                        }
+                    }
+                    tiffsepSuccessful = true;
+                }
+            } catch (error) {
+                console.error('tiffsep 렌더링 오류:', error);
+            }
+        }
+
+        if (!tiffsepSuccessful) {
+            const renderOptions = this.buildRenderOptions();
+            renderOptions.width = renderWidth;
+            renderOptions.height = renderHeight;
+            renderOptions.pdfWidth = pageSize?.width || renderWidth;
+            renderOptions.pdfHeight = pageSize?.height || renderHeight;
+            renderOptions.pageNum = pageNum;
+            renderOptions.useCMYK = true;
+
+            imageData = await this.ghostscript.renderPage(pageNum, renderOptions);
+        }
+
+        return { imageData, baseWidth, baseHeight, spotColorData };
+    }
+
+    // 캐시에 페이지 추가
+    addToCache(pageNum, pageData) {
+        // 캐시가 가득 차면 가장 오래된 항목 제거
+        if (this.pageCache.size >= this.pageCacheSize) {
+            const firstKey = this.pageCache.keys().next().value;
+            this.pageCache.delete(firstKey);
+        }
+        this.pageCache.set(pageNum, pageData);
+    }
+
+    // 인접 페이지 프리로드
+    preloadAdjacentPages() {
+        const pagesToPreload = [];
+
+        // 다음 2페이지, 이전 1페이지 프리로드
+        if (this.currentPage < this.totalPages) {
+            pagesToPreload.push(this.currentPage + 1);
+        }
+        if (this.currentPage + 1 < this.totalPages) {
+            pagesToPreload.push(this.currentPage + 2);
+        }
+        if (this.currentPage > 1) {
+            pagesToPreload.push(this.currentPage - 1);
+        }
+
+        for (const pageNum of pagesToPreload) {
+            // 이미 캐시에 있거나 프리로딩 중이면 스킵
+            if (this.pageCache.has(pageNum) || this.preloadingPages.has(pageNum)) {
+                continue;
+            }
+
+            this.preloadingPages.add(pageNum);
+
+            // 백그라운드에서 프리로드 (에러 무시)
+            this.renderPageData(pageNum)
+                .then(pageData => {
+                    this.addToCache(pageNum, pageData);
+                })
+                .catch(() => {})
+                .finally(() => {
+                    this.preloadingPages.delete(pageNum);
+                });
+        }
+    }
+
+    // PDF 로드 시 캐시 클리어
+    clearPageCache() {
+        this.pageCache.clear();
+        this.preloadingPages.clear();
     }
 
     applyZoomAndSeparation() {
@@ -1117,10 +1689,11 @@ class PDFSeparationViewer {
             return;
         }
 
-        if (pageNum !== this.currentPage) {
+        // 스크롤 뷰어 모드: 해당 페이지로 스크롤
+        if (this.scrollManager && this.scrollManager.totalPages > 0) {
+            this.scrollManager.scrollToPage(pageNum);
             this.currentPage = pageNum;
-            this.baseImageData = null; // 새 페이지 렌더링 강제
-            this.renderCurrentPage();
+            this.updatePageControls();
         }
     }
 
@@ -1746,6 +2319,13 @@ class PDFSeparationViewer {
     }
 
     async updateSeparation() {
+        // 스크롤 뷰어 모드: 모든 보이는 페이지 리렌더링
+        if (this.scrollManager && this.scrollManager.totalPages > 0) {
+            this.scrollManager.updateAllVisiblePages();
+            return;
+        }
+
+        // 기존 단일 페이지 모드 (폴백)
         if (this.currentPDF && this.baseImageData) {
             // CMYK 데이터인 경우
             if (this.baseImageData.type === 'cmyk') {
@@ -1769,6 +2349,25 @@ class PDFSeparationViewer {
                 this.applyColorSeparation(this.originalImageData);
             }
         }
+    }
+
+    // 현재 분판 설정 가져오기
+    getCurrentSeparations() {
+        const separations = {
+            cyan: this.cmykCheckboxes.cyan?.checked ?? true,
+            magenta: this.cmykCheckboxes.magenta?.checked ?? true,
+            yellow: this.cmykCheckboxes.yellow?.checked ?? true,
+            black: this.cmykCheckboxes.black?.checked ?? true,
+            spotColors: {}
+        };
+
+        // 별색 체크박스 상태
+        for (const colorName of this.spotColors) {
+            const checkbox = this.spotColorCheckboxes[colorName];
+            separations.spotColors[colorName] = checkbox?.checked ?? true;
+        }
+
+        return separations;
     }
 
     async handleMouseMove(event) {
@@ -1908,6 +2507,98 @@ class PDFSeparationViewer {
         if (this.spotInkInfoContainer) {
             this.spotInkInfoContainer.innerHTML = '';
             this.spotInkInfoContainer.style.display = 'none';
+        }
+    }
+
+    // 스크롤 뷰어용 개별 페이지 캔버스 마우스 이벤트 핸들러
+    handleCanvasMouseMove(event, pageNum, canvas, pageData) {
+        if (!this.currentPDF || !pageData || !pageData.imageData) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const x = event.clientX - rect.left;
+        const y = event.clientY - rect.top;
+
+        // 캔버스 실제 크기와 표시 크기 비율 계산
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+
+        const canvasX = Math.floor(x * scaleX);
+        const canvasY = Math.floor(y * scaleY);
+
+        // 범위 체크
+        if (canvasX < 0 || canvasX >= canvas.width || canvasY < 0 || canvasY >= canvas.height) {
+            return;
+        }
+
+        this.cursorCoordsElement.textContent = `${canvasX}, ${canvasY} (p.${pageNum})`;
+
+        try {
+            let inkValues;
+            let spotColorInkValues = {};
+            const imgData = pageData.imageData;
+
+            // CMYK 타입 데이터 (tiffsep 또는 ghostscript CMYK 출력)
+            if (imgData.type === 'cmyk' && imgData.channels) {
+                const { width, height, channels } = imgData;
+
+                // 캔버스 좌표를 원본 CMYK 데이터 좌표로 변환
+                const origX = Math.floor((canvasX / canvas.width) * width);
+                const origY = Math.floor((canvasY / canvas.height) * height);
+                const pixelIndex = origY * width + origX;
+
+                if (pixelIndex >= 0 && pixelIndex < width * height) {
+                    inkValues = {
+                        cyan: (channels.cyan[pixelIndex] / 255) * 100,
+                        magenta: (channels.magenta[pixelIndex] / 255) * 100,
+                        yellow: (channels.yellow[pixelIndex] / 255) * 100,
+                        black: (channels.black[pixelIndex] / 255) * 100
+                    };
+
+                    // 별색 잉크량 계산
+                    if (pageData.spotColorData && Object.keys(pageData.spotColorData).length > 0) {
+                        for (const colorName of Object.keys(pageData.spotColorData)) {
+                            const spotData = pageData.spotColorData[colorName];
+                            if (spotData && pixelIndex < spotData.length) {
+                                spotColorInkValues[colorName] = (spotData[pixelIndex] / 255) * 100;
+                            }
+                        }
+                    }
+                }
+            } else if (imgData.data) {
+                // RGB ImageData에서 CMYK 근사 계산
+                const imgWidth = imgData.width;
+                const imgHeight = imgData.height;
+
+                const origX = Math.floor((canvasX / canvas.width) * imgWidth);
+                const origY = Math.floor((canvasY / canvas.height) * imgHeight);
+                const pixelIndex = (origY * imgWidth + origX) * 4;
+
+                if (pixelIndex >= 0 && pixelIndex < imgData.data.length - 3) {
+                    const r = imgData.data[pixelIndex];
+                    const g = imgData.data[pixelIndex + 1];
+                    const b = imgData.data[pixelIndex + 2];
+
+                    const k = 1 - Math.max(r, g, b) / 255;
+                    const c = k >= 1 ? 0 : (1 - r / 255 - k) / (1 - k);
+                    const m = k >= 1 ? 0 : (1 - g / 255 - k) / (1 - k);
+                    const yVal = k >= 1 ? 0 : (1 - b / 255 - k) / (1 - k);
+
+                    inkValues = {
+                        cyan: c * 100,
+                        magenta: m * 100,
+                        yellow: yVal * 100,
+                        black: k * 100
+                    };
+                }
+            }
+
+            if (inkValues) {
+                const tac = this.calculateTAC(inkValues);
+                this.tacValueElement.textContent = tac.toFixed(1);
+                this.updateSpotColorInkInfo(spotColorInkValues);
+            }
+        } catch (error) {
+            console.error('잉크값 조회 실패:', error);
         }
     }
 
