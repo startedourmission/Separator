@@ -78,12 +78,7 @@
                     <!-- 동적으로 생성됨 -->
                 </div>
             </div>
-            <div class="viewer-controls">
-                <h3>워터마크 일괄 적용</h3>
-                <textarea id="watermark-text" rows="5"
-                    placeholder="user1@example.com&#13;&#10;user2@example.com&#13;&#10;user3@example.com"></textarea>
-                <button id="apply-watermark" , onclick="downloadWatermarkedPdf()">적용</button>
-            </div>
+            <!-- Watermark controls moved to right panel -->
 
             <div class="viewer-controls">
                 <h3>뷰어 제어</h3>
@@ -119,6 +114,15 @@
                     <div id="loading-text">로딩 중...</div>
                     <div id="loading-progress" class="loading-progress"></div>
                 </div>
+            </div>
+        </div>
+
+        <div class="controls right-panel">
+            <div class="viewer-controls">
+                <h3>워터마크 일괄 적용</h3>
+                <textarea id="watermark-text" rows="5"
+                    placeholder="user1@example.com&#13;&#10;user2@example.com&#13;&#10;user3@example.com"></textarea>
+                <button id="apply-watermark" , onclick="downloadWatermarkedPdf()">적용</button>
             </div>
         </div>
     </div>

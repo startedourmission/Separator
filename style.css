@@ -16,7 +16,7 @@ body {
     margin: 0 auto;
     padding: 20px;
     display: grid;
-    grid-template-columns: 320px 1fr;
+    grid-template-columns: 320px 1fr 320px;
     grid-template-rows: auto minmax(0, 1fr);
     gap: 20px;
     height: 100vh;
@@ -686,15 +686,19 @@ h4 {
     min-height: 20px;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 1024px) {
     .container {
         grid-template-columns: 1fr;
-        grid-template-rows: auto auto 1fr;
+        grid-template-rows: auto auto auto 1fr;
         height: auto;
     }
 
     .controls {
         order: 2;
+    }
+
+    .controls.right-panel {
+        order: 3;
     }
 
     .canvas-container {
