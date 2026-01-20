@@ -17,7 +17,7 @@ body {
     padding: 20px;
     display: grid;
     grid-template-columns: 320px 1fr;
-    grid-template-rows: auto 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
     gap: 20px;
     height: 100vh;
 }
@@ -41,7 +41,7 @@ h1 {
     padding: 15px;
     border-radius: 8px;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-    height: fit-content;
+    max-height: 100%;
     overflow-y: auto;
 }
 
