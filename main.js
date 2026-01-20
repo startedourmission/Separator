@@ -630,10 +630,7 @@ class PDFSeparationViewer {
             Object.values(this.cmykCheckboxes).forEach(checkbox => {
                 checkbox.checked = isChecked;
             });
-            // Task 7: 별색 체크박스도 함께 선택/해제
-            Object.values(this.spotColorCheckboxes).forEach(checkbox => {
-                checkbox.checked = isChecked;
-            });
+            // 별색 체크박스는 건드리지 않음 (Task: 별색 체크박스 제거됨)
             this.updateSeparation();
         });
 
@@ -1468,7 +1465,7 @@ class PDFSeparationViewer {
             this.spotColorCheckboxes[colorName] = checkbox;
 
             // DOM에 추가
-            controlDiv.appendChild(checkbox);
+            // controlDiv.appendChild(checkbox); // UI에서 별색 체크박스 제거
             controlDiv.appendChild(label);
             controlDiv.appendChild(ratioSpan);
             this.spotControlsContainer.appendChild(controlDiv);
@@ -1482,13 +1479,10 @@ class PDFSeparationViewer {
         // CMYK 체크박스가 모두 체크되어 있는지 확인
         const allCMYKChecked = Object.values(this.cmykCheckboxes).every(cb => cb.checked);
 
-        // 별색 체크박스가 모두 체크되어 있는지 확인
-        // 빈 객체일 경우 true로 처리 (별색 없으면 CMYK만 체크)
-        const spotCheckboxes = Object.values(this.spotColorCheckboxes);
-        const allSpotColorsChecked = spotCheckboxes.length === 0 || spotCheckboxes.every(cb => cb.checked);
+        // 별색 체크박스 확인 로직 제거 (항상 켜져있거나 제어 불가능하므로 CMYK만 확인)
 
-        // CMYK와 별색 모두 체크되어 있으면 전체 선택 체크박스도 체크
-        this.selectAllCheckbox.checked = allCMYKChecked && allSpotColorsChecked;
+        // CMYK 모두 체크되어 있으면 전체 선택 체크박스도 체크
+        this.selectAllCheckbox.checked = allCMYKChecked;
     }
 
     async renderCurrentPage() {
