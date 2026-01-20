@@ -396,6 +396,7 @@ class VirtualScrollManager {
         if (newPage !== this.viewer.currentPage) {
             this.viewer.currentPage = newPage;
             this.viewer.updatePageControls();
+            this.viewer.updatePageDimensionInfo(); // 페이지 변경 시 치수 정보 업데이트
         }
     }
 
@@ -519,6 +520,10 @@ class PDFSeparationViewer {
         // 스크롤 뷰어 매니저
         this.scrollManager = null;
 
+        // 페이지 메타데이터 (MediaBox, TrimBox)
+        this.pageMetadata = new Map(); // pageNum -> { mediaBox, trimBox }
+        this.coverCalculatorInputs = { spine: 0, flap: 0 };
+
         this.initializeElements();
         this.bindEvents();
         this.initializeScrollViewer();
@@ -590,6 +595,25 @@ class PDFSeparationViewer {
 
         // Task 5.2: 별색 잉크량 정보 컨테이너
         this.spotInkInfoContainer = document.getElementById('spot-ink-info');
+
+        // 페이지 정보 요소 (New)
+        this.mediaBoxDimElement = document.getElementById('mediabox-dim');
+        this.trimBoxDimElement = document.getElementById('trimbox-dim');
+
+        // 표지 계산기 요소 (New)
+        this.spineInput = document.getElementById('spine-width');
+        this.flapInput = document.getElementById('flap-width');
+        this.coverInput = document.getElementById('cover-width');
+        this.marginInput = document.getElementById('flap-margin-width');
+        this.calcResultElement = document.getElementById('calc-result');
+
+        // 표지 계산기 입력값 저장 (기본값 설정)
+        this.coverCalculatorInputs = {
+            spine: 17,
+            flap: 90,
+            cover: 188,
+            margin: 5
+        };
     }
 
     showLoading(text = '로딩 중...', progress = '') {
@@ -717,6 +741,31 @@ class PDFSeparationViewer {
                     this.closeChannelPageList();
                 }
             });
+        }
+
+
+        // 표지 계산기 입력 이벤트
+        if (this.spineInput && this.flapInput && this.coverInput && this.marginInput) {
+            const updateCalc = () => this.calculateCoverSpread();
+            this.spineInput.addEventListener('input', (e) => {
+                this.coverCalculatorInputs.spine = parseFloat(e.target.value) || 0;
+                updateCalc();
+            });
+            this.flapInput.addEventListener('input', (e) => {
+                this.coverCalculatorInputs.flap = parseFloat(e.target.value) || 0;
+                updateCalc();
+            });
+            this.coverInput.addEventListener('input', (e) => {
+                this.coverCalculatorInputs.cover = parseFloat(e.target.value) || 0;
+                updateCalc();
+            });
+            this.marginInput.addEventListener('input', (e) => {
+                this.coverCalculatorInputs.margin = parseFloat(e.target.value) || 0;
+                updateCalc();
+            });
+
+            // 초기 계산 실행
+            updateCalc();
         }
     }
 
@@ -1231,6 +1280,9 @@ class PDFSeparationViewer {
                 // 백그라운드에서 모든 페이지 스캔 (비동기)
                 this.scanAllPagesInBackground();
 
+                // 메타데이터 추출 (비동기)
+                this.extractPDFMetadata();
+
 
             } else {
                 throw new Error('PDF 로딩 실패');
@@ -1483,6 +1535,137 @@ class PDFSeparationViewer {
 
         // CMYK 모두 체크되어 있으면 전체 선택 체크박스도 체크
         this.selectAllCheckbox.checked = allCMYKChecked;
+    }
+
+
+
+    // PDF 메타데이터 추출 (MediaBox, TrimBox)
+    async extractPDFMetadata() {
+        if (!this.currentPDF) return;
+
+        try {
+            const { PDFDocument } = PDFLib;
+            const pdfDoc = await PDFDocument.load(this.currentPDF);
+            const pages = pdfDoc.getPages();
+
+            this.pageMetadata.clear();
+
+            pages.forEach((page, index) => {
+                const pageNum = index + 1;
+                const { width, height } = page.getSize(); // MediaBox (default)
+
+                // MediaBox 가져오기
+                const mediaBox = page.getMediaBox();
+
+                // TrimBox 가져오기 (없으면 MediaBox 사용)
+                let trimBox = mediaBox;
+                try {
+                    // 1. getTrimBox() 메서드 시도 (표준)
+                    if (typeof page.getTrimBox === 'function') {
+                        trimBox = page.getTrimBox();
+                    }
+                    // 2. node.TrimBox() 접근 시도 (저수준)
+                    else if (page.node && page.node.TrimBox) {
+                        const entry = page.node.TrimBox();
+                        // 배열인지 객체인지 확인
+                        if (entry && typeof entry.x === 'number') {
+                            trimBox = entry;
+                        } else if (Array.isArray(entry) && entry.length === 4) {
+                            // [x, y, xmax, ymax] 형태일 수 있음 (PDF 사양)
+                            trimBox = {
+                                x: entry[0],
+                                y: entry[1],
+                                width: entry[2] - entry[0],
+                                height: entry[3] - entry[1]
+                            };
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`페이지 ${pageNum} TrimBox 추출 실패, MediaBox로 대체`, e);
+                }
+
+                // 유효성 검사: width/height가 없거나 숫자가 아니면 MediaBox 사용
+                if (!trimBox || typeof trimBox.width !== 'number' || typeof trimBox.height !== 'number') {
+                    trimBox = mediaBox;
+                }
+
+                this.pageMetadata.set(pageNum, {
+                    mediaBox: { width: mediaBox.width, height: mediaBox.height },
+                    trimBox: { width: trimBox.width, height: trimBox.height }
+                });
+            });
+
+            console.log('PDF 메타데이터 추출 완료:', this.pageMetadata);
+
+            // 현재 페이지 정보 업데이트
+            this.updatePageDimensionInfo();
+            this.calculateCoverSpread();
+
+        } catch (error) {
+            console.error('메타데이터 추출 중 오류:', error);
+        }
+    }
+
+    // 페이지 치수 정보 업데이트 UI
+    updatePageDimensionInfo() {
+        const pageNum = this.currentPage;
+        const metadata = this.pageMetadata.get(pageNum);
+
+        if (!metadata) {
+            if (this.mediaBoxDimElement) this.mediaBoxDimElement.textContent = '-';
+            if (this.trimBoxDimElement) this.trimBoxDimElement.textContent = '-';
+            return;
+        }
+
+        // 포인트 -> mm 변환 (1 pt = 0.352778 mm)
+        const ptToMm = 0.352778;
+
+        const mediaW = (metadata.mediaBox.width * ptToMm).toFixed(1);
+        const mediaH = (metadata.mediaBox.height * ptToMm).toFixed(1);
+
+        const trimW = (metadata.trimBox.width * ptToMm).toFixed(1);
+        const trimH = (metadata.trimBox.height * ptToMm).toFixed(1);
+
+        if (this.mediaBoxDimElement) {
+            this.mediaBoxDimElement.textContent = `${mediaW} × ${mediaH} mm`;
+        }
+
+        if (this.trimBoxDimElement) {
+            this.trimBoxDimElement.textContent = `${trimW} × ${trimH} mm`;
+        }
+
+        // 페이지 변경 시 계산기도 업데이트 (TrimBox 기준이므로)
+        this.calculateCoverSpread();
+    }
+
+    // 표지 펼침면 계산
+    // 표지 펼침면 계산 (합계 방식)
+    calculateCoverSpread() {
+        if (!this.calcResultElement) return;
+
+        // 현재 페이지의 TrimBox 높이 가져오기
+        let trimHeightMm = 0;
+        const pageNum = this.currentPage;
+        const metadata = this.pageMetadata.get(pageNum);
+        if (metadata && metadata.trimBox) {
+            const ptToMm = 0.352778;
+            trimHeightMm = metadata.trimBox.height * ptToMm;
+        }
+
+        const spineMm = this.coverCalculatorInputs.spine || 0;
+        const flapMm = this.coverCalculatorInputs.flap || 0;
+        const coverMm = this.coverCalculatorInputs.cover || 0;
+        const marginMm = this.coverCalculatorInputs.margin || 0;
+
+        // 계산: (표지 * 2) + (날개 * 2) + (날개여백 * 2) + 책등
+        const totalWidth = (coverMm * 2) + (flapMm * 2) + (marginMm * 2) + spineMm;
+
+        // 소수점 1자리까지 표시
+        const totalW_fixed = totalWidth.toFixed(1);
+        const height_fixed = trimHeightMm > 0 ? trimHeightMm.toFixed(1) : '0.0';
+
+        // 요청 포맷: 펼침면 너비 : 재단크기세로x입력받은걸로계산한너비 mm
+        this.calcResultElement.textContent = `펼침면 너비 : ${height_fixed} x ${totalW_fixed} mm`;
     }
 
     async renderCurrentPage() {
