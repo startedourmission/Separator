@@ -35,14 +35,13 @@ export class VirtualScrollManager {
         // Intersection Observer 설정
         this.setupIntersectionObserver();
 
-        // 스크롤 이벤트 (현재 페이지 추적) - window로 변경
-        window.addEventListener('scroll', this.debounce(() => {
+        // 스크롤 이벤트 (현재 페이지 추적)
+        this.viewport.addEventListener('scroll', this.debounce(() => {
             this.updateCurrentPage();
         }, 100));
 
         // 창 크기 변경 시 리사이징
         window.addEventListener('resize', this.debounce(() => {
-            this.recalculatePageDimensions();
             this.updateZoom(this.viewer.zoomLevel);
         }, 200));
 
@@ -142,7 +141,7 @@ export class VirtualScrollManager {
         }
 
         const options = {
-            root: null, // browser viewport
+            root: this.viewport,
             rootMargin: `${this.bufferPages * this.pageHeight}px 0px`,
             threshold: 0.01
         };
@@ -361,13 +360,11 @@ export class VirtualScrollManager {
 
     // 현재 보이는 페이지 계산
     getCurrentVisiblePage() {
-        const viewportRect = this.viewport.getBoundingClientRect();
-        const scrollTop = -viewportRect.top; // viewport top relative to its own top is -getBoundingClientRect().top
-        const viewportHeight = window.innerHeight;
+        const scrollTop = this.viewport.scrollTop;
+        const viewportHeight = this.viewport.clientHeight;
         const pageFullHeight = this.pageHeight + this.pageGap;
 
-        // 화면 중앙에 있는 페이지 (viewport.top이 0보다 작으면 그만큼 스크롤된 것)
-        // offsetTop 대신 getBoundingClientRect() 사용이 더 정확함 (특히 transform 등이 있을 때)
+        // 화면 중앙에 있는 페이지
         const centerY = scrollTop + viewportHeight / 2;
         const pageNum = Math.floor(centerY / pageFullHeight) + 1;
 
@@ -389,17 +386,11 @@ export class VirtualScrollManager {
         const pageEl = this.pageElements.get(pageNum);
         if (!pageEl) return;
 
-        const viewportRect = this.viewport.getBoundingClientRect();
         const pageFullHeight = this.pageHeight + this.pageGap;
+        const targetY = (pageNum - 1) * pageFullHeight;
 
-        // targetY relative to viewport top
-        const targetYInViewport = (pageNum - 1) * pageFullHeight;
-
-        // absolute targetY in document
-        const absoluteTargetY = window.pageYOffset + viewportRect.top + targetYInViewport;
-
-        window.scrollTo({
-            top: absoluteTargetY,
+        this.viewport.scrollTo({
+            top: targetY,
             behavior: 'smooth'
         });
     }

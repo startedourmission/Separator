@@ -195,8 +195,9 @@ export class SelectionManager {
                                 <span>${codeResult.type} 감지됨</span>
                                 <span class="result-type-badge qr">${codeResult.type}</span>
                             </div>
-                            <div class="result-text" style="font-weight:bold; font-size:1.1em; word-break:break-all;">${codeResult.text}</div>
-                            ${link ? `<a href="${link}" target="_blank" class="result-link">🔗 ${link}</a>` : ''}
+                            <div class="result-text" style="font-weight:bold; font-size:1.1em; word-break:break-all;">
+                                ${link ? `<a href="${link}" target="_blank" class="result-link" style="display:inline; margin-top:0;">🔗 ${codeResult.text}</a>` : codeResult.text}
+                            </div>
                         </div>
                     `;
                 }
@@ -207,15 +208,17 @@ export class SelectionManager {
             // 4. OCR Scan
             const text = await this.performOCR(tempCanvas);
             if (text && text.trim().length > 0) {
-                const link = this.createHyperlink(text);
+                const trimmedText = text.trim();
+                const link = this.createHyperlink(trimmedText);
                 resultList.innerHTML += `
                     <div style="${foundCode ? 'margin-top: 15px; padding-top: 10px; border-top: 1px dashed #ddd;' : ''}">
                         <div class="result-header">
                             <span>텍스트 인식됨</span>
                             <span class="result-type-badge text">OCR</span>
                         </div>
-                        <div class="result-text">${text}</div>
-                        ${link ? `<a href="${link}" target="_blank" class="result-link">🔗 ${link}</a>` : ''}
+                        <div class="result-text">
+                            ${link ? `<a href="${link}" target="_blank" class="result-link" style="display:inline; margin-top:0;">🔗 ${trimmedText}</a>` : trimmedText}
+                        </div>
                     </div>
                 `;
             } else if (!foundCode) {

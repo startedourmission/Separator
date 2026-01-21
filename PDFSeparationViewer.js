@@ -313,6 +313,41 @@ export class PDFSeparationViewer {
                 }
             });
         }
+
+        // 사이드바 토글 이벤트
+        const toggleLeftBtn = document.getElementById('toggle-left');
+        const toggleRightBtn = document.getElementById('toggle-right');
+        const leftPanel = document.getElementById('left-panel');
+        const rightPanel = document.getElementById('right-panel');
+        const container = document.querySelector('.container');
+
+        if (toggleLeftBtn && leftPanel) {
+            toggleLeftBtn.addEventListener('click', () => {
+                leftPanel.classList.toggle('collapsed');
+                container.classList.toggle('left-collapsed');
+                toggleLeftBtn.textContent = leftPanel.classList.contains('collapsed') ? '▶' : '◀';
+
+                // 레이아웃 변경 시 캔버스 크기 즉시 재계산
+                if (this.scrollManager && this.scrollManager.totalPages > 0) {
+                    this.scrollManager.recalculatePageDimensions();
+                    this.scrollManager.updateZoom(this.zoomLevel);
+                }
+            });
+        }
+
+        if (toggleRightBtn && rightPanel) {
+            toggleRightBtn.addEventListener('click', () => {
+                rightPanel.classList.toggle('collapsed');
+                container.classList.toggle('right-collapsed');
+                toggleRightBtn.textContent = rightPanel.classList.contains('collapsed') ? '◀' : '▶';
+
+                // 레이아웃 변경 시 캔버스 크기 즉시 재계산
+                if (this.scrollManager && this.scrollManager.totalPages > 0) {
+                    this.scrollManager.recalculatePageDimensions();
+                    this.scrollManager.updateZoom(this.zoomLevel);
+                }
+            });
+        }
     }
 
     async loadGhostscript() {

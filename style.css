@@ -8,6 +8,7 @@ body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     background-color: #f5f5f5;
     color: #333;
+    overflow: hidden;
 }
 
 .container {
@@ -15,10 +16,22 @@ body {
     margin: 0 auto;
     padding: 20px;
     display: grid;
-    grid-template-columns: 320px 1fr 320px;
-    grid-template-rows: auto auto;
+    grid-template-columns: minmax(min-content, 320px) 1fr minmax(min-content, 320px);
+    grid-template-rows: auto minmax(0, 1fr);
     gap: 20px;
-    min-height: 100vh;
+    height: 100vh;
+}
+
+.container.left-collapsed {
+    grid-template-columns: 40px 1fr minmax(min-content, 320px);
+}
+
+.container.right-collapsed {
+    grid-template-columns: minmax(min-content, 320px) 1fr 40px;
+}
+
+.container.left-collapsed.right-collapsed {
+    grid-template-columns: 40px 1fr 40px;
 }
 
 header {
@@ -40,9 +53,48 @@ h1 {
     padding: 15px;
     border-radius: 8px;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-    height: fit-content;
+    max-height: 100%;
+    overflow-y: auto;
+    position: relative;
+}
+
+.controls.collapsed {
+    padding: 15px 5px;
+    overflow: hidden;
+}
+
+.controls.collapsed>*:not(.toggle-sidebar) {
+    display: none;
+}
+
+.toggle-sidebar {
     position: sticky;
-    top: 20px;
+    top: 0;
+    right: 0;
+    width: 100%;
+    height: 30px;
+    background: #f8f9fa;
+    border: 1px solid #eee;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    color: #7f8c8d;
+    z-index: 10;
+}
+
+.toggle-sidebar:hover {
+    background: #eef2f7;
+    color: #3498db;
+}
+
+.controls.collapsed .toggle-sidebar {
+    writing-mode: vertical-rl;
+    height: 100%;
+    margin-bottom: 0;
 }
 
 .file-section {
@@ -473,7 +525,10 @@ h4 {
     background: #e0e0e0;
     border-radius: 8px;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    overflow-y: auto;
+    overflow-x: auto;
     position: relative;
+    height: 100%;
     display: flex;
     flex-direction: column;
 }
@@ -694,27 +749,7 @@ h4 {
     min-height: 20px;
 }
 
-@media (max-width: 1024px) {
-    .container {
-        grid-template-columns: 1fr;
-        grid-template-rows: auto auto auto 1fr;
-        height: auto;
-    }
 
-    .controls {
-        order: 2;
-        position: static;
-    }
-
-    .controls.right-panel {
-        order: 3;
-    }
-
-    .canvas-container {
-        order: 3;
-        min-height: 400px;
-    }
-}
 
 /* 워터마크 제어 스타일 */
 #watermark-text {
@@ -847,7 +882,7 @@ h4 {
     font-size: 0.9em;
     word-break: break-all;
     white-space: pre-wrap;
-    max-height: 300px;
+    max-height: 600px;
     overflow-y: auto;
 }
 
