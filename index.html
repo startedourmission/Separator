@@ -94,6 +94,19 @@
                     <input type="range" id="zoom-slider" min="25" max="500" value="100" step="25">
                     <span id="zoom-value">100%</span>
                 </div>
+                <div class="quality-controls"
+                    style="margin-bottom: 10px; padding: 7px; background: #f8f9fa; border-radius: 4px;">
+                    <label for="quality-select" style="display: block; margin-bottom: 8px; font-weight: 600;">렌더링 화질
+                        (DPI):</label>
+                    <select id="quality-select"
+                        style="width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 4px;">
+                        <option value="150" selected>150 DPI (기본)</option>
+                        <option value="300">300 DPI (고화질)</option>
+                        <option value="450">450 DPI (초고화질)</option>
+                        <option value="600">600 DPI (인쇄용)</option>
+                        <option value="1200">1200 DPI (최대)</option>
+                    </select>
+                </div>
                 <div class="page-controls">
                     <button id="prev-page" disabled>◀ 이전</button>
                     <span id="page-info">페이지 <input type="number" id="current-page" value="1" min="1"> / <span

@@ -278,9 +278,19 @@ class VirtualScrollManager {
         const { imageData } = pageData;
 
         if (!imageData || imageData.type !== 'cmyk') {
+            // 이미지 데이터가 없으면 기본 크기로 설정
+            if (canvas.width !== this.pageWidth) canvas.width = this.pageWidth;
+            if (canvas.height !== this.pageHeight) canvas.height = this.pageHeight;
+
             ctx.fillStyle = '#f0f0f0';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
             return;
+        }
+
+        // 캔버스 버퍼 크기를 고해상도 이미지 데이터에 맞춤
+        if (canvas.width !== imageData.width || canvas.height !== imageData.height) {
+            canvas.width = imageData.width;
+            canvas.height = imageData.height;
         }
 
         // 현재 분판 설정 가져오기
@@ -427,8 +437,14 @@ class VirtualScrollManager {
             el.wrapper.style.height = `${this.pageHeight}px`;
 
             if (el.canvas) {
-                el.canvas.width = this.pageWidth;
-                el.canvas.height = this.pageHeight;
+                // 고해상도 데이터가 있으면 캔버스 버퍼 크기 유지, 없으면 뷰어 크기에 맞춤
+                if (el.pageData && el.pageData.imageData) {
+                    el.canvas.width = el.pageData.imageData.width;
+                    el.canvas.height = el.pageData.imageData.height;
+                } else {
+                    el.canvas.width = this.pageWidth;
+                    el.canvas.height = this.pageHeight;
+                }
 
                 // 리렌더링
                 if (el.pageData) {
@@ -446,11 +462,19 @@ class VirtualScrollManager {
         });
     }
 
-    // 모든 보이는 페이지 리렌더링 (분판 변경 시)
-    updateAllVisiblePages() {
-        this.pageElements.forEach((el) => {
-            if (el.status === 'rendered' && el.canvas && el.pageData) {
-                this.renderToCanvas(el.canvas, el.pageData);
+    // 모든 보이는 페이지 리렌더링 (분판 변경 또는 화질 변경 시)
+    updateAllVisiblePages(forceGsRender = false) {
+        this.pageElements.forEach((el, pageNum) => {
+            if (el.status === 'rendered') {
+                if (forceGsRender) {
+                    // Ghostscript 재렌더링 필요 시 상태 초기화 후 큐에 추가
+                    el.status = 'placeholder';
+                    el.wrapper.classList.add('loading');
+                    this.queuePageRender(pageNum);
+                } else if (el.canvas && el.pageData) {
+                    // 단순 분판 변경 시 (기존 로직)
+                    this.renderToCanvas(el.canvas, el.pageData);
+                }
             }
         });
     }
@@ -503,7 +527,7 @@ class PDFSeparationViewer {
 
         // 병렬 처리용 WorkerPool 설정
         this.workerPool = null;
-        this.workerPoolSize = navigator.hardwareConcurrency || 4; // CPU 코어 수 기반
+        this.workerPoolSize = Math.min(navigator.hardwareConcurrency || 4, 3); // 네트워크 부하 방지를 위해 최대 3개로 제한
 
         // 페이지 캐시 (빠른 페이지 전환용)
         this.pageCache = new Map(); // pageNum -> { imageData, baseWidth, baseHeight, spotColorData }
@@ -523,6 +547,7 @@ class PDFSeparationViewer {
         // 페이지 메타데이터 (MediaBox, TrimBox)
         this.pageMetadata = new Map(); // pageNum -> { mediaBox, trimBox }
         this.coverCalculatorInputs = { spine: 0, flap: 0 };
+        this.renderDPI = 150; // 기본 DPI
 
         this.initializeElements();
         this.bindEvents();
@@ -614,6 +639,10 @@ class PDFSeparationViewer {
             cover: 188,
             margin: 5
         };
+
+        // 렌더링 화질 컨트롤 (New)
+        // 렌더링 화질 컨트롤 (New)
+        this.qualitySelect = document.getElementById('quality-select');
     }
 
     showLoading(text = '로딩 중...', progress = '') {
@@ -766,6 +795,20 @@ class PDFSeparationViewer {
 
             // 초기 계산 실행
             updateCalc();
+        }
+
+        // 렌더링 화질 컨트롤 이벤트
+        // 렌더링 화질 컨트롤 이벤트
+        if (this.qualitySelect) {
+            this.qualitySelect.addEventListener('change', (e) => {
+                this.renderDPI = parseInt(e.target.value);
+
+                // 설정 변경 시 캐시 비우고 재렌더링
+                this.pageCache.clear();
+                if (this.scrollManager) {
+                    this.scrollManager.updateAllVisiblePages(true); // Ghostscript 재렌더링 강제
+                }
+            });
         }
     }
 
@@ -1756,7 +1799,7 @@ class PDFSeparationViewer {
                 const result = await this.ghostscript.processTiffsep(
                     this.currentPDFData,
                     pageNum,
-                    150
+                    this.renderDPI
                 );
 
                 if (result && result.channels && Object.keys(result.channels).length > 0) {
@@ -1800,6 +1843,7 @@ class PDFSeparationViewer {
             renderOptions.pdfHeight = pageSize?.height || renderHeight;
             renderOptions.pageNum = pageNum;
             renderOptions.useCMYK = true;
+            renderOptions.dpi = this.renderDPI; // DPI 명시적 전달
 
             imageData = await this.ghostscript.renderPage(pageNum, renderOptions);
         }

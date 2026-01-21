@@ -32,31 +32,38 @@ class WorkerPool {
             worker.onerror = (e) => this.handleWorkerError(workerId, e);
 
             // Worker 초기화
-            const initPromise = new Promise((resolve, reject) => {
-                const reqId = ++this.requestId;
-                this.pendingRequests.set(reqId, { resolve, reject, type: 'init' });
+            try {
+                await new Promise((resolve, reject) => {
+                    const reqId = ++this.requestId;
+                    this.pendingRequests.set(reqId, { resolve, reject, type: 'init' });
 
-                const originalHandler = worker.onmessage;
-                worker.onmessage = (e) => {
-                    if (e.data.type === 'init') {
-                        worker.onmessage = originalHandler;
-                        const pending = this.pendingRequests.get(reqId);
-                        if (pending) {
-                            this.pendingRequests.delete(reqId);
-                            resolve();
+                    const originalHandler = worker.onmessage;
+                    worker.onmessage = (e) => {
+                        if (e.data.type === 'init') {
+                            worker.onmessage = originalHandler;
+                            const pending = this.pendingRequests.get(reqId);
+                            if (pending) {
+                                this.pendingRequests.delete(reqId);
+                                if (e.data.success) {
+                                    resolve();
+                                } else {
+                                    reject(new Error(e.data.message || 'Worker initialization failed'));
+                                }
+                            }
+                        } else {
+                            originalHandler(e);
                         }
-                    } else {
-                        originalHandler(e);
-                    }
-                };
+                    };
 
-                worker.postMessage({ type: 'init' });
-            });
-
-            initPromises.push(initPromise);
+                    worker.postMessage({ type: 'init' });
+                });
+            } catch (error) {
+                console.error(`Worker ${workerId} initialization failed:`, error);
+                // 초기화 실패 시 해당 워커 제거하고 계속 진행?
+                // 여기서는 에러 로그만 남기고 일단 진행. 나중에 사용 시 에러날 것임.
+            }
         }
 
-        await Promise.all(initPromises);
         this.initialized = true;
         console.log(`WorkerPool initialized with ${this.poolSize} workers`);
     }

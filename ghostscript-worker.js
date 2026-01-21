@@ -202,7 +202,8 @@ function buildTiffCMYKArgs(options, width, height, pageNum = 1) {
     // tiff32nc 디바이스로 CMYK TIFF 생성
     const pdfWidth = options.pdfWidth || width;
     const pdfHeight = options.pdfHeight || height;
-    const dpi = Math.max(1, Math.round((width / pdfWidth) * 72));
+    // DPI가 옵션으로 전달되면 그것을 사용하고, 아니면 크기 기반 계산
+    const dpi = options.dpi || Math.max(1, Math.round((width / pdfWidth) * 72));
 
     const args = [
         '-dNOPAUSE',
@@ -230,7 +231,8 @@ function buildGhostscriptArgs(options, width, height, pageNum = 1) {
     // PDF 크기와 원하는 출력 크기를 기반으로 DPI 계산
     const pdfWidth = options.pdfWidth || width;
     const pdfHeight = options.pdfHeight || height;
-    const dpi = Math.max(1, Math.round((width / pdfWidth) * 72));
+    // DPI가 옵션으로 전달되면 그것을 사용
+    const dpi = options.dpi || Math.max(1, Math.round((width / pdfWidth) * 72));
 
     const args = [
         '-dNOPAUSE',

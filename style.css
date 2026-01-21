@@ -538,6 +538,8 @@ h4 {
 .page-canvas {
     display: block;
     cursor: crosshair;
+    width: 100%;
+    height: 100%;
 }
 
 /* 기존 canvas-container는 호환성을 위해 유지 */
