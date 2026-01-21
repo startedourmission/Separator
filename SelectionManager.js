@@ -104,6 +104,22 @@ export class SelectionManager {
         this.analyzeSelection(rect);
     }
 
+    // 텍스트 정규화 (중복 공백 및 불필요한 줄바꿈 제거)
+    cleanText(text) {
+        if (!text) return '';
+        let cleaned = text.trim();
+        // 1. 가로 공백 중복 제거 (탭 등 포함)
+        cleaned = cleaned.replace(/[ \t]+/g, ' ');
+        // 2. 한글 사이의 불필요한 공백 제거 (OCR 특유의 자간 오류 해결)
+        // 한글(자음/모음/음절) 사이의 공백을 붙임
+        cleaned = cleaned.replace(/([\u3130-\u318F\uAC00-\uD7A3])\s+([\u3130-\u318F\uAC00-\uD7A3])/g, '$1$2');
+        // 3. 줄바꿈 기준 정리 및 빈 줄 제거
+        return cleaned.split('\n')
+            .map(line => line.trim())
+            .filter(line => line.length > 0)
+            .join('\n');
+    }
+
     async analyzeSelection(rect) {
         console.log('analyzeSelection called', rect);
         this.statusEl.textContent = '분석 중...';
@@ -154,14 +170,14 @@ export class SelectionManager {
             const ctx = tempCanvas.getContext('2d');
             ctx.drawImage(canvas, sx, sy, sWidth, sHeight, 0, 0, sWidth, sHeight);
 
-            // DEBUG: Display captured image
+            // DEBUG: Display captured image (Feature)
             const debugContainer = document.createElement('div');
             debugContainer.style.marginBottom = '15px';
             debugContainer.style.borderBottom = '1px solid #eee';
             debugContainer.style.paddingBottom = '10px';
 
             const debugTitle = document.createElement('div');
-            debugTitle.textContent = '캡처된 이미지 (디버깅용):';
+            debugTitle.textContent = '캡처된 이미지 (분석 대상):';
             debugTitle.style.fontSize = '0.7em';
             debugTitle.style.color = '#999';
             debugContainer.appendChild(debugTitle);
@@ -188,16 +204,16 @@ export class SelectionManager {
                 const codeResult = await this.scanCode(tempCanvas, ctx, sWidth, sHeight);
                 if (codeResult) {
                     foundCode = true;
-                    const link = this.createHyperlink(codeResult.text);
+                    // CODE(QR/바코드)는 링크나 ID가 대부분이므로 모든 공백을 제거함
+                    const codeText = codeResult.text.replace(/\s+/g, '');
+                    const link = this.createHyperlink(codeText);
                     resultList.innerHTML += `
-                        <div class="result-item">
+                        <div class="result-item" style="margin-bottom: 10px;">
                             <div class="result-header">
                                 <span>${codeResult.type} 감지됨</span>
                                 <span class="result-type-badge qr">${codeResult.type}</span>
                             </div>
-                            <div class="result-text" style="font-weight:bold; font-size:1.1em; word-break:break-all;">
-                                ${link ? `<a href="${link}" target="_blank" class="result-link" style="display:inline; margin-top:0;">🔗 ${codeResult.text}</a>` : codeResult.text}
-                            </div>
+                            <div class="result-text" style="font-weight:bold; font-size:1.1em; word-break:break-all;">${link ? `<a href="${link}" target="_blank" class="result-link" style="display:inline; margin-top:0; color:#3498db; text-decoration:underline;">${codeText}</a>` : codeText}</div>
                         </div>
                     `;
                 }
@@ -206,19 +222,18 @@ export class SelectionManager {
             }
 
             // 4. OCR Scan
-            const text = await this.performOCR(tempCanvas);
-            if (text && text.trim().length > 0) {
-                const trimmedText = text.trim();
-                const link = this.createHyperlink(trimmedText);
+            const rawText = await this.performOCR(tempCanvas);
+            const text = this.cleanText(rawText);
+
+            if (text && text.length > 0) {
+                const link = this.createHyperlink(text);
                 resultList.innerHTML += `
                     <div style="${foundCode ? 'margin-top: 15px; padding-top: 10px; border-top: 1px dashed #ddd;' : ''}">
                         <div class="result-header">
                             <span>텍스트 인식됨</span>
                             <span class="result-type-badge text">OCR</span>
                         </div>
-                        <div class="result-text">
-                            ${link ? `<a href="${link}" target="_blank" class="result-link" style="display:inline; margin-top:0;">🔗 ${trimmedText}</a>` : trimmedText}
-                        </div>
+                        <div class="result-text">${link ? `<a href="${link}" target="_blank" class="result-link" style="display:inline; margin-top:0; color:#3498db; text-decoration:underline;">${text}</a>` : text}</div>
                     </div>
                 `;
             } else if (!foundCode) {
