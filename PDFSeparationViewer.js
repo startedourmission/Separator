@@ -1206,11 +1206,11 @@ export class PDFSeparationViewer {
         // 포인트 -> mm 변환 (1 pt = 0.352778 mm)
         const ptToMm = 0.352778;
 
-        const mediaW = (metadata.mediaBox.width * ptToMm).toFixed(1);
-        const mediaH = (metadata.mediaBox.height * ptToMm).toFixed(1);
+        const mediaW = (metadata.mediaBox.width * ptToMm).toFixed(2);
+        const mediaH = (metadata.mediaBox.height * ptToMm).toFixed(2);
 
-        const trimW = (metadata.trimBox.width * ptToMm).toFixed(1);
-        const trimH = (metadata.trimBox.height * ptToMm).toFixed(1);
+        const trimW = (metadata.trimBox.width * ptToMm).toFixed(2);
+        const trimH = (metadata.trimBox.height * ptToMm).toFixed(2);
 
         if (this.mediaBoxDimElement) {
             this.mediaBoxDimElement.textContent = `${mediaW} × ${mediaH} mm`;
@@ -1246,12 +1246,12 @@ export class PDFSeparationViewer {
         // 계산: (표지 * 2) + (날개 * 2) + (날개여백 * 2) + 책등
         const totalWidth = (coverMm * 2) + (flapMm * 2) + (marginMm * 2) + spineMm;
 
-        // 소수점 1자리까지 표시
-        const totalW_fixed = totalWidth.toFixed(1);
-        const height_fixed = trimHeightMm > 0 ? trimHeightMm.toFixed(1) : '0.0';
+        // 소수점 2자리까지 표시
+        const totalW_fixed = totalWidth.toFixed(2);
+        const height_fixed = trimHeightMm > 0 ? trimHeightMm.toFixed(2) : '0.00';
 
-        // 요청 포맷: 펼침면 너비 : 재단크기세로x입력받은걸로계산한너비 mm
-        this.calcResultElement.textContent = `펼침면 너비 : ${height_fixed} x ${totalW_fixed} mm`;
+        // 요청 포맷: 펼침면 너비 : 가로 x 세로 mm
+        this.calcResultElement.textContent = `펼침면 너비 : ${totalW_fixed} x ${height_fixed} mm`;
     }
 
     async renderCurrentPage() {
@@ -1506,86 +1506,144 @@ export class PDFSeparationViewer {
         const width = canvas.width;
         const height = canvas.height;
 
-        // 1. 실제 mm 너비 기반 비율 계산 (DPI 의존성 탈피)
-        // MediaBox width는 Point(1/72 inch) 단위이므로 0.352778을 곱해 mm로 변환
+        // 1. 실제 mm 너비 기반 비율 계산 (MediaBox 기반)
         const totalMmWidth = metadata.mediaBox.width * 0.352778;
         const pxToMm = totalMmWidth / width;
 
-        // 2. 상단 20px 다중 라인 분석 (빈도 필터링)
-        const sampleHeight = 20;
-        const imageData = ctx.getImageData(0, 0, width, sampleHeight);
+        // 2. 상단 120px 확장 스캔 및 세로 투영 (Vertical Projection)
+        const sampleHeight = 120;
+        const imageData = ctx.getImageData(0, 0, width, Math.min(height, sampleHeight));
         const pixels = imageData.data;
-        const xFrequency = new Array(width).fill(0);
-        const darkThreshold = 150; // 더 엄격한 어두운 색 기준
 
-        for (let y = 0; y < sampleHeight; y++) {
-            for (let x = 0; x < width; x++) {
+        const blackCount = new Array(width).fill(0);
+        const topY = new Array(width).fill(999);
+        const darkThreshold = 150;
+
+        for (let x = 0; x < width; x++) {
+            for (let y = 0; y < Math.min(height, sampleHeight); y++) {
                 const idx = (y * width + x) * 4;
                 const brightness = (pixels[idx] + pixels[idx + 1] + pixels[idx + 2]) / 3;
                 if (brightness < darkThreshold) {
-                    xFrequency[x]++;
+                    blackCount[x]++;
+                    if (topY[x] === 999) topY[x] = y;
                 }
             }
         }
 
-        // 3. 클러스터링 및 후보 추출 (10회 이상 등장한 것만)
-        let candidates = [];
-        let tempCluster = [];
-        const clusterThreshold = 3; // ±3px 이내는 같은 선으로 간주
-
+        // 3. 클러스터링 및 후보 추출
+        // 조건: 120px 중 40px 이상이 검정색 && 시작점 topY가 50px 이내 (진짜 재단선)
+        let rawCandidates = [];
         for (let x = 0; x < width; x++) {
-            if (xFrequency[x] >= 10) { // 20줄 중 반 이상 나타난 선
-                if (tempCluster.length > 0 && x - tempCluster[tempCluster.length - 1] > clusterThreshold) {
-                    // 클러스터 종료, 중심점 계산
-                    candidates.push(tempCluster[Math.floor(tempCluster.length / 2)]);
-                    tempCluster = [];
-                }
-                tempCluster.push(x);
+            if (blackCount[x] >= 35 && topY[x] <= 55) {
+                rawCandidates.push({ x, topY: topY[x] });
             }
         }
-        if (tempCluster.length > 0) {
-            candidates.push(tempCluster[Math.floor(tempCluster.length / 2)]);
+
+        let candidates = [];
+        if (rawCandidates.length > 0) {
+            let temp = [rawCandidates[0]];
+            for (let i = 1; i < rawCandidates.length; i++) {
+                if (rawCandidates[i].x - rawCandidates[i - 1].x <= 4) {
+                    temp.push(rawCandidates[i]);
+                } else {
+                    const avgX = temp.reduce((s, c) => s + c.x, 0) / temp.length;
+                    const minTopY = Math.min(...temp.map(c => c.topY));
+                    candidates.push({ x: avgX, topY: minTopY });
+                    temp = [rawCandidates[i]];
+                }
+            }
+            const avgX = temp.reduce((s, c) => s + c.x, 0) / temp.length;
+            const minTopY = Math.min(...temp.map(c => c.topY));
+            candidates.push({ x: avgX, topY: minTopY });
         }
 
         console.log(`감지된 선 후보 (${candidates.length}개):`, candidates);
 
         if (candidates.length < 4) {
-            alert(`재단선을 찾을 수 없습니다. (감지된 후보: ${candidates.length}개)\n페이지 상단에 명확한 재단선이 있는지 확인해 주세요.`);
+            alert(`재단선을 충분히 찾지 못했습니다. (후보: ${candidates.length}개)\n페이지 상단에 명확한 재단선이 있는지 확인해 주세요.`);
             return;
         }
 
-        // 4. 기하학적 규칙에 따른 최적의 6점(또는 4점) 선별
-        candidates.sort((a, b) => a - b);
+        // 4. 기하학적 규칙에 따른 최종 선별 (6개 목표)
+        candidates.sort((a, b) => a.x - b.x);
         let finalMarks = [];
 
-        if (candidates.length >= 6) {
-            // [규칙 A] 가장 바깥 양끝 2개
-            const leftOuter = candidates[0];
-            const rightOuter = candidates[candidates.length - 1];
+        const xMin = candidates[0].x;
+        const xMax = candidates[candidates.length - 1].x;
+        const midPx = (xMin + xMax) / 2;
+        const deadZone = 15; // 센터라인 및 잡선 제거용 데드존
 
-            // [규칙 B] 좌우 반반 영역에서 각각 2개씩 선정
-            const midPx = (leftOuter + rightOuter) / 2;
-            const leftSide = candidates.filter(x => x < midPx);
-            const rightSide = candidates.filter(x => x > midPx);
+        // 좌/우 그룹 분리 (책등 경계 후보들)
+        const leftGroup = candidates.filter(c => c.x < midPx - deadZone);
+        const rightGroup = candidates.filter(c => c.x > midPx + deadZone);
 
-            if (leftSide.length >= 2 && rightSide.length >= 2) {
-                // 왼쪽에서 바깥쪽 1개, 안쪽 1개
-                const backStart = leftSide[1];
-                const backEnd = leftSide[leftSide.length - 1];
-                // 오른쪽에서 안쪽 1개, 바깥쪽 1개
-                const frontStart = rightSide[0];
-                const frontEnd = rightSide[rightSide.length - 2];
+        if (leftGroup.length >= 2 && rightGroup.length >= 2) {
+            // A. 책등 경계 (중앙에 가장 가까운 두 점)
+            const spineStart = leftGroup[leftGroup.length - 1].x;
+            const spineEnd = rightGroup[0].x;
 
-                finalMarks = [leftOuter, backStart, backEnd, frontStart, frontEnd, rightOuter];
+            // B. 왼쪽 영역 분석 (날개와 표지 찾기)
+            // 가장 큰 두 개의 간격을 형성하는 점들을 선택 (잡선/블리드 마크 제거)
+            let leftGaps = [];
+            for (let i = 0; i < leftGroup.length - 1; i++) {
+                leftGaps.push({
+                    p1: leftGroup[i].x,
+                    p2: leftGroup[i + 1].x,
+                    size: leftGroup[i + 1].x - leftGroup[i].x
+                });
             }
+            // 간격 크기순 정렬 -> 가장 큰 2개 선택 (표지폭, 날개폭일 확률이 높음)
+            leftGaps.sort((a, b) => b.size - a.size);
+
+            // 왼쪽에서 추출할 점 2개 (날개 시작점, 표지 시작점)
+            // 2개 이상의 의미 있는 간격이 있다면 그 경계점들을 사용
+            const significantLeft = [];
+            if (leftGaps.length >= 2) {
+                const top2 = [leftGaps[0], leftGaps[1]].sort((a, b) => a.p1 - b.p1);
+                significantLeft.push(top2[0].p1); // 날개 시작
+                significantLeft.push(top2[1].p1); // 표지 시작(날개 끝)
+            } else {
+                significantLeft.push(leftGroup[0].x);
+                significantLeft.push(leftGroup[Math.floor(leftGroup.length / 2)].x);
+            }
+
+            // C. 오른쪽 영역 분석
+            let rightGaps = [];
+            for (let i = 0; i < rightGroup.length - 1; i++) {
+                rightGaps.push({
+                    p1: rightGroup[i].x,
+                    p2: rightGroup[i + 1].x,
+                    size: rightGroup[i + 1].x - rightGroup[i].x
+                });
+            }
+            rightGaps.sort((a, b) => b.size - a.size);
+
+            const significantRight = [];
+            if (rightGaps.length >= 2) {
+                const top2 = [rightGaps[0], rightGaps[1]].sort((a, b) => a.p1 - b.p1);
+                significantRight.push(top2[0].p2); // 앞표지 끝(날개 시작)
+                significantRight.push(top2[1].p2); // 오른쪽 날개 끝
+            } else {
+                significantRight.push(rightGroup[Math.floor(rightGroup.length / 2)].x);
+                significantRight.push(rightGroup[rightGroup.length - 1].x);
+            }
+
+            finalMarks = [
+                significantLeft[0],  // 0: 좌측 날개 시작
+                significantLeft[1],  // 1: 뒤표지 시작
+                spineStart,          // 2: 책등 시작
+                spineEnd,            // 3: 책등 끝
+                significantRight[0], // 4: 앞표지 끝
+                significantRight[1]  // 5: 우측 날개 끝
+            ];
         }
 
-        // 6점이 안 만들어졌거나 실패 시 4점 시도
+        // 6점이 안 만들어졌거나 실패 시 4점 기본 로직
         if (finalMarks.length < 6 && candidates.length >= 4) {
-            finalMarks = [candidates[0], candidates[1], candidates[candidates.length - 2], candidates[candidates.length - 1]];
+            finalMarks = [candidates[0].x, candidates[1].x, candidates[candidates.length - 2].x, candidates[candidates.length - 1].x];
         }
 
-        console.log(`최종 선발된 재단선:`, finalMarks);
+        console.log(`최종 선발된 재단선 (px):`, finalMarks);
 
         // 5. 검증 및 mm 변환
         finalMarks.sort((a, b) => a - b);
@@ -1594,25 +1652,22 @@ export class PDFSeparationViewer {
             dists.push((finalMarks[i] - finalMarks[i - 1]) * pxToMm);
         }
 
-        // 최종 값 산출
         let spineWidth = 0, coverWidth = 0, flapWidth = 0;
 
         if (finalMarks.length === 6) {
-            // [0]--날개--[1]--뒤표--[2]--책등--[3]--앞표--[4]--날개--[5]
             flapWidth = (dists[0] + dists[4]) / 2;
             coverWidth = (dists[1] + dists[3]) / 2;
             spineWidth = dists[2];
         } else if (finalMarks.length === 4) {
-            // [0]--뒤표--[1]--책등--[2]--앞표--[3]
             coverWidth = (dists[0] + dists[2]) / 2;
             spineWidth = dists[1];
             flapWidth = 0;
         }
 
         // 6. UI 반영
-        this.spineInput.value = spineWidth.toFixed(1);
-        this.coverInput.value = coverWidth.toFixed(1);
-        this.flapInput.value = flapWidth.toFixed(1);
+        this.spineInput.value = spineWidth.toFixed(2);
+        this.coverInput.value = coverWidth.toFixed(2);
+        this.flapInput.value = flapWidth.toFixed(2);
 
         this.coverCalculatorInputs.spine = spineWidth;
         this.coverCalculatorInputs.cover = coverWidth;
@@ -1621,7 +1676,7 @@ export class PDFSeparationViewer {
         this.updatePageDimensionInfo();
         this.calculateCoverSpread();
 
-        this.showLoading(`분석 완료! 책등: ${spineWidth.toFixed(1)}mm, 표지: ${coverWidth.toFixed(1)}mm`, '');
+        this.showLoading(`분석 완료! 책등: ${spineWidth.toFixed(2)}mm, 표지: ${coverWidth.toFixed(2)}mm`, '');
         setTimeout(() => this.hideLoading(), 1500);
     }
 
