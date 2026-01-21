@@ -348,6 +348,11 @@ export class PDFSeparationViewer {
                 }
             });
         }
+        // 재단선 자동 감지 버튼
+        const autoDetectBtn = document.getElementById('auto-detect-crop');
+        if (autoDetectBtn) {
+            autoDetectBtn.addEventListener('click', () => this.detectCropMarks());
+        }
     }
 
     async loadGhostscript() {
@@ -1483,6 +1488,141 @@ export class PDFSeparationViewer {
             this.originalImageData = this.ctx.getImageData(0, 0, scaledWidth, scaledHeight);
             this.applyColorSeparation(this.originalImageData);
         }
+    }
+
+    // 재단선 자동 감지 (Image Processing)
+    async detectCropMarks() {
+        const pageNum = this.currentPage;
+        const pageObj = this.scrollManager.pageElements.get(pageNum);
+        const metadata = this.pageMetadata.get(pageNum);
+
+        if (!pageObj || !pageObj.canvas || !metadata) {
+            alert('현재 페이지의 이미지 또는 메타데이터를 찾을 수 없습니다.');
+            return;
+        }
+
+        const canvas = pageObj.canvas;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const width = canvas.width;
+        const height = canvas.height;
+
+        // 1. 실제 mm 너비 기반 비율 계산 (DPI 의존성 탈피)
+        // MediaBox width는 Point(1/72 inch) 단위이므로 0.352778을 곱해 mm로 변환
+        const totalMmWidth = metadata.mediaBox.width * 0.352778;
+        const pxToMm = totalMmWidth / width;
+
+        // 2. 상단 20px 다중 라인 분석 (빈도 필터링)
+        const sampleHeight = 20;
+        const imageData = ctx.getImageData(0, 0, width, sampleHeight);
+        const pixels = imageData.data;
+        const xFrequency = new Array(width).fill(0);
+        const darkThreshold = 150; // 더 엄격한 어두운 색 기준
+
+        for (let y = 0; y < sampleHeight; y++) {
+            for (let x = 0; x < width; x++) {
+                const idx = (y * width + x) * 4;
+                const brightness = (pixels[idx] + pixels[idx + 1] + pixels[idx + 2]) / 3;
+                if (brightness < darkThreshold) {
+                    xFrequency[x]++;
+                }
+            }
+        }
+
+        // 3. 클러스터링 및 후보 추출 (10회 이상 등장한 것만)
+        let candidates = [];
+        let tempCluster = [];
+        const clusterThreshold = 3; // ±3px 이내는 같은 선으로 간주
+
+        for (let x = 0; x < width; x++) {
+            if (xFrequency[x] >= 10) { // 20줄 중 반 이상 나타난 선
+                if (tempCluster.length > 0 && x - tempCluster[tempCluster.length - 1] > clusterThreshold) {
+                    // 클러스터 종료, 중심점 계산
+                    candidates.push(tempCluster[Math.floor(tempCluster.length / 2)]);
+                    tempCluster = [];
+                }
+                tempCluster.push(x);
+            }
+        }
+        if (tempCluster.length > 0) {
+            candidates.push(tempCluster[Math.floor(tempCluster.length / 2)]);
+        }
+
+        console.log(`감지된 선 후보 (${candidates.length}개):`, candidates);
+
+        if (candidates.length < 4) {
+            alert(`재단선을 찾을 수 없습니다. (감지된 후보: ${candidates.length}개)\n페이지 상단에 명확한 재단선이 있는지 확인해 주세요.`);
+            return;
+        }
+
+        // 4. 기하학적 규칙에 따른 최적의 6점(또는 4점) 선별
+        candidates.sort((a, b) => a - b);
+        let finalMarks = [];
+
+        if (candidates.length >= 6) {
+            // [규칙 A] 가장 바깥 양끝 2개
+            const leftOuter = candidates[0];
+            const rightOuter = candidates[candidates.length - 1];
+
+            // [규칙 B] 좌우 반반 영역에서 각각 2개씩 선정
+            const midPx = (leftOuter + rightOuter) / 2;
+            const leftSide = candidates.filter(x => x < midPx);
+            const rightSide = candidates.filter(x => x > midPx);
+
+            if (leftSide.length >= 2 && rightSide.length >= 2) {
+                // 왼쪽에서 바깥쪽 1개, 안쪽 1개
+                const backStart = leftSide[1];
+                const backEnd = leftSide[leftSide.length - 1];
+                // 오른쪽에서 안쪽 1개, 바깥쪽 1개
+                const frontStart = rightSide[0];
+                const frontEnd = rightSide[rightSide.length - 2];
+
+                finalMarks = [leftOuter, backStart, backEnd, frontStart, frontEnd, rightOuter];
+            }
+        }
+
+        // 6점이 안 만들어졌거나 실패 시 4점 시도
+        if (finalMarks.length < 6 && candidates.length >= 4) {
+            finalMarks = [candidates[0], candidates[1], candidates[candidates.length - 2], candidates[candidates.length - 1]];
+        }
+
+        console.log(`최종 선발된 재단선:`, finalMarks);
+
+        // 5. 검증 및 mm 변환
+        finalMarks.sort((a, b) => a - b);
+        const dists = [];
+        for (let i = 1; i < finalMarks.length; i++) {
+            dists.push((finalMarks[i] - finalMarks[i - 1]) * pxToMm);
+        }
+
+        // 최종 값 산출
+        let spineWidth = 0, coverWidth = 0, flapWidth = 0;
+
+        if (finalMarks.length === 6) {
+            // [0]--날개--[1]--뒤표--[2]--책등--[3]--앞표--[4]--날개--[5]
+            flapWidth = (dists[0] + dists[4]) / 2;
+            coverWidth = (dists[1] + dists[3]) / 2;
+            spineWidth = dists[2];
+        } else if (finalMarks.length === 4) {
+            // [0]--뒤표--[1]--책등--[2]--앞표--[3]
+            coverWidth = (dists[0] + dists[2]) / 2;
+            spineWidth = dists[1];
+            flapWidth = 0;
+        }
+
+        // 6. UI 반영
+        this.spineInput.value = spineWidth.toFixed(1);
+        this.coverInput.value = coverWidth.toFixed(1);
+        this.flapInput.value = flapWidth.toFixed(1);
+
+        this.coverCalculatorInputs.spine = spineWidth;
+        this.coverCalculatorInputs.cover = coverWidth;
+        this.coverCalculatorInputs.flap = flapWidth;
+
+        this.updatePageDimensionInfo();
+        this.calculateCoverSpread();
+
+        this.showLoading(`분석 완료! 책등: ${spineWidth.toFixed(1)}mm, 표지: ${coverWidth.toFixed(1)}mm`, '');
+        setTimeout(() => this.hideLoading(), 1500);
     }
 
     goToPage(pageNum) {
