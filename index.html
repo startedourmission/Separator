@@ -132,6 +132,23 @@
 
         <div class="controls right-panel">
             <div class="viewer-controls">
+                <h3>분석 도구</h3>
+                <div class="tool-controls">
+                    <button id="toggle-selection-mode" class="tool-btn">
+                        <span class="icon">⛶</span> 영역 선택 (OCR/QR)
+                    </button>
+                    <div id="selection-status" class="status-text help-text">드래그하여 텍스트나 QR코드를 스캔하세요</div>
+                </div>
+            </div>
+
+            <div class="viewer-controls" id="analysis-result-panel" style="display: none;">
+                <h3>분석 결과</h3>
+                <div class="result-content" id="analysis-content">
+                    <!-- 결과가 여기에 표시됨 -->
+                </div>
+            </div>
+
+            <div class="viewer-controls">
                 <h3>페이지 정보</h3>
                 <div class="info-row">
                     <span class="info-label">전체 크기 (MediaBox):</span>
@@ -194,6 +211,10 @@
     <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <!-- OCR & QR Libraries -->
+    <script src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'></script>
+    <script src="https://unpkg.com/@zxing/library@0.21.3" type="text/javascript"></script>
+
     <script>
         // PDF.js worker 설정
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';

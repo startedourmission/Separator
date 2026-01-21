@@ -796,3 +796,108 @@ h4 {
     /* 전체 너비 차지 */
     justify-self: center;
 }
+
+/* 분석 도구 스타일 - Selection Tool */
+.tool-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px;
+    background: #f8f9fa;
+    border-radius: 4px;
+}
+
+.tool-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px;
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 600;
+    color: #2c3e50;
+    transition: all 0.2s;
+}
+
+.tool-btn:hover {
+    background: #eef2f7;
+    border-color: #3498db;
+    color: #3498db;
+}
+
+.tool-btn.active {
+    background: #3498db;
+    border-color: #3498db;
+    color: white;
+}
+
+.status-text {
+    font-size: 0.85em;
+    color: #7f8c8d;
+    text-align: center;
+    min-height: 1.2em;
+}
+
+/* 분석 결과 패널 스타일 */
+.result-content {
+    padding: 10px;
+    background: #f8f9fa;
+    border-radius: 4px;
+    min-height: 100px;
+    font-size: 0.9em;
+    word-break: break-all;
+    white-space: pre-wrap;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.result-header {
+    font-weight: bold;
+    margin-bottom: 5px;
+    color: #2c3e50;
+    display: flex;
+    justify-content: space-between;
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 5px;
+}
+
+.result-type-badge {
+    font-size: 0.8em;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: #95a5a6;
+    color: white;
+}
+
+.result-type-badge.qr {
+    background: #27ae60;
+}
+
+.result-type-badge.text {
+    background: #2980b9;
+}
+
+.result-link {
+    color: #3498db;
+    text-decoration: none;
+    font-weight: 600;
+    display: block;
+    margin-top: 5px;
+}
+
+.result-link:hover {
+    text-decoration: underline;
+}
+
+/* 선택 영역 오버레이 스타일 */
+.selection-box {
+    position: fixed;
+    border: 2px solid #3498db;
+    background-color: rgba(52, 152, 219, 0.2);
+    pointer-events: none;
+    z-index: 9999;
+    display: none;
+}

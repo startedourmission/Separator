@@ -3273,10 +3273,327 @@ class PDFSeparationViewer {
     }
 }
 
+// Selection Manager - Drag-to-Select Logic
+class SelectionManager {
+    constructor(viewer) {
+        this.viewer = viewer;
+        this.isActive = false;
+        this.isSelecting = false;
+        this.startX = 0;
+        this.startY = 0;
+        this.selectionBox = null;
+        this.overlay = null;
+        this.toggleBtn = document.getElementById('toggle-selection-mode');
+        this.statusEl = document.getElementById('selection-status');
+        this.resultPanel = document.getElementById('analysis-result-panel');
+        this.resultContent = document.getElementById('analysis-content');
+
+        this.init();
+    }
+
+    init() {
+        // Create selection box element
+        this.selectionBox = document.createElement('div');
+        this.selectionBox.className = 'selection-box';
+        document.body.appendChild(this.selectionBox);
+
+        // Toggle Button Event
+        if (this.toggleBtn) {
+            this.toggleBtn.addEventListener('click', () => this.toggleMode());
+        }
+
+        // Mouse Events on viewport
+        const viewport = document.getElementById('scroll-viewport');
+        viewport.addEventListener('mousedown', (e) => this.handleMouseDown(e));
+        window.addEventListener('mousemove', (e) => this.handleMouseMove(e));
+        window.addEventListener('mouseup', (e) => this.handleMouseUp(e));
+    }
+
+    toggleMode() {
+        this.isActive = !this.isActive;
+        if (this.isActive) {
+            this.toggleBtn.classList.add('active');
+            this.statusEl.textContent = '분석할 영역을 드래그하세요';
+            this.viewer.scrollManager.viewport.style.cursor = 'crosshair';
+            this.resultPanel.style.display = 'block';
+        } else {
+            this.toggleBtn.classList.remove('active');
+            this.statusEl.textContent = '드래그하여 텍스트나 QR코드를 스캔하세요';
+            this.viewer.scrollManager.viewport.style.cursor = 'default';
+            this.selectionBox.style.display = 'none';
+        }
+    }
+
+    handleMouseDown(e) {
+        if (!this.isActive) return;
+        // Only start selection if clicking on a page canvas or wrapper
+        if (!e.target.closest('.page-wrapper')) return;
+
+        this.isSelecting = true;
+        this.startX = e.clientX;
+        this.startY = e.clientY;
+
+        this.selectionBox.style.left = `${this.startX}px`;
+        this.selectionBox.style.top = `${this.startY}px`;
+        this.selectionBox.style.width = '0px';
+        this.selectionBox.style.height = '0px';
+        this.selectionBox.style.display = 'block';
+
+        e.preventDefault(); // Prevent text selection or scrolling
+    }
+
+    handleMouseMove(e) {
+        if (!this.isSelecting) return;
+
+        const currentX = e.clientX;
+        const currentY = e.clientY;
+
+        const width = Math.abs(currentX - this.startX);
+        const height = Math.abs(currentY - this.startY);
+        const left = Math.min(currentX, this.startX);
+        const top = Math.min(currentY, this.startY);
+
+        this.selectionBox.style.width = `${width}px`;
+        this.selectionBox.style.height = `${height}px`;
+        this.selectionBox.style.left = `${left}px`;
+        this.selectionBox.style.top = `${top}px`;
+    }
+
+    async handleMouseUp(e) {
+        if (!this.isSelecting) return;
+        this.isSelecting = false;
+        this.selectionBox.style.display = 'none';
+
+        if (!this.isActive) return;
+
+        // Calculate selection bounds
+        const rect = {
+            x: parseInt(this.selectionBox.style.left),
+            y: parseInt(this.selectionBox.style.top),
+            width: parseInt(this.selectionBox.style.width),
+            height: parseInt(this.selectionBox.style.height)
+        };
+
+        if (rect.width < 10 || rect.height < 10) return; // Ignore small clicks
+
+        this.analyzeSelection(rect);
+    }
+
+    async analyzeSelection(rect) {
+        this.statusEl.textContent = '분석 중...';
+        this.resultContent.innerHTML = '<div class="spinner" style="width: 20px; height: 20px; border-width: 2px;"></div>';
+
+        try {
+            // 1. Identify which page is under the selection
+            const centerX = rect.x + rect.width / 2;
+            const centerY = rect.y + rect.height / 2;
+
+            this.selectionBox.style.display = 'none';
+            const targetEl = document.elementFromPoint(centerX, centerY);
+
+            const canvas = targetEl.closest('canvas');
+            if (!canvas) {
+                throw new Error('선택한 영역에 페이지가 없습니다.');
+            }
+
+            // 2. Capture Image Data from Canvas
+            const canvasRect = canvas.getBoundingClientRect();
+
+            const intersectX = Math.max(rect.x, canvasRect.left);
+            const intersectY = Math.max(rect.y, canvasRect.top);
+            const intersectRight = Math.min(rect.x + rect.width, canvasRect.right);
+            const intersectBottom = Math.min(rect.y + rect.height, canvasRect.bottom);
+
+            const captureWidth = intersectRight - intersectX;
+            const captureHeight = intersectBottom - intersectY;
+
+            if (captureWidth <= 0 || captureHeight <= 0) {
+                throw new Error('유효한 페이지 영역이 아닙니다.');
+            }
+
+            // Canvas coordinate mapping
+            const scaleX = canvas.width / canvasRect.width;
+            const scaleY = canvas.height / canvasRect.height;
+
+            const sx = (intersectX - canvasRect.left) * scaleX;
+            const sy = (intersectY - canvasRect.top) * scaleY;
+            const sWidth = captureWidth * scaleX;
+            const sHeight = captureHeight * scaleY;
+
+            // Extract image data
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = sWidth; // High Res
+            tempCanvas.height = sHeight;
+
+            const ctx = tempCanvas.getContext('2d');
+            ctx.drawImage(canvas, sx, sy, sWidth, sHeight, 0, 0, sWidth, sHeight);
+
+            // DEBUG: Display captured image
+            const debugContainer = document.createElement('div');
+            debugContainer.style.marginBottom = '15px';
+            debugContainer.style.borderBottom = '1px solid #eee';
+            debugContainer.style.paddingBottom = '10px';
+
+            const debugTitle = document.createElement('div');
+            debugTitle.textContent = '캡처된 이미지 (디버깅용):';
+            debugTitle.style.fontSize = '0.7em';
+            debugTitle.style.color = '#999';
+            debugContainer.appendChild(debugTitle);
+
+            try {
+                const debugImg = document.createElement('img');
+                debugImg.src = tempCanvas.toDataURL();
+                debugImg.style.maxWidth = '100%';
+                debugImg.style.border = '1px solid #ddd';
+                debugImg.style.display = 'block';
+                debugContainer.appendChild(debugImg);
+            } catch (e) {
+                // Ignore
+            }
+
+            this.resultContent.innerHTML = '';
+            this.resultContent.appendChild(debugContainer);
+
+            // 3. Scan Code (ZXing)
+            const resultList = document.createElement('div');
+            let foundCode = false;
+
+            try {
+                const codeResult = await this.scanCode(tempCanvas, ctx, sWidth, sHeight);
+                if (codeResult) {
+                    foundCode = true;
+                    const link = this.createHyperlink(codeResult.text);
+                    resultList.innerHTML += `
+                        <div class="result-item">
+                            <div class="result-header">
+                                <span>${codeResult.type} 감지됨</span>
+                                <span class="result-type-badge qr">${codeResult.type}</span>
+                            </div>
+                            <div class="result-text" style="font-weight:bold; font-size:1.1em; word-break:break-all;">${codeResult.text}</div>
+                            ${link ? `<a href="${link}" target="_blank" class="result-link">🔗 ${link}</a>` : ''}
+                        </div>
+                    `;
+                }
+            } catch (e) {
+                console.warn('Scan Error:', e);
+            }
+
+            // 4. OCR Scan
+            const text = await this.performOCR(tempCanvas);
+            if (text && text.trim().length > 0) {
+                const link = this.createHyperlink(text);
+                resultList.innerHTML += `
+                    <div style="${foundCode ? 'margin-top: 15px; padding-top: 10px; border-top: 1px dashed #ddd;' : ''}">
+                        <div class="result-header">
+                            <span>텍스트 인식됨</span>
+                            <span class="result-type-badge text">OCR</span>
+                        </div>
+                        <div class="result-text">${text}</div>
+                        ${link ? `<a href="${link}" target="_blank" class="result-link">🔗 ${link}</a>` : ''}
+                    </div>
+                `;
+            } else if (!foundCode) {
+                resultList.innerHTML += '<div style="color:#7f8c8d; text-align:center; padding: 10px;">인식된 텍스트나 코드가 없습니다.</div>';
+            }
+
+            this.resultContent.appendChild(resultList);
+            this.statusEl.textContent = '분석 완료';
+
+        } catch (error) {
+            console.error(error);
+            this.resultContent.innerHTML += `<div style="color:red; margin-top:10px;">오류: ${error.message}</div>`;
+            this.statusEl.textContent = '오류 발생';
+        }
+    }
+
+    async scanCode(canvas, ctx, width, height) {
+        if (window.ZXing) {
+            try {
+                // Use BrowserMultiFormatReader (Async) to avoid freezing UI
+                const hints = new Map();
+                const formats = [
+                    ZXing.BarcodeFormat.QR_CODE,
+                    ZXing.BarcodeFormat.DATA_MATRIX,
+                    ZXing.BarcodeFormat.CODE_128,
+                    ZXing.BarcodeFormat.EAN_13,
+                    ZXing.BarcodeFormat.EAN_8,
+                    ZXing.BarcodeFormat.CODE_39,
+                    ZXing.BarcodeFormat.UPC_A,
+                    ZXing.BarcodeFormat.UPC_E,
+                    ZXing.BarcodeFormat.CODABAR,
+                    ZXing.BarcodeFormat.ITF
+                ];
+                hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
+                hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+
+                const codeReader = new ZXing.BrowserMultiFormatReader(hints);
+
+                const dataUrl = canvas.toDataURL();
+                const img = new Image();
+                img.src = dataUrl;
+
+                return new Promise((resolve) => {
+                    img.onload = async () => {
+                        try {
+                            const result = await codeReader.decodeFromImage(img);
+                            if (result) {
+                                console.log('ZXing found:', result);
+                                resolve({ type: 'CODE (' + result.getBarcodeFormat() + ')', text: result.getText() });
+                            } else {
+                                resolve(null);
+                            }
+                        } catch (err) {
+                            resolve(null);
+                        }
+                    };
+                    img.onerror = () => resolve(null);
+                });
+            } catch (e) {
+                console.warn('ZXing init error:', e);
+                return null;
+            }
+        }
+        return null;
+    }
+
+
+    async performOCR(canvas) {
+        if (!window.Tesseract) return null;
+        const result = await Tesseract.recognize(
+            canvas,
+            'eng+kor', // English and Korean
+            {
+                logger: m => {
+                    if (m.status === 'recognizing text') {
+                        this.statusEl.textContent = `텍스트 인식 중... ${Math.round(m.progress * 100)}%`;
+                    }
+                }
+            }
+        );
+        return result.data.text;
+    }
+
+    createHyperlink(text) {
+        const urlRegex = /(https?:\/\/[^\s]+)/g; // Simple regex
+        const match = text.match(urlRegex);
+        if (match) return match[0];
+
+        // Check for www.
+        if (text.includes('www.') && !text.includes('http')) {
+            const wwwMatch = text.match(/(www\.[^\s]+)/g);
+            if (wwwMatch) return 'http://' + wwwMatch[0];
+        }
+        return null;
+    }
+}
+
 // 페이지 로딩 완료 시 애플리케이션 초기화
 let viewer;
 document.addEventListener('DOMContentLoaded', () => {
     viewer = new PDFSeparationViewer();
+    // Selection Checker Add
+    viewer.selectionManager = new SelectionManager(viewer);
+
     // 콘솔에서 viewer.testTiffsep() 호출 가능하도록 전역 변수로 노출
     window.viewer = viewer;
 });
