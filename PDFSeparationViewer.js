@@ -49,7 +49,7 @@ export class PDFSeparationViewer {
 
         // 페이지 메타데이터 (MediaBox, TrimBox)
         this.pageMetadata = new Map(); // pageNum -> { mediaBox, trimBox }
-        this.coverCalculatorInputs = { spine: 0, flap: 0 };
+        this.coverCalculatorInputs = { spine: 0, flap: 0, cover: 0, margin: 0 };
         this.renderDPI = 300; // 기본 DPI (300으로 상향)
 
         this.initializeElements();
@@ -137,10 +137,10 @@ export class PDFSeparationViewer {
 
         // 표지 계산기 입력값 저장 (기본값 설정)
         this.coverCalculatorInputs = {
-            spine: 17,
-            flap: 90,
-            cover: 188,
-            margin: 5
+            spine: 0,
+            flap: 0,
+            cover: 0,
+            margin: 0
         };
 
         // 렌더링 화질 컨트롤 (New)
