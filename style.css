@@ -8,7 +8,6 @@ body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     background-color: #f5f5f5;
     color: #333;
-    overflow: hidden;
 }
 
 .container {
@@ -17,9 +16,9 @@ body {
     padding: 20px;
     display: grid;
     grid-template-columns: 320px 1fr 320px;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: auto auto;
     gap: 20px;
-    height: 100vh;
+    min-height: 100vh;
 }
 
 header {
@@ -41,8 +40,9 @@ h1 {
     padding: 15px;
     border-radius: 8px;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-    max-height: 100%;
-    overflow-y: auto;
+    height: fit-content;
+    position: sticky;
+    top: 20px;
 }
 
 .file-section {
@@ -473,11 +473,7 @@ h4 {
     background: #e0e0e0;
     border-radius: 8px;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-    overflow-y: auto;
-    overflow-x: auto;
-    /* Enable horizontal scroll */
     position: relative;
-    height: 100%;
     display: flex;
     flex-direction: column;
 }
@@ -707,6 +703,7 @@ h4 {
 
     .controls {
         order: 2;
+        position: static;
     }
 
     .controls.right-panel {
