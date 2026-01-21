@@ -3380,6 +3380,7 @@ class SelectionManager {
     }
 
     async analyzeSelection(rect) {
+        console.log('analyzeSelection called', rect);
         this.statusEl.textContent = '분석 중...';
         this.resultContent.innerHTML = '<div class="spinner" style="width: 20px; height: 20px; border-width: 2px;"></div>';
 
@@ -3506,56 +3507,142 @@ class SelectionManager {
         }
     }
 
+
+
+
+
+
+
+
+
+
     async scanCode(canvas, ctx, width, height) {
-        if (window.ZXing) {
-            try {
-                // Use BrowserMultiFormatReader (Async) to avoid freezing UI
-                const hints = new Map();
-                const formats = [
-                    ZXing.BarcodeFormat.QR_CODE,
-                    ZXing.BarcodeFormat.DATA_MATRIX,
-                    ZXing.BarcodeFormat.CODE_128,
-                    ZXing.BarcodeFormat.EAN_13,
-                    ZXing.BarcodeFormat.EAN_8,
-                    ZXing.BarcodeFormat.CODE_39,
-                    ZXing.BarcodeFormat.UPC_A,
-                    ZXing.BarcodeFormat.UPC_E,
-                    ZXing.BarcodeFormat.CODABAR,
-                    ZXing.BarcodeFormat.ITF
-                ];
-                hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
-                hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-
-                const codeReader = new ZXing.BrowserMultiFormatReader(hints);
-
-                const dataUrl = canvas.toDataURL();
-                const img = new Image();
-                img.src = dataUrl;
-
-                return new Promise((resolve) => {
-                    img.onload = async () => {
-                        try {
-                            const result = await codeReader.decodeFromImage(img);
-                            if (result) {
-                                console.log('ZXing found:', result);
-                                resolve({ type: 'CODE (' + result.getBarcodeFormat() + ')', text: result.getText() });
-                            } else {
-                                resolve(null);
-                            }
-                        } catch (err) {
-                            resolve(null);
-                        }
-                    };
-                    img.onerror = () => resolve(null);
-                });
-            } catch (e) {
-                console.warn('ZXing init error:', e);
-                return null;
-            }
+        console.log('scanCode called. ZXing available:', !!window.ZXing);
+        if (!window.ZXing) {
+            console.warn('ZXing library not found in window');
+            return null;
         }
+
+        const hints = new Map();
+        const formats = [
+            ZXing.BarcodeFormat.QR_CODE,
+            ZXing.BarcodeFormat.DATA_MATRIX,
+            ZXing.BarcodeFormat.CODE_128,
+            ZXing.BarcodeFormat.EAN_13,
+            ZXing.BarcodeFormat.EAN_8,
+            ZXing.BarcodeFormat.CODE_39,
+            ZXing.BarcodeFormat.UPC_A,
+            ZXing.BarcodeFormat.UPC_E,
+            ZXing.BarcodeFormat.CODABAR,
+            ZXing.BarcodeFormat.ITF
+        ];
+        hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
+        hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+
+        try {
+            const codeReader = new ZXing.BrowserMultiFormatReader(hints);
+            console.log('ZXing Reader initialized');
+
+            // Helper to convert canvas to image and decode
+            const decodeCanvasViaImage = async (cvs) => {
+                return new Promise((resolve, reject) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        // console.log("Image loaded for ZXing (Size: " + img.width + "x" + img.height + ")");
+                        codeReader.decodeFromImage(img)
+                            .then(resolve)
+                            .catch((err) => {
+                                // console.log("decodeFromImage rejected:", err);
+                                reject(err);
+                            });
+                    };
+                    img.onerror = (err) => reject(new Error("Image load failed"));
+                    img.src = cvs.toDataURL();
+                });
+            };
+
+            // Helper to try decoding with logging
+            const tryDecode = async (cvs, label) => {
+                try {
+                    console.log(`ZXing: Attempting ${label}... (Size: ${cvs.width}x${cvs.height})`);
+                    // Use decodeFromImage logic instead of decodeFromCanvas
+                    const result = await decodeCanvasViaImage(cvs);
+
+                    if (result) {
+                        console.log(`ZXing found (${label}):`, result);
+                        return { type: 'CODE (' + result.getBarcodeFormat() + ')', text: result.getText() };
+                    }
+                } catch (err) {
+                    // Log failure for each attempt
+                    // console.log(`ZXing ${label} failed:`, err);
+                }
+                return null;
+            };
+
+            // 1. Try Original
+            let result = await tryDecode(canvas, 'Original');
+            if (result) return result;
+
+            // 2. Try Preprocessed (Contrast + Grayscale)
+            const processedCanvas = this.preprocessImage(canvas, 0); // 0 = Standard
+            result = await tryDecode(processedCanvas, 'Preprocessed');
+            if (result) return result;
+
+            // 3. Try Inverted (for Dark Mode QR)
+            const invertedCanvas = this.preprocessImage(canvas, 1); // 1 = Inverted
+            result = await tryDecode(invertedCanvas, 'Inverted');
+            if (result) return result;
+
+            // 4. Try Binarized (Threshold)
+            const binarizedCanvas = this.preprocessImage(canvas, 2); // 2 = Binarized
+            result = await tryDecode(binarizedCanvas, 'Binarized');
+            if (result) return result;
+
+        } catch (e) {
+            console.error('ZXing unexpected error:', e);
+        }
+
         return null;
     }
 
+    preprocessImage(sourceCanvas, type) {
+        const w = sourceCanvas.width;
+        const h = sourceCanvas.height;
+        const temp = document.createElement('canvas');
+        temp.width = w;
+        temp.height = h;
+        const ctx = temp.getContext('2d');
+        ctx.drawImage(sourceCanvas, 0, 0);
+
+        const imageData = ctx.getImageData(0, 0, w, h);
+        const data = imageData.data;
+
+        for (let i = 0; i < data.length; i += 4) {
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            // Grayscale (Luminosity)
+            let gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+            if (type === 1) { // Invert
+                gray = 255 - gray;
+            } else if (type === 2) { // Binarize (Threshold)
+                gray = gray > 128 ? 255 : 0;
+            } else { // Standard Contrast Boost
+                // Simple contrast
+                gray = (gray - 128) * 1.5 + 128;
+                // Clamp
+                gray = Math.max(0, Math.min(255, gray));
+            }
+
+            data[i] = gray;
+            data[i + 1] = gray;
+            data[i + 2] = gray;
+        }
+
+        ctx.putImageData(imageData, 0, 0);
+        return temp;
+    }
 
     async performOCR(canvas) {
         if (!window.Tesseract) return null;
