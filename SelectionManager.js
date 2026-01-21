@@ -471,6 +471,7 @@ export class SelectionManager {
     }
 
     createHyperlink(text) {
+        if (!text) return null;
         const urlRegex = /(https?:\/\/[^\s]+)/g; // Simple regex
         const match = text.match(urlRegex);
         if (match) return match[0];
@@ -478,8 +479,14 @@ export class SelectionManager {
         // Check for www.
         if (text.includes('www.') && !text.includes('http')) {
             const wwwMatch = text.match(/(www\.[^\s]+)/g);
-            if (wwwMatch) return 'http://' + wwwMatch[0];
+            if (wwwMatch) return 'https://' + wwwMatch[0];
         }
+
+        // 숫자로만 되어있으면 구글 검색 링크 생성
+        if (/^\d+$/.test(text)) {
+            return `https://www.google.com/search?q=${text}`;
+        }
+
         return null;
     }
 }
