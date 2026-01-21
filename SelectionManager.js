@@ -10,7 +10,6 @@ export class SelectionManager {
         this.overlay = null;
         this.toggleBtn = document.getElementById('toggle-selection-mode');
         this.statusEl = document.getElementById('selection-status');
-        this.resultPanel = document.getElementById('analysis-result-panel');
         this.resultContent = document.getElementById('analysis-content');
 
         this.init();
@@ -22,9 +21,11 @@ export class SelectionManager {
         this.selectionBox.className = 'selection-box';
         document.body.appendChild(this.selectionBox);
 
-        // Toggle Button Event
+        // Toggle Checkbox Event
         if (this.toggleBtn) {
-            this.toggleBtn.addEventListener('click', () => this.toggleMode());
+            this.toggleBtn.addEventListener('change', () => this.updateMode());
+            // 초기 상태 적용 (기본 체크됨)
+            this.updateMode();
         }
 
         // Mouse Events on viewport
@@ -34,15 +35,13 @@ export class SelectionManager {
         window.addEventListener('mouseup', (e) => this.handleMouseUp(e));
     }
 
-    toggleMode() {
-        this.isActive = !this.isActive;
+    updateMode() {
+        this.isActive = this.toggleBtn.checked;
+
         if (this.isActive) {
-            this.toggleBtn.classList.add('active');
             this.statusEl.textContent = '분석할 영역을 드래그하세요';
             this.viewer.scrollManager.viewport.style.cursor = 'crosshair';
-            this.resultPanel.style.display = 'block';
         } else {
-            this.toggleBtn.classList.remove('active');
             this.statusEl.textContent = '드래그하여 텍스트나 QR코드를 스캔하세요';
             this.viewer.scrollManager.viewport.style.cursor = 'default';
             this.selectionBox.style.display = 'none';
