@@ -474,9 +474,12 @@ h4 {
     border-radius: 8px;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
     overflow-y: auto;
-    overflow-x: hidden;
+    overflow-x: auto;
+    /* Enable horizontal scroll */
     position: relative;
     height: 100%;
+    display: flex;
+    flex-direction: column;
 }
 
 .scroll-content {
@@ -486,6 +489,10 @@ h4 {
     gap: 20px;
     padding: 20px;
     min-height: 100%;
+    min-width: min-content;
+    /* Grows to fit content */
+    margin: 0 auto;
+    /* Centering with scrolling support */
 }
 
 /* 페이지 wrapper */
@@ -494,6 +501,9 @@ h4 {
     background: white;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
     flex-shrink: 0;
+    margin-left: auto;
+    /* Horizontal centering with flex-start */
+    margin-right: auto;
 }
 
 .page-wrapper.loading {
