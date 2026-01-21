@@ -209,7 +209,7 @@ export class SelectionManager {
                     resultList.innerHTML += `
                         <div class="result-item" style="margin-bottom: 10px;">
                             <div class="result-header">
-                                <span>${codeResult.type} 감지됨</span>
+                                <span>스캔한 바코드</span>
                                 <span class="result-type-badge qr">${codeResult.type}</span>
                             </div>
                             <div class="result-text" style="font-weight:bold; font-size:1.1em; word-break:break-all;">${link ? `<a href="${link}" target="_blank" class="result-link" style="display:inline; margin-top:0; color:#3498db; text-decoration:underline;">${codeText}</a>` : codeText}</div>
@@ -220,7 +220,7 @@ export class SelectionManager {
                 console.warn('Scan Error:', e);
             }
 
-            // 4. OCR Scan
+            /* OCR 기능 비활성화
             const rawText = await this.performOCR(tempCanvas);
             const text = this.cleanText(rawText);
 
@@ -236,7 +236,11 @@ export class SelectionManager {
                     </div>
                 `;
             } else if (!foundCode) {
-                resultList.innerHTML += '<div style="color:#7f8c8d; text-align:center; padding: 10px;">인식된 텍스트나 코드가 없습니다.</div>';
+                resultList.innerHTML += '<div style="color:#7f8c8d; text-align:center; padding: 10px;">인식된 코드가 없습니다.</div>';
+            }
+            */
+            if (!foundCode) {
+                resultList.innerHTML += '<div style="color:#7f8c8d; text-align:center; padding: 10px;">인식된 코드가 없습니다.</div>';
             }
 
             this.resultContent.appendChild(resultList);

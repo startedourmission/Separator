@@ -50,7 +50,7 @@ export class PDFSeparationViewer {
         // 페이지 메타데이터 (MediaBox, TrimBox)
         this.pageMetadata = new Map(); // pageNum -> { mediaBox, trimBox }
         this.coverCalculatorInputs = { spine: 0, flap: 0 };
-        this.renderDPI = 150; // 기본 DPI
+        this.renderDPI = 300; // 기본 DPI (300으로 상향)
 
         this.initializeElements();
         this.bindEvents();
