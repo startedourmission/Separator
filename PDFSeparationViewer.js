@@ -3053,10 +3053,10 @@ export class PDFSeparationViewer {
                 if (returnBlob) {
                     resolve({ blob, width: cropW, height: cropH });
                 } else {
-                    this.downloadBlob(blob, `spread_p${pageNum}.png`);
+                    this.downloadBlob(blob, `cover_책이름.jpg`);
                     resolve(true);
                 }
-            }, 'image/png');
+            }, 'image/jpeg', 0.95);
         });
     }
 
@@ -3093,20 +3093,20 @@ export class PDFSeparationViewer {
                 pxPerMm = totalWidth / totalWidthMm5;
 
                 parts = [
-                    { name: 'cover_back_flap', label: '뒷날개(표3)', width: flapMm * pxPerMm },
-                    { name: 'cover_back', label: '뒷표지(표4)', width: coverMm * pxPerMm },
-                    { name: 'spine', label: '책등', width: spineMm * pxPerMm },
-                    { name: 'cover_front', label: '앞표지(표1)', width: coverMm * pxPerMm },
-                    { name: 'cover_front_flap', label: '앞날개(표2)', width: flapMm * pxPerMm }
+                    { name: 'cover(표3)_책이름', label: '뒷날개(표3)', width: flapMm * pxPerMm },
+                    { name: 'cover(표4)_책이름', label: '뒷표지(표4)', width: coverMm * pxPerMm },
+                    { name: 'cover(책등)_책이름', label: '책등', width: spineMm * pxPerMm },
+                    { name: 'cover(표1)_책이름', label: '앞표지(표1)', width: coverMm * pxPerMm },
+                    { name: 'cover(표2)_책이름', label: '앞날개(표2)', width: flapMm * pxPerMm }
                 ];
             } else {
                 const totalWidthMm3 = coverMm + spineMm + coverMm;
                 pxPerMm = totalWidth / totalWidthMm3;
 
                 parts = [
-                    { name: 'cover_back', label: '뒷표지(표4)', width: coverMm * pxPerMm },
-                    { name: 'spine', label: '책등', width: spineMm * pxPerMm },
-                    { name: 'cover_front', label: '앞표지(표1)', width: coverMm * pxPerMm }
+                    { name: 'cover(표4)_책이름', label: '뒷표지(표4)', width: coverMm * pxPerMm },
+                    { name: 'cover(책등)_책이름', label: '책등', width: spineMm * pxPerMm },
+                    { name: 'cover(표1)_책이름', label: '앞표지(표1)', width: coverMm * pxPerMm }
                 ];
             }
 
@@ -3140,15 +3140,15 @@ export class PDFSeparationViewer {
                     0, 0, Math.floor(partW), partH
                 );
 
-                const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
-                zip.file(`${part.name}.png`, blob);
+                const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.95));
+                zip.file(`${part.name}.jpg`, blob);
 
                 currentX += partW;
             }
 
             // 5. Download Zip
             const content = await zip.generateAsync({ type: "blob" });
-            this.downloadBlob(content, "separated_covers.zip");
+            this.downloadBlob(content, "cover_책이름.zip");
 
             URL.revokeObjectURL(spreadUrl);
         };
