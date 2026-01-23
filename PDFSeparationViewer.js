@@ -355,6 +355,19 @@ export class PDFSeparationViewer {
             autoDetectBtn.addEventListener('click', () => this.detectCropMarks());
         }
 
+        // 이미지 내보내기 버튼 (홍보용 이미지 생성)
+        const exportSpreadBtn = document.getElementById('export-spread');
+        if (exportSpreadBtn) {
+            exportSpreadBtn.addEventListener('click', () => this.exportSpreadImage());
+        }
+
+        const exportSeparatedBtn = document.getElementById('export-separated');
+        if (exportSeparatedBtn) {
+            exportSeparatedBtn.addEventListener('click', () => this.exportSeparatedImages());
+        }
+
+
+
         // Drag and Drop & Clipboard
         this.setupDragAndDrop();
         this.setupClipboardPaste();
@@ -1304,8 +1317,18 @@ export class PDFSeparationViewer {
                 }
 
                 this.pageMetadata.set(pageNum, {
-                    mediaBox: { width: mediaBox.width, height: mediaBox.height },
-                    trimBox: { width: trimBox.width, height: trimBox.height }
+                    mediaBox: {
+                        x: mediaBox.x || 0,
+                        y: mediaBox.y || 0,
+                        width: mediaBox.width,
+                        height: mediaBox.height
+                    },
+                    trimBox: {
+                        x: trimBox.x || 0,
+                        y: trimBox.y || 0,
+                        width: trimBox.width,
+                        height: trimBox.height
+                    }
                 });
             });
 
@@ -1482,8 +1505,14 @@ export class PDFSeparationViewer {
         // 100% 줌일 때 컨테이너 가로에 꽉 차게 표시
         const baseWidth = containerWidth;
         const baseHeight = Math.floor(baseWidth / pdfAspectRatio);
-        const renderWidth = baseWidth;
-        const renderHeight = baseHeight;
+
+        // 렌더링 해상도는 DPI 설정에 따름
+        const scaleFactor = (this.renderDPI || 72) / 72;
+        const pdfWidthPt = pageSize ? pageSize.width : baseWidth; // pageSize is in points
+        const pdfHeightPt = pageSize ? pageSize.height : baseHeight;
+
+        const renderWidth = Math.ceil(pdfWidthPt * scaleFactor);
+        const renderHeight = Math.ceil(pdfHeightPt * scaleFactor);
 
         let imageData = null;
         let spotColorData = {};
@@ -1649,6 +1678,20 @@ export class PDFSeparationViewer {
     async detectCropMarks() {
         const pageNum = this.currentPage;
         const pageObj = this.scrollManager.pageElements.get(pageNum);
+        // 메타데이터가 없는 경우(이미지 파일 등)를 위한 Fallback
+        if (!this.pageMetadata.has(pageNum)) {
+            // 임시 메타데이터 생성 (캔버스 크기 기준)
+            if (pageObj && pageObj.canvas) {
+                const widthPt = pageObj.canvas.width * (72 / this.renderDPI); // px -> pt approximation
+                const heightPt = pageObj.canvas.height * (72 / this.renderDPI);
+                this.pageMetadata.set(pageNum, {
+                    mediaBox: { x: 0, y: 0, width: widthPt, height: heightPt },
+                    trimBox: { x: 0, y: 0, width: widthPt, height: heightPt }, // Default to full size
+                    cropBox: { x: 0, y: 0, width: widthPt, height: heightPt }
+                });
+            }
+        }
+
         const metadata = this.pageMetadata.get(pageNum);
 
         if (!pageObj || !pageObj.canvas || !metadata) {
@@ -1950,88 +1993,7 @@ export class PDFSeparationViewer {
         this.originalCMYKData = cmykData;
     }
 
-    renderWithSpotColors(cmykData, targetWidth, targetHeight) {
-        const { width, height, channels } = cmykData;
-        const { cyan, magenta, yellow, black } = channels;
 
-        // 현재 선택된 분판 옵션 가져오기
-        const renderOptions = this.buildRenderOptions();
-        const separations = renderOptions.separations || [];
-
-        // 선택된 별색 필터링
-        const selectedSpotColors = this.spotColors.filter(colorName => {
-            const checkbox = this.spotColorCheckboxes[colorName];
-            return checkbox && checkbox.checked;
-        });
-
-
-
-        // RGB 이미지로 변환 (CMYK + 별색 합성)
-        const pixelCount = width * height;
-        const rgbData = new Uint8ClampedArray(pixelCount * 4);
-
-        for (let i = 0; i < pixelCount; i++) {
-            // 1. CMYK → RGB 변환 (선택된 채널만)
-            const c = separations.includes('cyan') ? cyan[i] : 0;
-            const m = separations.includes('magenta') ? magenta[i] : 0;
-            const y = separations.includes('yellow') ? yellow[i] : 0;
-            const k = separations.includes('black') ? black[i] : 0;
-
-            const cNorm = c / 255;
-            const mNorm = m / 255;
-            const yNorm = y / 255;
-            const kNorm = k / 255;
-
-            let r = 255 * (1 - cNorm) * (1 - kNorm);
-            let g = 255 * (1 - mNorm) * (1 - kNorm);
-            let b = 255 * (1 - yNorm) * (1 - kNorm);
-
-            // 2. 각 별색 적용 (곱셈 블렌딩으로 오버프린트 효과 시뮬레이션)
-            for (const colorName of selectedSpotColors) {
-                const spotData = this.spotColorData[colorName];
-                if (!spotData) continue;
-
-                // 별색의 그레이스케일 강도 (0-255)
-                const intensity = spotData[i] / 255;  // 0-1 범위로 정규화
-
-                if (intensity > 0) {
-                    // 별색의 RGB 근사값 가져오기
-                    const spotRGB = getSpotColorRGB(colorName);
-
-                    // 곱셈 블렌딩: 별색이 있는 부분은 해당 색상으로 어둡게
-                    // intensity가 1이면 완전히 별색, 0이면 영향 없음
-                    r *= (1 - intensity) + intensity * (spotRGB.r / 255);
-                    g *= (1 - intensity) + intensity * (spotRGB.g / 255);
-                    b *= (1 - intensity) + intensity * (spotRGB.b / 255);
-                }
-            }
-
-            rgbData[i * 4 + 0] = Math.round(Math.max(0, Math.min(255, r))); // R
-            rgbData[i * 4 + 1] = Math.round(Math.max(0, Math.min(255, g))); // G
-            rgbData[i * 4 + 2] = Math.round(Math.max(0, Math.min(255, b))); // B
-            rgbData[i * 4 + 3] = 255; // Alpha
-        }
-
-        // ImageData 생성
-        const imageData = new ImageData(rgbData, width, height);
-
-        // 임시 캔버스에 그리기
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = width;
-        tempCanvas.height = height;
-        const tempCtx = tempCanvas.getContext('2d');
-        tempCtx.putImageData(imageData, 0, 0);
-
-        // 스케일링하여 메인 캔버스에 그리기
-        this.ctx.imageSmoothingEnabled = true;
-        this.ctx.imageSmoothingQuality = 'high';
-        this.ctx.fillStyle = 'white';
-        this.ctx.fillRect(0, 0, targetWidth, targetHeight);
-        this.ctx.drawImage(tempCanvas, 0, 0, targetWidth, targetHeight);
-
-        // 원본 CMYK 데이터 저장 (TAC 계산용)
-        this.originalCMYKData = cmykData;
-    }
 
     renderWithSpotColors(cmykData, targetWidth, targetHeight) {
         const { width, height, channels } = cmykData;
@@ -2250,47 +2212,7 @@ export class PDFSeparationViewer {
         console.log(`페이지 ${pageNum} 별색 데이터 누적 완료`);
     }
 
-    accumulateSpotColorData(spotColorChannels, pageNum, width, height) {
-        // 페이지별 별색 데이터를 누적
-        if (!spotColorChannels || Object.keys(spotColorChannels).length === 0) {
-            return;
-        }
 
-        const totalPixels = width * height;
-
-        // 페이지별 별색 데이터 초기화
-        if (!this.pageSpotColorData[pageNum]) {
-            this.pageSpotColorData[pageNum] = {
-                totalPixels: totalPixels
-            };
-        }
-
-        // 각 별색에 대해 잉크 사용 픽셀 카운트
-        for (const colorName of this.spotColors) {
-            const channelData = spotColorChannels[colorName];
-            if (!channelData) continue;
-
-            // 별색 카운트 초기화
-            if (!this.pageSpotColorData[pageNum][colorName]) {
-                this.pageSpotColorData[pageNum][colorName] = 0;
-            }
-
-            // 전체 문서 별색 카운트 초기화
-            if (!this.totalChannelCounts[colorName]) {
-                this.totalChannelCounts[colorName] = 0;
-            }
-
-            // 잉크가 있는 픽셀 수 카운트 (0이 아닌 값)
-            for (let i = 0; i < totalPixels; i++) {
-                if (channelData[i] > 0) {
-                    this.totalChannelCounts[colorName]++;
-                    this.pageSpotColorData[pageNum][colorName]++;
-                }
-            }
-        }
-
-        console.log(`페이지 ${pageNum} 별색 데이터 누적 완료`);
-    }
 
     calculateTotalChannelRatios() {
         // 전체 페이지의 누적된 데이터로부터 비율 계산
@@ -2323,22 +2245,7 @@ export class PDFSeparationViewer {
         return ratios;
     }
 
-    calculateSpotColorRatios() {
-        // 전체 페이지의 누적 데이터로 별색 비율 계산
-        if (this.totalPixelCount === 0 || !this.spotColors || this.spotColors.length === 0) {
-            return null;
-        }
 
-        const ratios = {};
-
-        // 각 별색의 사용 비율을 백분율로 계산
-        for (const colorName of this.spotColors) {
-            const count = this.totalChannelCounts[colorName] || 0;
-            ratios[colorName] = (count / this.totalPixelCount) * 100;
-        }
-
-        return ratios;
-    }
 
     updateChannelRatios(ratios) {
         if (!ratios) {
@@ -2757,49 +2664,7 @@ export class PDFSeparationViewer {
         }
     }
 
-    updateSpotColorRatios(ratios) {
-        // 별색 비율 UI 업데이트
-        if (!ratios || !this.spotColors || this.spotColors.length === 0) {
-            // 비율 정보가 없으면 모든 별색 비율을 '-'로 표시
-            this.spotColors.forEach(colorName => {
-                const safeId = colorName.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
-                const ratioElement = document.getElementById(`spot-${safeId}-ratio`);
-                if (ratioElement) {
-                    ratioElement.textContent = '-';
-                }
 
-                // progress bar 초기화
-                const checkbox = this.spotColorCheckboxes[colorName];
-                if (checkbox) {
-                    const label = document.querySelector(`label[for="${checkbox.id}"]`);
-                    if (label) {
-                        label.style.backgroundSize = '0% 100%';
-                    }
-                }
-            });
-            return;
-        }
-
-        // 각 별색의 비율을 소수점 1자리까지 표시
-        this.spotColors.forEach(colorName => {
-            const ratio = ratios[colorName] || 0;
-            const safeId = colorName.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
-            const ratioElement = document.getElementById(`spot-${safeId}-ratio`);
-
-            if (ratioElement) {
-                ratioElement.textContent = `${ratio.toFixed(1)}%`;
-            }
-
-            // progress bar 업데이트
-            const checkbox = this.spotColorCheckboxes[colorName];
-            if (checkbox) {
-                const label = document.querySelector(`label[for="${checkbox.id}"]`);
-                if (label) {
-                    label.style.backgroundSize = `${ratio}% 100%`;
-                }
-            }
-        });
-    }
 
     showChannelPageList(channel) {
         // 해당 채널을 사용하는 페이지 목록 표시
@@ -2899,48 +2764,7 @@ export class PDFSeparationViewer {
         modal.classList.remove('hidden');
     }
 
-    showSpotColorPageList(colorName) {
-        const modal = document.getElementById('page-list-modal');
-        const modalTitle = document.getElementById('modal-channel-name');
-        const pageList = document.getElementById('page-list');
 
-        modalTitle.textContent = colorName;
-        pageList.innerHTML = '';
-
-        // 해당 별색을 사용하는 페이지 목록 생성
-        const pages = [];
-        for (let pageNum = 1; pageNum <= this.totalPages; pageNum++) {
-            if (this.pageSpotColorData[pageNum] && this.pageSpotColorData[pageNum][colorName] > 0) {
-                const count = this.pageSpotColorData[pageNum][colorName];
-                const total = this.pageSpotColorData[pageNum].totalPixels;
-                const ratio = (count / total) * 100;
-                pages.push({ pageNum, ratio });
-            }
-        }
-
-        // 사용 비율 내림차순 정렬
-        pages.sort((a, b) => b.ratio - a.ratio);
-
-        if (pages.length === 0) {
-            pageList.innerHTML = '<div class="no-pages">이 색상을 사용하는 페이지가 없습니다.</div>';
-        } else {
-            pages.forEach(item => {
-                const pageItem = document.createElement('div');
-                pageItem.className = 'page-item';
-                pageItem.innerHTML = `
-                    <span class="page-num">페이지 ${item.pageNum}</span>
-                    <span class="page-ratio">${item.ratio.toFixed(2)}%</span>
-                `;
-                pageItem.addEventListener('click', () => {
-                    this.goToPage(item.pageNum);
-                    this.closeChannelPageList();
-                });
-                pageList.appendChild(pageItem);
-            });
-        }
-
-        modal.classList.remove('hidden');
-    }
 
     closeChannelPageList() {
         const modal = document.getElementById('page-list-modal');
@@ -3158,6 +2982,197 @@ export class PDFSeparationViewer {
             this.wmStatus.style.color = 'red';
             this.startWmBtn.disabled = false;
         }
+    }
+
+    // ==========================================
+    // Image Export Features (Spread & Separated)
+    // ==========================================
+
+    async exportSpreadImage(returnBlob = false) {
+        const pageNum = this.currentPage;
+        const pageObj = this.scrollManager.pageElements.get(pageNum);
+        const metadata = this.pageMetadata.get(pageNum);
+
+        if (!pageObj || !pageObj.canvas) {
+            alert('현재 페이지의 이미지를 찾을 수 없습니다.');
+            return null;
+        }
+
+        if (!metadata || !metadata.trimBox) {
+            alert('재단 영역(TrimBox) 정보가 없습니다. 먼저 "자동 계산"을 실행해주세요.');
+            return null;
+        }
+
+        const canvas = pageObj.canvas;
+        const ctx = canvas.getContext('2d');
+        const width = canvas.width;
+        const height = canvas.height;
+
+        console.log(`[Export Debug] Page ${pageNum}, Canvas: ${width}x${height}, DPI: ${this.renderDPI}`);
+
+        // 1. Calculate TrimBox in pixels
+        const mediaBox = metadata && metadata.mediaBox ? metadata.mediaBox : { x: 0, y: 0, width: width * (72 / this.renderDPI), height: height * (72 / this.renderDPI) };
+        const trimBox = metadata && metadata.trimBox ? metadata.trimBox : { x: 0, y: 0, width: width * (72 / this.renderDPI), height: height * (72 / this.renderDPI) };
+
+        // Ensure coords exist
+        if (typeof mediaBox.x === 'undefined') mediaBox.x = 0;
+        if (typeof mediaBox.y === 'undefined') mediaBox.y = 0;
+        if (typeof trimBox.x === 'undefined') trimBox.x = 0;
+        if (typeof trimBox.y === 'undefined') trimBox.y = 0;
+
+        // Scale factor (PDF pt -> Canvas px)
+        const scaleX = width / mediaBox.width;
+        const scaleY = height / mediaBox.height;
+
+        // Calculate crop coordinates
+        let cropX = (trimBox.x - mediaBox.x) * scaleX;
+        let cropW = trimBox.width * scaleX;
+        let cropH = trimBox.height * scaleY;
+
+        let cropY = (mediaBox.height - (trimBox.y + trimBox.height)) * scaleY;
+        console.log(`[Export Debug] Crop: x=${cropX}, y=${cropY}, w=${cropW}, h=${cropH}, canvas=${width}x${height}`);
+
+        // Correction
+        if (cropX < 0) cropX = 0;
+        if (cropY < 0) cropY = 0;
+        if (cropX + cropW > width) cropW = width - cropX;
+        if (cropY + cropH > height) cropH = height - cropY;
+
+        // 2. Create new canvas for cropped image
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = cropW;
+        tempCanvas.height = cropH;
+        const tempCtx = tempCanvas.getContext('2d');
+
+        // Draw cropped region
+        tempCtx.drawImage(canvas, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+        // 3. Download or Return Blob
+        return new Promise((resolve) => {
+            tempCanvas.toBlob((blob) => {
+                if (returnBlob) {
+                    resolve({ blob, width: cropW, height: cropH });
+                } else {
+                    this.downloadBlob(blob, `spread_p${pageNum}.png`);
+                    resolve(true);
+                }
+            }, 'image/png');
+        });
+    }
+
+    async exportSeparatedImages() {
+        // 1. Get Inputs
+        const spineMm = this.coverCalculatorInputs.spine;
+        const coverMm = this.coverCalculatorInputs.cover;
+        const flapMm = this.coverCalculatorInputs.flap;
+
+        if (!spineMm && !coverMm) {
+            // 값이 모두 0이면 경고, 하지만 자동계산 안했을수도 있으니 
+            // 만약 값이 0이면 전체 TrimBox를 3등분(40-20-40) 할수는 없고...
+            // 그냥 진행 막음
+            alert('책등과 표지 너비가 설정되지 않았습니다. "자동 계산"을 먼저 실행하거나 값을 입력해주세요.');
+            return;
+        }
+
+        // 2. Get Spread Image (TrimBox cropped)
+        const spreadData = await this.exportSpreadImage(true); // returns { blob, width, height }
+        if (!spreadData) return;
+
+        const { blob, width: totalWidth, height: totalHeight } = spreadData;
+        const spreadUrl = URL.createObjectURL(blob);
+        const spreadImg = new Image();
+
+        spreadImg.onload = async () => {
+            // 3. Calculate Ratios
+            let parts = [];
+            let pxPerMm = 0;
+
+            // Assume 5 parts if flap > 0, else 3 parts
+            if (flapMm > 0) {
+                const totalWidthMm5 = flapMm + coverMm + spineMm + coverMm + flapMm;
+                pxPerMm = totalWidth / totalWidthMm5;
+
+                parts = [
+                    { name: 'cover_back_flap', label: '뒷날개(표3)', width: flapMm * pxPerMm },
+                    { name: 'cover_back', label: '뒷표지(표4)', width: coverMm * pxPerMm },
+                    { name: 'spine', label: '책등', width: spineMm * pxPerMm },
+                    { name: 'cover_front', label: '앞표지(표1)', width: coverMm * pxPerMm },
+                    { name: 'cover_front_flap', label: '앞날개(표2)', width: flapMm * pxPerMm }
+                ];
+            } else {
+                const totalWidthMm3 = coverMm + spineMm + coverMm;
+                pxPerMm = totalWidth / totalWidthMm3;
+
+                parts = [
+                    { name: 'cover_back', label: '뒷표지(표4)', width: coverMm * pxPerMm },
+                    { name: 'spine', label: '책등', width: spineMm * pxPerMm },
+                    { name: 'cover_front', label: '앞표지(표1)', width: coverMm * pxPerMm }
+                ];
+            }
+
+            // 4. Slice and Zip
+            // Ensure JSZip is available
+            if (!window.JSZip && typeof JSZip === 'undefined') {
+                alert('JSZip 라이브러리가 로드되지 않았습니다.');
+                return;
+            }
+            const ZipLib = window.JSZip || JSZip;
+            const zip = new ZipLib();
+
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+
+            let currentX = 0;
+
+            for (const part of parts) {
+                const partW = part.width;
+                const partH = totalHeight;
+
+                // 캔버스 크기 조정 (정수)
+                canvas.width = Math.max(1, Math.floor(partW));
+                canvas.height = partH;
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                // 원본에서 해당 영역만 그리기
+                ctx.drawImage(spreadImg,
+                    currentX, 0, partW, partH,
+                    0, 0, Math.floor(partW), partH
+                );
+
+                const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+                zip.file(`${part.name}.png`, blob);
+
+                currentX += partW;
+            }
+
+            // 5. Download Zip
+            const content = await zip.generateAsync({ type: "blob" });
+            this.downloadBlob(content, "separated_covers.zip");
+
+            URL.revokeObjectURL(spreadUrl);
+        };
+
+        spreadImg.onerror = () => {
+            alert("이미지 처리 중 오류가 발생했습니다.");
+            URL.revokeObjectURL(spreadUrl);
+        };
+
+        spreadImg.src = spreadUrl;
+    }
+
+    // Helper for downloading blobs
+    downloadBlob(blob, filename) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }, 100);
     }
 }
 
