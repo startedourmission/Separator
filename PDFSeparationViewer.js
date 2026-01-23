@@ -9,6 +9,7 @@ export class PDFSeparationViewer {
         this.canvas = document.createElement('canvas');
         this.ctx = this.canvas.getContext('2d');
         this.currentPDF = null;
+        this.currentFileType = 'pdf'; // 'pdf' | 'image'
         this.ghostscript = null;
         this.spotColors = [];
         this.gsModule = null;
@@ -353,6 +354,10 @@ export class PDFSeparationViewer {
         if (autoDetectBtn) {
             autoDetectBtn.addEventListener('click', () => this.detectCropMarks());
         }
+
+        // Drag and Drop & Clipboard
+        this.setupDragAndDrop();
+        this.setupClipboardPaste();
     }
 
     async loadGhostscript() {
@@ -801,19 +806,142 @@ export class PDFSeparationViewer {
 
     async handleFileSelect(event) {
         const file = event.target.files[0];
-        if (!file || file.type !== 'application/pdf') {
-            this.showError('PDF 파일을 선택해 주세요.');
-            return;
-        }
+        if (!file) return;
 
+        if (file.type === 'application/pdf') {
+            this.currentFileType = 'pdf';
+            try {
+                const arrayBuffer = await file.arrayBuffer();
+                await this.loadPDF(arrayBuffer);
+            } catch (error) {
+                console.error('파일 로딩 실패:', error);
+                this.showError('PDF 파일을 로딩할 수 없습니다.');
+            }
+        } else if (file.type.startsWith('image/')) {
+            this.currentFileType = 'image';
+            try {
+                const arrayBuffer = await file.arrayBuffer();
+                await this.loadImage(arrayBuffer, file.type);
+            } catch (error) {
+                console.error('이미지 로딩 실패:', error);
+                this.showError('이미지 파일을 로딩할 수 없습니다.');
+            }
+        } else {
+            this.showError('지원되지 않는 파일 형식입니다.');
+        }
+    }
+
+    setupDragAndDrop() {
+        const dropZone = document.body;
+
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.add('drag-over');
+        });
+
+        dropZone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove('drag-over');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove('drag-over');
+
+            const files = e.dataTransfer.files;
+            if (files && files.length > 0) {
+                // 재사용을 위해 이벤트 객체 모방
+                this.handleFileSelect({ target: { files: files } });
+            }
+        });
+    }
+
+    setupClipboardPaste() {
+        document.addEventListener('paste', (e) => {
+            const items = e.clipboardData.items;
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].kind === 'file' && items[i].type.startsWith('image/')) {
+                    const file = items[i].getAsFile();
+                    this.handleFileSelect({ target: { files: [file] } });
+                    break;
+                }
+            }
+        });
+    }
+
+    async loadImage(data, mimeType) {
         try {
+            this.showLoading('이미지 로딩 중...', '50%');
 
-            const arrayBuffer = await file.arrayBuffer();
-            await this.loadPDF(arrayBuffer);
+            const blob = new Blob([data], { type: mimeType });
+            const img = new Image();
+            const url = URL.createObjectURL(blob);
+
+            await new Promise((resolve, reject) => {
+                img.onload = resolve;
+                img.onerror = reject;
+                img.src = url;
+            });
+
+            this.currentPDF = data; // 이미지 데이터 저장 (PDF 변수 재사용)
+            this.totalPages = 1;
+            this.currentPage = 1;
+            this.imgObject = img; // 원본 이미지 객체 보관
+
+            // 페이지 캐시 클리어
+            this.clearPageCache();
+            this.totalChannelCounts = { cyan: 0, magenta: 0, yellow: 0, black: 0 };
+            this.totalPixelCount = 0;
+
+            // 메타데이터 설정 (이미지 크기)
+            // 72 DPI 기준 포인트 단위로 변환 운운할 필요 없이 픽셀 그대로 사용하거나 A4 핏 등 고려
+            // 여기서는 픽셀 크기를 그대로 포인트로 간주 (1:1)
+            const width = img.width;
+            const height = img.height;
+
+            this.pageMetadata.clear();
+            this.pageMetadata.set(1, {
+                mediaBox: { width, height },
+                trimBox: { width, height }
+            });
+
+            // 스크롤 뷰어 초기화
+            const aspectRatio = width / height;
+            this.scrollManager.init(this.totalPages, aspectRatio);
+            this.updatePageControls();
+            this.updatePageDimensionInfo();
+
+            // 별색 및 분판 컨트롤 비활성화/초기화
+            this.spotColors = [];
+            this.spotColorData = {};
+            this.updateSpotColorControls();
+
+            // 이미지 스캔 (히스토그램용) - 간단히 캔버스에서 읽어서 처리
+            this.scanImageForHistogram();
+
+            this.hideLoading();
+
         } catch (error) {
-            console.error('파일 로딩 실패:', error);
-            this.showError('PDF 파일을 로딩할 수 없습니다.');
+            console.error('이미지 처리 오류:', error);
+            this.hideLoading();
+            this.showError('이미지를 처리할 수 없습니다.');
         }
+    }
+
+    scanImageForHistogram() {
+        if (!this.imgObject) return;
+
+        const canvas = document.createElement('canvas');
+        canvas.width = this.imgObject.width;
+        canvas.height = this.imgObject.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(this.imgObject, 0, 0);
+
+        // 간단한 CMYK 변환 시뮬레이션 및 데이터 집계 구현 가능
+        // 현재는 생략하거나 빈 데이터로 둠
     }
 
     async loadPDF(data) {
@@ -1308,6 +1436,33 @@ export class PDFSeparationViewer {
 
     // 페이지 데이터 렌더링 (캐시/프리로드용)
     async renderPageData(pageNum) {
+        // 이미지 모드인 경우
+        if (this.currentFileType === 'image' && this.imgObject) {
+            // 컨테이너 크기 확인
+            const container = document.getElementById('scroll-viewport');
+            const containerWidth = container ? container.clientWidth - 40 : 800; // 40px 패딩
+
+            const imgWidth = this.imgObject.width;
+            const imgHeight = this.imgObject.height;
+            const aspectRatio = imgWidth / imgHeight;
+
+            // 100% 줌일 때 컨테이너에 맞춤 (PDF와 동일 로직)
+            const baseWidth = containerWidth;
+            const baseHeight = Math.floor(baseWidth / aspectRatio);
+
+            // 이미지 데이터 생성 (RGB)
+            const canvas = document.createElement('canvas');
+            canvas.width = baseWidth;
+            canvas.height = baseHeight;
+            const ctx = canvas.getContext('2d');
+
+            // 이미지 스케일링하여 그리기
+            ctx.drawImage(this.imgObject, 0, 0, baseWidth, baseHeight);
+            const imageData = ctx.getImageData(0, 0, baseWidth, baseHeight);
+
+            return { imageData, baseWidth, baseHeight, spotColorData: {} };
+        }
+
         // PDF 페이지의 실제 크기 가져오기 (포인트 단위)
         let pageSize;
         let pdfAspectRatio;

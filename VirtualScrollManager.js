@@ -248,13 +248,23 @@ export class VirtualScrollManager {
         const ctx = canvas.getContext('2d');
         const { imageData } = pageData;
 
-        if (!imageData || imageData.type !== 'cmyk') {
-            // 이미지 데이터가 없으면 기본 크기로 설정
+        if (!imageData) {
+            // 이미지 데이터가 없으면 기본 크기로 설정 및 회색 배경
             if (canvas.width !== this.pageWidth) canvas.width = this.pageWidth;
             if (canvas.height !== this.pageHeight) canvas.height = this.pageHeight;
 
             ctx.fillStyle = '#f0f0f0';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
+            return;
+        }
+
+        // 일반 RGB ImageData 처리 (이미지 파일 등)
+        if (imageData.type !== 'cmyk') {
+            if (canvas.width !== imageData.width || canvas.height !== imageData.height) {
+                canvas.width = imageData.width;
+                canvas.height = imageData.height;
+            }
+            ctx.putImageData(imageData, 0, 0);
             return;
         }
 
