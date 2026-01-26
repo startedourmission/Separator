@@ -366,6 +366,8 @@ export class PDFSeparationViewer {
             exportSeparatedBtn.addEventListener('click', () => this.exportSeparatedImages());
         }
 
+        // 'export-pdf-trimmed' 버튼 리스너 제거 (통합됨)
+
 
 
         // Drag and Drop & Clipboard
@@ -2988,177 +2990,271 @@ export class PDFSeparationViewer {
     // Image Export Features (Spread & Separated)
     // ==========================================
 
-    async exportSpreadImage(returnBlob = false) {
+    /**
+     * 펼침면 저장 버튼 핸들러 (이제 PDF로 저장)
+     */
+    async exportSpreadImage() {
+        await this.exportPDFTrimmed();
+    }
+
+    /**
+     * 내부용: 분판 저장을 위해 고화질 펼침면 이미지를 생성합니다 (PNG)
+     */
+    async renderHighResSpread() {
         const pageNum = this.currentPage;
-        const pageObj = this.scrollManager.pageElements.get(pageNum);
         const metadata = this.pageMetadata.get(pageNum);
 
-        if (!pageObj || !pageObj.canvas) {
-            alert('현재 페이지의 이미지를 찾을 수 없습니다.');
+        if (!this.currentPDFData) {
+            alert('PDF 파일이 로드되지 않았습니다.');
             return null;
         }
 
         if (!metadata || !metadata.trimBox) {
-            alert('재단 영역(TrimBox) 정보가 없습니다. 먼저 "자동 계산"을 실행해주세요.');
+            alert('재단 영역(TrimBox) 정보가 없습니다. 먼저 "자동 계산"을 실행하거나 값을 확인해주세요.');
             return null;
         }
 
-        const canvas = pageObj.canvas;
-        const ctx = canvas.getContext('2d');
-        const width = canvas.width;
-        const height = canvas.height;
+        this.showLoading('고화질 렌더링 중...');
 
-        console.log(`[Export Debug] Page ${pageNum}, Canvas: ${width}x${height}, DPI: ${this.renderDPI}`);
+        try {
+            // 1. 고화질로 페이지 재렌더링 (모든 채널 포함)
+            // 인쇄용 600 DPI 또는 현재 설정된 DPI 중 높은 쪽 사용
+            const exportDPI = Math.max(600, this.renderDPI);
+            const pageSize = await this.ghostscript.getPageSize(pageNum);
 
-        // 1. Calculate TrimBox in pixels
-        const mediaBox = metadata && metadata.mediaBox ? metadata.mediaBox : { x: 0, y: 0, width: width * (72 / this.renderDPI), height: height * (72 / this.renderDPI) };
-        const trimBox = metadata && metadata.trimBox ? metadata.trimBox : { x: 0, y: 0, width: width * (72 / this.renderDPI), height: height * (72 / this.renderDPI) };
+            const scaleFactor = exportDPI / 72;
+            const renderWidth = Math.ceil(pageSize.width * scaleFactor);
+            const renderHeight = Math.ceil(pageSize.height * scaleFactor);
 
-        // Ensure coords exist
-        if (typeof mediaBox.x === 'undefined') mediaBox.x = 0;
-        if (typeof mediaBox.y === 'undefined') mediaBox.y = 0;
-        if (typeof trimBox.x === 'undefined') trimBox.x = 0;
-        if (typeof trimBox.y === 'undefined') trimBox.y = 0;
+            // 모든 채널을 켜서 렌더링 (분판 설정 무시)
+            const renderOptions = {
+                width: renderWidth,
+                height: renderHeight,
+                pdfWidth: pageSize.width,
+                pdfHeight: pageSize.height,
+                pageNum: pageNum,
+                useCMYK: true, // CMYK로 렌더링
+                dpi: exportDPI,
+                separations: ['cyan', 'magenta', 'yellow', 'black'] // 무조건 전체
+            };
 
-        // Scale factor (PDF pt -> Canvas px)
-        const scaleX = width / mediaBox.width;
-        const scaleY = height / mediaBox.height;
+            const result = await this.ghostscript.renderPage(pageNum, renderOptions);
 
-        // Calculate crop coordinates
-        let cropX = (trimBox.x - mediaBox.x) * scaleX;
-        let cropW = trimBox.width * scaleX;
-        let cropH = trimBox.height * scaleY;
+            // CMYK -> RGB 변환 (화면에 표시용이 아닌 파일 저장용이므로 고화질 렌더링)
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = renderWidth;
+            tempCanvas.height = renderHeight;
+            const tempCtx = tempCanvas.getContext('2d');
 
-        let cropY = (mediaBox.height - (trimBox.y + trimBox.height)) * scaleY;
-        console.log(`[Export Debug] Crop: x=${cropX}, y=${cropY}, w=${cropW}, h=${cropH}, canvas=${width}x${height}`);
+            // CMYK 데이터를 RGB로 변환하여 캔버스에 그리기
+            const pixelCount = renderWidth * renderHeight;
+            const rgbData = new Uint8ClampedArray(pixelCount * 4);
+            const { cyan, magenta, yellow, black } = result.channels;
 
-        // Correction
-        if (cropX < 0) cropX = 0;
-        if (cropY < 0) cropY = 0;
-        if (cropX + cropW > width) cropW = width - cropX;
-        if (cropY + cropH > height) cropH = height - cropY;
+            for (let i = 0; i < pixelCount; i++) {
+                const c = cyan[i] / 255;
+                const m = magenta[i] / 255;
+                const y = yellow[i] / 255;
+                const k = black[i] / 255;
 
-        // 2. Create new canvas for cropped image
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = cropW;
-        tempCanvas.height = cropH;
-        const tempCtx = tempCanvas.getContext('2d');
+                rgbData[i * 4 + 0] = Math.round(255 * (1 - c) * (1 - k));
+                rgbData[i * 4 + 1] = Math.round(255 * (1 - m) * (1 - k));
+                rgbData[i * 4 + 2] = Math.round(255 * (1 - y) * (1 - k));
+                rgbData[i * 4 + 3] = 255;
+            }
+            tempCtx.putImageData(new ImageData(rgbData, renderWidth, renderHeight), 0, 0);
 
-        // Draw cropped region
-        tempCtx.drawImage(canvas, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+            // 2. TrimBox 영역 크롭
+            const mediaBox = metadata.mediaBox;
+            const trimBox = metadata.trimBox;
 
-        // 3. Download or Return Blob
-        return new Promise((resolve) => {
-            tempCanvas.toBlob((blob) => {
-                if (returnBlob) {
-                    resolve({ blob, width: cropW, height: cropH });
-                } else {
-                    this.downloadBlob(blob, `cover_책이름.jpg`);
-                    resolve(true);
-                }
-            }, 'image/jpeg', 0.95);
-        });
+            const scaleX = renderWidth / mediaBox.width;
+            const scaleY = renderHeight / mediaBox.height;
+
+            let cropX = (trimBox.x - mediaBox.x) * scaleX;
+            let cropW = trimBox.width * scaleX;
+            let cropH = trimBox.height * scaleY;
+            // PDF 좌표계(Bottom-Up) -> Canvas 좌표계(Top-Down) 변환
+            let cropY = (mediaBox.height - (trimBox.y + trimBox.height)) * scaleY;
+
+            const cropCanvas = document.createElement('canvas');
+            cropCanvas.width = Math.floor(cropW);
+            cropCanvas.height = Math.floor(cropH);
+            const cropCtx = cropCanvas.getContext('2d');
+
+            cropCtx.drawImage(tempCanvas, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+            this.hideLoading();
+
+            return new Promise(r => cropCanvas.toBlob(b => r({ blob: b, width: cropW, height: cropH }), 'image/png'));
+
+        } catch (error) {
+            console.error('내보내기 실패:', error);
+            alert('내보내기 중 오류가 발생했습니다: ' + error.message);
+            this.hideLoading();
+            return null;
+        }
     }
 
     async exportSeparatedImages() {
-        // 1. Get Inputs
+        // 1. Get Inputs & Metadata
+        const pageNum = this.currentPage;
+        const metadata = this.pageMetadata.get(pageNum);
         const spineMm = this.coverCalculatorInputs.spine;
         const coverMm = this.coverCalculatorInputs.cover;
         const flapMm = this.coverCalculatorInputs.flap;
 
+        if (!this.currentPDFData) {
+            alert('PDF 파일이 로드되지 않았습니다.');
+            return;
+        }
+
+        if (!metadata || !metadata.trimBox) {
+            alert('재단 영역(TrimBox) 정보가 없습니다. 먼저 "자동 계산"을 실행하거나 값을 확인해주세요.');
+            return;
+        }
+
         if (!spineMm && !coverMm) {
-            // 값이 모두 0이면 경고, 하지만 자동계산 안했을수도 있으니 
-            // 만약 값이 0이면 전체 TrimBox를 3등분(40-20-40) 할수는 없고...
-            // 그냥 진행 막음
             alert('책등과 표지 너비가 설정되지 않았습니다. "자동 계산"을 먼저 실행하거나 값을 입력해주세요.');
             return;
         }
 
-        // 2. Get Spread Image (TrimBox cropped)
-        const spreadData = await this.exportSpreadImage(true); // returns { blob, width, height }
-        if (!spreadData) return;
+        // JSZip 확인
+        if (!window.JSZip && typeof JSZip === 'undefined') {
+            alert('JSZip 라이브러리가 로드되지 않았습니다.');
+            return;
+        }
 
-        const { blob, width: totalWidth, height: totalHeight } = spreadData;
-        const spreadUrl = URL.createObjectURL(blob);
-        const spreadImg = new Image();
+        this.showLoading('원본 PDF 분할 중 (PDF Slicing)...');
 
-        spreadImg.onload = async () => {
-            // 3. Calculate Ratios
-            let parts = [];
-            let pxPerMm = 0;
-
-            // Assume 5 parts if flap > 0, else 3 parts
-            if (flapMm > 0) {
-                const totalWidthMm5 = flapMm + coverMm + spineMm + coverMm + flapMm;
-                pxPerMm = totalWidth / totalWidthMm5;
-
-                parts = [
-                    { name: 'cover(표3)_책이름', label: '뒷날개(표3)', width: flapMm * pxPerMm },
-                    { name: 'cover(표4)_책이름', label: '뒷표지(표4)', width: coverMm * pxPerMm },
-                    { name: 'cover(책등)_책이름', label: '책등', width: spineMm * pxPerMm },
-                    { name: 'cover(표1)_책이름', label: '앞표지(표1)', width: coverMm * pxPerMm },
-                    { name: 'cover(표2)_책이름', label: '앞날개(표2)', width: flapMm * pxPerMm }
-                ];
-            } else {
-                const totalWidthMm3 = coverMm + spineMm + coverMm;
-                pxPerMm = totalWidth / totalWidthMm3;
-
-                parts = [
-                    { name: 'cover(표4)_책이름', label: '뒷표지(표4)', width: coverMm * pxPerMm },
-                    { name: 'cover(책등)_책이름', label: '책등', width: spineMm * pxPerMm },
-                    { name: 'cover(표1)_책이름', label: '앞표지(표1)', width: coverMm * pxPerMm }
-                ];
-            }
-
-            // 4. Slice and Zip
-            // Ensure JSZip is available
-            if (!window.JSZip && typeof JSZip === 'undefined') {
-                alert('JSZip 라이브러리가 로드되지 않았습니다.');
-                return;
-            }
+        try {
+            const { PDFDocument } = window.PDFLib;
             const ZipLib = window.JSZip || JSZip;
             const zip = new ZipLib();
 
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
+            // 원본 PDF 로드
+            const sourcePdf = await PDFDocument.load(this.currentPDFData);
 
-            let currentX = 0;
+            // TrimBox 및 스케일 계산 (PDF Unit 기준)
+            const mediaBox = metadata.mediaBox || { x: 0, y: 0, width: 0, height: 0 };
+            const trimBox = metadata.trimBox || { x: 0, y: 0, width: 0, height: 0 };
 
-            for (const part of parts) {
-                const partW = part.width;
-                const partH = totalHeight;
+            // PDF 좌표계의 TrimBox 시작점 (x, y)
+            // 주의: PDF 좌표계는 좌하단이 (0,0)임.
+            const trimX = trimBox.x;
+            const trimY = trimBox.y;
+            const trimW = trimBox.width;
+            const trimH = trimBox.height;
 
-                // 캔버스 크기 조정 (정수)
-                canvas.width = Math.max(1, Math.floor(partW));
-                canvas.height = partH;
+            // 전체 mm 너비 -> PDF Point 비율 계산
+            const totalMm = (flapMm * 2) + (coverMm * 2) + spineMm; // 뒷날개+뒷표지+책등+앞표지+앞날개
+            // 비율: 전체 TrimBox 너비(pt) / 전체 mm
+            const ptPerMm = trimW / totalMm;
 
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            let currentX = trimX; // 크롭 시작 X 좌표 (PDF 좌표계)
 
-                // 원본에서 해당 영역만 그리기
-                ctx.drawImage(spreadImg,
-                    currentX, 0, partW, partH,
-                    0, 0, Math.floor(partW), partH
-                );
-
-                const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.95));
-                zip.file(`${part.name}.jpg`, blob);
-
-                currentX += partW;
+            // 분할 파트 정의 (순서대로: 뒷날개 -> 뒷표지 -> 책등 -> 앞표지 -> 앞날개)
+            let parts = [];
+            // 좌표 이동은 왼쪽(TrimBox X)에서 오른쪽으로 진행
+            if (flapMm > 0) {
+                parts = [
+                    { name: '01_뒷날개(표3)', widthMm: flapMm },
+                    { name: '02_뒷표지(표4)', widthMm: coverMm },
+                    { name: '03_책등', widthMm: spineMm },
+                    { name: '04_앞표지(표1)', widthMm: coverMm },
+                    { name: '05_앞날개(표2)', widthMm: flapMm }
+                ];
+            } else {
+                parts = [
+                    { name: '01_뒷표지(표4)', widthMm: coverMm },
+                    { name: '02_책등', widthMm: spineMm },
+                    { name: '03_앞표지(표1)', widthMm: coverMm }
+                ];
             }
 
-            // 5. Download Zip
+            // 각 파트별로 PDF 생성
+            for (const part of parts) {
+                const partWidthPt = part.widthMm * ptPerMm;
+
+                // 새 PDF 생성 및 페이지 복사
+                const newPdf = await PDFDocument.create();
+                const [copiedPage] = await newPdf.copyPages(sourcePdf, [pageNum - 1]);
+                newPdf.addPage(copiedPage);
+
+                // CropBox 설정
+                // x: 현재 x 위치
+                // y: trimBox의 y (높이는 전체 trimBox 높이 사용)
+                // width: 파트 너비
+                // height: trimBox 높이
+                copiedPage.setCropBox(currentX, trimY, partWidthPt, trimH);
+                copiedPage.setMediaBox(currentX, trimY, partWidthPt, trimH); // MediaBox도 맞춰줌 (뷰어 호환성)
+
+                // PDF 저장
+                const pdfBytes = await newPdf.save();
+                zip.file(`${part.name}.pdf`, pdfBytes);
+
+                // 다음 위치로 이동
+                currentX += partWidthPt;
+            }
+
+            // ZIP 다운로드
             const content = await zip.generateAsync({ type: "blob" });
-            this.downloadBlob(content, "cover_책이름.zip");
+            this.downloadBlob(content, `separated_parts_${this.currentPage}.zip`);
 
-            URL.revokeObjectURL(spreadUrl);
-        };
+            this.hideLoading();
 
-        spreadImg.onerror = () => {
-            alert("이미지 처리 중 오류가 발생했습니다.");
-            URL.revokeObjectURL(spreadUrl);
-        };
+        } catch (error) {
+            console.error('PDF 분할 실패:', error);
+            alert('PDF 분할 중 오류가 발생했습니다: ' + error.message);
+            this.hideLoading();
+        }
+    }
 
-        spreadImg.src = spreadUrl;
+    /**
+     * 원본 PDF를 가져와서 TrimBox 크기로 크롭하여 내보냅니다.
+     * (벡터 정보 및 원본 색상 프로파일 보존)
+     */
+    async exportPDFTrimmed() {
+        const pageNum = this.currentPage;
+        const metadata = this.pageMetadata.get(pageNum);
+
+        if (!this.currentPDFData) {
+            alert('PDF 파일이 로드되지 않았습니다.');
+            return;
+        }
+
+        if (!metadata || !metadata.trimBox) {
+            alert('재단 영역(TrimBox) 정보가 없습니다. 먼저 "자동 계산"을 실행해주세요.');
+            return;
+        }
+
+        this.showLoading('원본 PDF 처리 중...');
+
+        try {
+            const { PDFDocument } = window.PDFLib;
+            const sourcePdf = await PDFDocument.load(this.currentPDFData);
+            const exportPdf = await PDFDocument.create();
+
+            // 현재 페이지 복사
+            const [copiedPage] = await exportPdf.copyPages(sourcePdf, [pageNum - 1]);
+            exportPdf.addPage(copiedPage);
+
+            // TrimBox 영역으로 CropBox 설정
+            // PDF 좌표계는 좌하단이 (0,0)임
+            const { x, y, width, height } = metadata.trimBox;
+            copiedPage.setCropBox(x, y, width, height);
+            copiedPage.setMediaBox(x, y, width, height);
+
+            const pdfBytes = await exportPdf.save();
+            const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+            this.downloadBlob(blob, `cover_original_trimmed_${pageNum}.pdf`);
+
+            this.hideLoading();
+        } catch (error) {
+            console.error('PDF 내보내기 실패:', error);
+            alert('PDF 처리 중 오류가 발생했습니다: ' + error.message);
+            this.hideLoading();
+        }
     }
 
     // Helper for downloading blobs
