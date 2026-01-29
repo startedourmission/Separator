@@ -1,6 +1,7 @@
 import { WorkerPool } from './worker-pool.js';
 import { VirtualScrollManager } from './VirtualScrollManager.js';
 import { getSpotColorRGB } from './constants.js';
+import { renderBookMockup } from './BookMockupGenerator.js';
 
 export class PDFSeparationViewer {
     constructor() {
@@ -3017,52 +3018,39 @@ export class PDFSeparationViewer {
         this.showLoading('고화질 렌더링 중...');
 
         try {
-            // 1. 고화질로 페이지 재렌더링 (모든 채널 포함)
+            // 1. 고화질로 페이지 재렌더링 (PDF.js 사용 -> RGB 보장, 에러 방지)
             // 인쇄용 600 DPI 또는 현재 설정된 DPI 중 높은 쪽 사용
             const exportDPI = Math.max(600, this.renderDPI);
-            const pageSize = await this.ghostscript.getPageSize(pageNum);
 
+            // PDF.js 로드 확인
+            if (!window.pdfjsLib) {
+                throw new Error("PDF.js library is not loaded.");
+            }
+
+            const loadingTask = pdfjsLib.getDocument({ data: this.currentPDFData });
+            const pdf = await loadingTask.promise;
+            const page = await pdf.getPage(pageNum);
+
+            // PDF.js uses 72 DPI base.
             const scaleFactor = exportDPI / 72;
-            const renderWidth = Math.ceil(pageSize.width * scaleFactor);
-            const renderHeight = Math.ceil(pageSize.height * scaleFactor);
+            const viewport = page.getViewport({ scale: scaleFactor });
 
-            // 모든 채널을 켜서 렌더링 (분판 설정 무시)
-            const renderOptions = {
-                width: renderWidth,
-                height: renderHeight,
-                pdfWidth: pageSize.width,
-                pdfHeight: pageSize.height,
-                pageNum: pageNum,
-                useCMYK: true, // CMYK로 렌더링
-                dpi: exportDPI,
-                separations: ['cyan', 'magenta', 'yellow', 'black'] // 무조건 전체
-            };
+            const renderWidth = Math.floor(viewport.width);
+            const renderHeight = Math.floor(viewport.height);
 
-            const result = await this.ghostscript.renderPage(pageNum, renderOptions);
-
-            // CMYK -> RGB 변환 (화면에 표시용이 아닌 파일 저장용이므로 고화질 렌더링)
             const tempCanvas = document.createElement('canvas');
             tempCanvas.width = renderWidth;
             tempCanvas.height = renderHeight;
             const tempCtx = tempCanvas.getContext('2d');
 
-            // CMYK 데이터를 RGB로 변환하여 캔버스에 그리기
-            const pixelCount = renderWidth * renderHeight;
-            const rgbData = new Uint8ClampedArray(pixelCount * 4);
-            const { cyan, magenta, yellow, black } = result.channels;
+            const renderContext = {
+                canvasContext: tempCtx,
+                viewport: viewport
+            };
 
-            for (let i = 0; i < pixelCount; i++) {
-                const c = cyan[i] / 255;
-                const m = magenta[i] / 255;
-                const y = yellow[i] / 255;
-                const k = black[i] / 255;
+            await page.render(renderContext).promise;
 
-                rgbData[i * 4 + 0] = Math.round(255 * (1 - c) * (1 - k));
-                rgbData[i * 4 + 1] = Math.round(255 * (1 - m) * (1 - k));
-                rgbData[i * 4 + 2] = Math.round(255 * (1 - y) * (1 - k));
-                rgbData[i * 4 + 3] = 255;
-            }
-            tempCtx.putImageData(new ImageData(rgbData, renderWidth, renderHeight), 0, 0);
+            // 이미 tempCanvas에 RGB로 그려짐. 별도 변환 불필요.
 
             // 2. TrimBox 영역 크롭
             const mediaBox = metadata.mediaBox;
@@ -3158,17 +3146,17 @@ export class PDFSeparationViewer {
             // 좌표 이동은 왼쪽(TrimBox X)에서 오른쪽으로 진행
             if (flapMm > 0) {
                 parts = [
-                    { name: '01_뒷날개(표3)', widthMm: flapMm },
-                    { name: '02_뒷표지(표4)', widthMm: coverMm },
-                    { name: '03_책등', widthMm: spineMm },
-                    { name: '04_앞표지(표1)', widthMm: coverMm },
-                    { name: '05_앞날개(표2)', widthMm: flapMm }
+                    { name: 'cover(표3)_책이름', widthMm: flapMm },
+                    { name: 'cover(표4)_책이름', widthMm: coverMm },
+                    { name: 'cover(책등)_책이름', widthMm: spineMm },
+                    { name: 'cover(표1)_책이름', widthMm: coverMm },
+                    { name: 'cover(표2)_책이름', widthMm: flapMm }
                 ];
             } else {
                 parts = [
-                    { name: '01_뒷표지(표4)', widthMm: coverMm },
-                    { name: '02_책등', widthMm: spineMm },
-                    { name: '03_앞표지(표1)', widthMm: coverMm }
+                    { name: 'cover(표4)_책이름', widthMm: coverMm },
+                    { name: 'cover(책등)_책이름', widthMm: spineMm },
+                    { name: 'cover(표1)_책이름', widthMm: coverMm }
                 ];
             }
 
@@ -3195,6 +3183,83 @@ export class PDFSeparationViewer {
 
                 // 다음 위치로 이동
                 currentX += partWidthPt;
+            }
+
+            // -------------------------------------------------------------
+            // Task: 목업 이미지 생성 및 추가 (2.5D Canvas Render)
+            // -------------------------------------------------------------
+            this.showLoading('목업 이미지 생성 중 (Canvas Rendering)...');
+            try {
+                // 1. 고화질 펼침면 이미지 생성 (TrimBox 영역)
+                const spreadResult = await this.renderHighResSpread();
+
+                if (spreadResult && spreadResult.blob) {
+                    const fullImage = await createImageBitmap(spreadResult.blob);
+
+                    // 2. 픽셀 단위 좌표 계산
+                    // renderHighResSpread는 TrimBox 전체를 반환함.
+                    // totalMm = 전체 너비 mm
+                    const pxPerMm = spreadResult.width / totalMm;
+
+                    // 파트별 오프셋 계산 (앞표지, 책등 위치 찾기)
+                    // parts 배열은 [뒷날개?, 뒷표지, 책등, 앞표지, 앞날개?] 순서임.
+                    // "책등"과 "앞표지"를 찾아야 함.
+                    // parts 예: 
+                    // Case A (날개O): [BackFlap, BackCover, Spine, FrontCover, FrontFlap]
+                    // Case B (날개X): [BackCover, Spine, FrontCover]
+
+                    let spinePart = parts.find(p => p.name.includes('책등'));
+                    let frontPart = parts.find(p => p.name.includes('앞표지') || p.name.includes('표1'));
+
+                    if (spinePart && frontPart) {
+                        // 각 파트의 시작 X 좌표(mm)를 찾아야 함.
+                        // parts 순회하며 누적
+                        let currentMmX = 0;
+                        let spineX = 0;
+                        let frontX = 0;
+
+                        for (const p of parts) {
+                            if (p === spinePart) spineX = currentMmX;
+                            if (p === frontPart) frontX = currentMmX;
+                            currentMmX += p.widthMm;
+                        }
+
+                        // 3. 서브 이미지 추출 (Canvas using drawImage with sub-rect)
+                        const extractSubImage = (xMm, wMm) => {
+                            const x = Math.floor(xMm * pxPerMm);
+                            const w = Math.floor(wMm * pxPerMm);
+                            const h = spreadResult.height;
+
+                            const cvs = document.createElement('canvas');
+                            cvs.width = w;
+                            cvs.height = h;
+                            const ctx = cvs.getContext('2d');
+                            ctx.drawImage(fullImage, x, 0, w, h, 0, 0, w, h);
+                            return cvs; // returns Canvas Element (valid image source)
+                        };
+
+                        const spineImg = extractSubImage(spineX, spinePart.widthMm);
+                        const frontImg = extractSubImage(frontX, frontPart.widthMm);
+
+                        // 4. 목업 생성 (BookMockupGenerator)
+                        // Three.js BoxGeometry 기반 3D 목업 렌더링
+                        const mockupBlob = await renderBookMockup(
+                            frontImg,
+                            spineImg,
+                            frontImg.width,
+                            spineImg.width,
+                            frontImg.height,
+                            {} // 기본값 사용
+                        );
+
+                        // 5. ZIP에 추가
+                        zip.file('cover 3D(그림자X)_책이름.png', mockupBlob);
+                    }
+                }
+            } catch (mockupError) {
+                console.error('목업 생성 실패:', mockupError);
+                alert('목업 생성 실패: ' + mockupError.message);
+                // 목업 실패해도 전체 ZIP 다운로드는 진행
             }
 
             // ZIP 다운로드
