@@ -287,32 +287,18 @@ export class PDFSeparationViewer {
             });
         }
 
-
         // 표지 계산기 입력 이벤트
-        if (this.spineInput && this.flapInput && this.coverInput && this.marginInput) {
-            const updateCalc = () => this.calculateCoverSpread();
-            this.spineInput.addEventListener('input', (e) => {
-                this.coverCalculatorInputs.spine = parseFloat(e.target.value) || 0;
-                updateCalc();
-            });
-            this.flapInput.addEventListener('input', (e) => {
-                this.coverCalculatorInputs.flap = parseFloat(e.target.value) || 0;
-                updateCalc();
-            });
-            this.coverInput.addEventListener('input', (e) => {
-                this.coverCalculatorInputs.cover = parseFloat(e.target.value) || 0;
-                updateCalc();
-            });
-            this.marginInput.addEventListener('input', (e) => {
-                this.coverCalculatorInputs.margin = parseFloat(e.target.value) || 0;
-                updateCalc();
-            });
+        const updateCalcManual = () => {
+            this.coverCalculatorInputs.spine = parseFloat(this.spineInput.value) || 0;
+            this.coverCalculatorInputs.flap = parseFloat(this.flapInput.value) || 0;
+            this.coverCalculatorInputs.cover = parseFloat(this.coverInput.value) || 0;
+            this.calculateCoverSpread(true); // 수동 입력 모드로 호출
+        };
 
-            // 초기 계산 실행
-            updateCalc();
-        }
+        if (this.spineInput) this.spineInput.addEventListener('input', updateCalcManual);
+        if (this.flapInput) this.flapInput.addEventListener('input', updateCalcManual);
+        if (this.coverInput) this.coverInput.addEventListener('input', updateCalcManual);
 
-        // 렌더링 화질 컨트롤 이벤트
         // 렌더링 화질 컨트롤 이벤트
         if (this.qualitySelect) {
             this.qualitySelect.addEventListener('change', (e) => {
@@ -360,6 +346,7 @@ export class PDFSeparationViewer {
                 }
             });
         }
+
         // 재단선 자동 감지 버튼
         const autoDetectBtn = document.getElementById('auto-detect-crop');
         if (autoDetectBtn) {
@@ -377,10 +364,6 @@ export class PDFSeparationViewer {
             exportSeparatedBtn.addEventListener('click', () => this.exportSeparatedImages());
         }
 
-        // 'export-pdf-trimmed' 버튼 리스너 제거 (통합됨)
-
-
-
         // Drag and Drop & Clipboard
         this.setupDragAndDrop();
         this.setupClipboardPaste();
@@ -388,8 +371,6 @@ export class PDFSeparationViewer {
 
     async loadGhostscript() {
         try {
-
-
             this.worker = new Worker('./ghostscript-worker.js', { type: 'module' });
             this.currentPDFData = null;
             this.requestId = 0;
@@ -1397,7 +1378,7 @@ export class PDFSeparationViewer {
 
     // 표지 펼침면 계산
     // 표지 펼침면 계산 (합계 방식)
-    calculateCoverSpread() {
+    calculateCoverSpread(isManual = false) {
         if (!this.calcResultElement) return;
 
         // 현재 페이지의 TrimBox 높이 가져오기
@@ -1409,39 +1390,51 @@ export class PDFSeparationViewer {
             trimHeightMm = metadata.trimBox.height * ptToMm;
         }
 
-        // finalMarks를 mm로 변환하여 계산
-        if (this.finalMarks.length < 4) {
-            this.calcResultElement.textContent = `펼침면 너비 : 0.00 x 0.00 mm`;
-            return;
-        }
-
-        // x 변환 비율 재계산 (최신 캔버스/메타데이터 기준)
-        const pageObj = this.scrollManager.pageElements.get(pageNum);
-        if (!pageObj || !pageObj.canvas || !metadata) return;
-        const pxToMm = (metadata.mediaBox.width * 0.352778) / pageObj.canvas.width;
-
-        const sortedMarks = [...this.finalMarks].sort((a, b) => a - b);
-        const dists = [];
-        for (let i = 1; i < sortedMarks.length; i++) {
-            dists.push((sortedMarks[i] - sortedMarks[i - 1]) * pxToMm);
-        }
-
         let spineWidth = 0, coverWidth = 0, flapWidth = 0;
 
-        if (sortedMarks.length === 6) {
-            flapWidth = (dists[0] + dists[4]) / 2;
-            coverWidth = (dists[1] + dists[3]) / 2;
-            spineWidth = dists[2];
-        } else if (sortedMarks.length === 4) {
-            coverWidth = (dists[0] + dists[2]) / 2;
-            spineWidth = dists[1];
-            flapWidth = 0;
-        }
+        if (isManual) {
+            // 수동 입력 시: 필드 값 우선 사용
+            spineWidth = this.coverCalculatorInputs.spine;
+            coverWidth = this.coverCalculatorInputs.cover;
+            flapWidth = this.coverCalculatorInputs.flap;
+        } else {
+            // 자동 감지 시: finalMarks 기반 계산
+            if (this.finalMarks.length < 4) {
+                this.calcResultElement.textContent = `펼침면 너비 : 0.00 x 0.00 mm`;
+                return;
+            }
 
-        // 입력 필드 동기화
-        this.spineInput.value = spineWidth.toFixed(2);
-        this.coverInput.value = coverWidth.toFixed(2);
-        this.flapInput.value = flapWidth.toFixed(2);
+            // x 변환 비율 재계산 (최신 캔버스/메타데이터 기준)
+            const pageObj = this.scrollManager.pageElements.get(pageNum);
+            if (!pageObj || !pageObj.canvas || !metadata) return;
+            const pxToMm = (metadata.mediaBox.width * 0.352778) / pageObj.canvas.width;
+
+            const sortedMarks = [...this.finalMarks].sort((a, b) => a - b);
+            const dists = [];
+            for (let i = 1; i < sortedMarks.length; i++) {
+                dists.push((sortedMarks[i] - sortedMarks[i - 1]) * pxToMm);
+            }
+
+            if (sortedMarks.length === 6) {
+                flapWidth = (dists[0] + dists[4]) / 2;
+                coverWidth = (dists[1] + dists[3]) / 2;
+                spineWidth = dists[2];
+            } else if (sortedMarks.length === 4) {
+                coverWidth = (dists[0] + dists[2]) / 2;
+                spineWidth = dists[1];
+                flapWidth = 0;
+            }
+
+            // 입력 필드 동기화
+            this.spineInput.value = spineWidth.toFixed(2);
+            this.coverInput.value = coverWidth.toFixed(2);
+            this.flapInput.value = flapWidth.toFixed(2);
+
+            // 캐시 업데이트
+            this.coverCalculatorInputs.spine = spineWidth;
+            this.coverCalculatorInputs.cover = coverWidth;
+            this.coverCalculatorInputs.flap = flapWidth;
+        }
 
         const totalWidth = (coverWidth * 2) + (flapWidth * 2) + spineWidth;
         const totalW_fixed = totalWidth.toFixed(2);
@@ -3156,6 +3149,12 @@ export class PDFSeparationViewer {
         // 1. Get Inputs & Metadata
         const pageNum = this.currentPage;
         const metadata = this.pageMetadata.get(pageNum);
+
+        // 최신 입력값으로 강제 업데이트 (수동 입력 반영용)
+        this.coverCalculatorInputs.spine = parseFloat(this.spineInput.value) || 0;
+        this.coverCalculatorInputs.cover = parseFloat(this.coverInput.value) || 0;
+        this.coverCalculatorInputs.flap = parseFloat(this.flapInput.value) || 0;
+
         const spineMm = this.coverCalculatorInputs.spine;
         const coverMm = this.coverCalculatorInputs.cover;
         const flapMm = this.coverCalculatorInputs.flap;
