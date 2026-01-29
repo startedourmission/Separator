@@ -933,3 +933,35 @@ h4 {
     z-index: 9999;
     display: none;
 }
+
+/* 재단선 자동감지 마커 */
+.crop-marker {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    border: 2px solid white;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 100;
+    pointer-events: auto;
+    cursor: pointer;
+    box-shadow: 0 0 4px rgba(0, 0, 0, 0.5);
+    transition: transform 0.1s ease;
+}
+
+.crop-marker:hover {
+    transform: translate(-50%, -50%) scale(1.3);
+}
+
+.crop-marker.selected {
+    background-color: #ff0000;
+    /* 빨강 - 선택된 6개 */
+    z-index: 101;
+}
+
+.crop-marker.candidate {
+    background-color: #ffdd00;
+    /* 노랑 - 나머지 후보들 */
+    width: 10px;
+    height: 10px;
+}

@@ -134,7 +134,9 @@ export class PDFSeparationViewer {
         this.spineInput = document.getElementById('spine-width');
         this.flapInput = document.getElementById('flap-width');
         this.coverInput = document.getElementById('cover-width');
-        this.marginInput = document.getElementById('flap-margin-width');
+        this.marginInput = null; // 날개 여백 제거
+        this.marksSelect = null; // 드롭다운 제거
+        this.showCandidatesToggle = document.getElementById('show-candidates-toggle');
         this.calcResultElement = document.getElementById('calc-result');
 
         // 표지 계산기 입력값 저장 (기본값 설정)
@@ -144,6 +146,14 @@ export class PDFSeparationViewer {
             cover: 0,
             margin: 0
         };
+
+        // 표지 계산기 데이터 저장
+        this.allCandidates = []; // 감지된 모든 후보점들
+        this.finalMarks = [];    // 선택된 6개 점들 (x0~x5)
+
+        if (this.showCandidatesToggle) {
+            this.showCandidatesToggle.addEventListener('change', () => this.renderCropMarkers());
+        }
 
         // 렌더링 화질 컨트롤 (New)
         // 렌더링 화질 컨트롤 (New)
@@ -1376,6 +1386,13 @@ export class PDFSeparationViewer {
 
         // 페이지 변경 시 계산기도 업데이트 (TrimBox 기준이므로)
         this.calculateCoverSpread();
+
+        // 페이지 변경 시 마커 제거
+        this.clearCropMarkers();
+    }
+
+    clearCropMarkers() {
+        document.querySelectorAll('.crop-marker').forEach(m => m.remove());
     }
 
     // 표지 펼침면 계산
@@ -1392,19 +1409,44 @@ export class PDFSeparationViewer {
             trimHeightMm = metadata.trimBox.height * ptToMm;
         }
 
-        const spineMm = this.coverCalculatorInputs.spine || 0;
-        const flapMm = this.coverCalculatorInputs.flap || 0;
-        const coverMm = this.coverCalculatorInputs.cover || 0;
-        const marginMm = this.coverCalculatorInputs.margin || 0;
+        // finalMarks를 mm로 변환하여 계산
+        if (this.finalMarks.length < 4) {
+            this.calcResultElement.textContent = `펼침면 너비 : 0.00 x 0.00 mm`;
+            return;
+        }
 
-        // 계산: (표지 * 2) + (날개 * 2) + (날개여백 * 2) + 책등
-        const totalWidth = (coverMm * 2) + (flapMm * 2) + (marginMm * 2) + spineMm;
+        // x 변환 비율 재계산 (최신 캔버스/메타데이터 기준)
+        const pageObj = this.scrollManager.pageElements.get(pageNum);
+        if (!pageObj || !pageObj.canvas || !metadata) return;
+        const pxToMm = (metadata.mediaBox.width * 0.352778) / pageObj.canvas.width;
 
-        // 소수점 2자리까지 표시
+        const sortedMarks = [...this.finalMarks].sort((a, b) => a - b);
+        const dists = [];
+        for (let i = 1; i < sortedMarks.length; i++) {
+            dists.push((sortedMarks[i] - sortedMarks[i - 1]) * pxToMm);
+        }
+
+        let spineWidth = 0, coverWidth = 0, flapWidth = 0;
+
+        if (sortedMarks.length === 6) {
+            flapWidth = (dists[0] + dists[4]) / 2;
+            coverWidth = (dists[1] + dists[3]) / 2;
+            spineWidth = dists[2];
+        } else if (sortedMarks.length === 4) {
+            coverWidth = (dists[0] + dists[2]) / 2;
+            spineWidth = dists[1];
+            flapWidth = 0;
+        }
+
+        // 입력 필드 동기화
+        this.spineInput.value = spineWidth.toFixed(2);
+        this.coverInput.value = coverWidth.toFixed(2);
+        this.flapInput.value = flapWidth.toFixed(2);
+
+        const totalWidth = (coverWidth * 2) + (flapWidth * 2) + spineWidth;
         const totalW_fixed = totalWidth.toFixed(2);
         const height_fixed = trimHeightMm > 0 ? trimHeightMm.toFixed(2) : '0.00';
 
-        // 요청 포맷: 펼침면 너비 : 가로 x 세로 mm
         this.calcResultElement.textContent = `펼침면 너비 : ${totalW_fixed} x ${height_fixed} mm`;
     }
 
@@ -1679,6 +1721,7 @@ export class PDFSeparationViewer {
 
     // 재단선 자동 감지 (Image Processing)
     async detectCropMarks() {
+        this.showLoading('재단선 분석 중...');
         const pageNum = this.currentPage;
         const pageObj = this.scrollManager.pageElements.get(pageNum);
         // 메타데이터가 없는 경우(이미지 파일 등)를 위한 Fallback
@@ -1699,6 +1742,7 @@ export class PDFSeparationViewer {
 
         if (!pageObj || !pageObj.canvas || !metadata) {
             alert('현재 페이지의 이미지 또는 메타데이터를 찾을 수 없습니다.');
+            this.hideLoading();
             return;
         }
 
@@ -1732,11 +1776,11 @@ export class PDFSeparationViewer {
         }
 
         // 3. 클러스터링 및 후보 추출
-        // 조건: 120px 중 40px 이상이 검정색 && 시작점 topY가 50px 이내 (진짜 재단선)
+        // 조건: 120px 중 45px 이상이 검정색 && 시작점 topY가 55px 이내 (진짜 재단선)
         let rawCandidates = [];
         for (let x = 0; x < width; x++) {
-            if (blackCount[x] >= 35 && topY[x] <= 55) {
-                rawCandidates.push({ x, topY: topY[x] });
+            if (blackCount[x] >= 40 && topY[x] <= 55) {
+                rawCandidates.push({ x, topY: topY[x], count: blackCount[x] });
             }
         }
 
@@ -1749,94 +1793,64 @@ export class PDFSeparationViewer {
                 } else {
                     const avgX = temp.reduce((s, c) => s + c.x, 0) / temp.length;
                     const minTopY = Math.min(...temp.map(c => c.topY));
-                    candidates.push({ x: avgX, topY: minTopY });
+                    const maxCount = Math.max(...temp.map(c => c.count));
+                    candidates.push({ x: avgX, topY: minTopY, count: maxCount });
                     temp = [rawCandidates[i]];
                 }
             }
             const avgX = temp.reduce((s, c) => s + c.x, 0) / temp.length;
             const minTopY = Math.min(...temp.map(c => c.topY));
-            candidates.push({ x: avgX, topY: minTopY });
+            const maxCount = Math.max(...temp.map(c => c.count));
+            candidates.push({ x: avgX, topY: minTopY, count: maxCount });
         }
 
         console.log(`감지된 선 후보 (${candidates.length}개):`, candidates);
 
+        this.allCandidates = candidates; // 모든 후보 저장
+
         if (candidates.length < 4) {
             alert(`재단선을 충분히 찾지 못했습니다. (후보: ${candidates.length}개)\n페이지 상단에 명확한 재단선이 있는지 확인해 주세요.`);
+            this.hideLoading();
             return;
         }
 
-        // 4. 기하학적 규칙에 따른 최종 선별 (6개 목표)
+        // 4. 상대적 위치 + 강도(Count) 기반 최종 선별 (6개 목표)
         candidates.sort((a, b) => a.x - b.x);
         let finalMarks = [];
 
         const xMin = candidates[0].x;
         const xMax = candidates[candidates.length - 1].x;
         const midPx = (xMin + xMax) / 2;
-        const deadZone = 15; // 센터라인 및 잡선 제거용 데드존
+        const deadZone = 15; // 중앙 영역에서 겹치지 않도록
 
-        // 좌/우 그룹 분리 (책등 경계 후보들)
         const leftGroup = candidates.filter(c => c.x < midPx - deadZone);
         const rightGroup = candidates.filter(c => c.x > midPx + deadZone);
 
         if (leftGroup.length >= 2 && rightGroup.length >= 2) {
-            // A. 책등 경계 (중앙에 가장 가까운 두 점)
-            const spineStart = leftGroup[leftGroup.length - 1].x;
-            const spineEnd = rightGroup[0].x;
+            // A. 확정 포인트 (바깥쪽 끝 & 책등 경계)
+            const x0 = leftGroup[0].x;
+            const x5 = rightGroup[rightGroup.length - 1].x;
+            const x2 = leftGroup[leftGroup.length - 1].x;
+            const x3 = rightGroup[0].x;
 
-            // B. 왼쪽 영역 분석 (날개와 표지 찾기)
-            // 가장 큰 두 개의 간격을 형성하는 점들을 선택 (잡선/블리드 마크 제거)
-            let leftGaps = [];
-            for (let i = 0; i < leftGroup.length - 1; i++) {
-                leftGaps.push({
-                    p1: leftGroup[i].x,
-                    p2: leftGroup[i + 1].x,
-                    size: leftGroup[i + 1].x - leftGroup[i].x
-                });
-            }
-            // 간격 크기순 정렬 -> 가장 큰 2개 선택 (표지폭, 날개폭일 확률이 높음)
-            leftGaps.sort((a, b) => b.size - a.size);
+            // B. 중간 포인트 선별 (가장 강한 선 선택)
+            const midLeftCand = leftGroup.filter(c => c.x > x0 && c.x < x2);
+            const midRightCand = rightGroup.filter(c => c.x > x3 && c.x < x5);
 
-            // 왼쪽에서 추출할 점 2개 (날개 시작점, 표지 시작점)
-            // 2개 이상의 의미 있는 간격이 있다면 그 경계점들을 사용
-            const significantLeft = [];
-            if (leftGaps.length >= 2) {
-                const top2 = [leftGaps[0], leftGaps[1]].sort((a, b) => a.p1 - b.p1);
-                significantLeft.push(top2[0].p1); // 날개 시작
-                significantLeft.push(top2[1].p1); // 표지 시작(날개 끝)
+            let x1, x4;
+            if (midLeftCand.length > 0) {
+                x1 = midLeftCand.sort((a, b) => b.count - a.count)[0].x;
             } else {
-                significantLeft.push(leftGroup[0].x);
-                significantLeft.push(leftGroup[Math.floor(leftGroup.length / 2)].x);
+                x1 = leftGroup[Math.floor(leftGroup.length / 2)].x;
             }
 
-            // C. 오른쪽 영역 분석
-            let rightGaps = [];
-            for (let i = 0; i < rightGroup.length - 1; i++) {
-                rightGaps.push({
-                    p1: rightGroup[i].x,
-                    p2: rightGroup[i + 1].x,
-                    size: rightGroup[i + 1].x - rightGroup[i].x
-                });
-            }
-            rightGaps.sort((a, b) => b.size - a.size);
-
-            const significantRight = [];
-            if (rightGaps.length >= 2) {
-                const top2 = [rightGaps[0], rightGaps[1]].sort((a, b) => a.p1 - b.p1);
-                significantRight.push(top2[0].p2); // 앞표지 끝(날개 시작)
-                significantRight.push(top2[1].p2); // 오른쪽 날개 끝
+            if (midRightCand.length > 0) {
+                x4 = midRightCand.sort((a, b) => b.count - a.count)[0].x;
             } else {
-                significantRight.push(rightGroup[Math.floor(rightGroup.length / 2)].x);
-                significantRight.push(rightGroup[rightGroup.length - 1].x);
+                x4 = rightGroup[Math.floor(rightGroup.length / 2)].x;
             }
 
-            finalMarks = [
-                significantLeft[0],  // 0: 좌측 날개 시작
-                significantLeft[1],  // 1: 뒤표지 시작
-                spineStart,          // 2: 책등 시작
-                spineEnd,            // 3: 책등 끝
-                significantRight[0], // 4: 앞표지 끝
-                significantRight[1]  // 5: 우측 날개 끝
-            ];
+            finalMarks = [x0, x1, x2, x3, x4, x5];
         }
 
         // 6점이 안 만들어졌거나 실패 시 4점 기본 로직
@@ -1845,40 +1859,94 @@ export class PDFSeparationViewer {
         }
 
         console.log(`최종 선발된 재단선 (px):`, finalMarks);
+        this.finalMarks = finalMarks; // 최종 선택된 마커 저장
 
-        // 5. 검증 및 mm 변환
-        finalMarks.sort((a, b) => a - b);
-        const dists = [];
-        for (let i = 1; i < finalMarks.length; i++) {
-            dists.push((finalMarks[i] - finalMarks[i - 1]) * pxToMm);
-        }
+        this.renderCropMarkers(); // 마커 렌더링
+        this.calculateCoverSpread(); // 계산기 업데이트
 
-        let spineWidth = 0, coverWidth = 0, flapWidth = 0;
+        this.showLoading(`분석 완료!`, '');
+        setTimeout(() => this.hideLoading(), 1000);
+    }
 
-        if (finalMarks.length === 6) {
-            flapWidth = (dists[0] + dists[4]) / 2;
-            coverWidth = (dists[1] + dists[3]) / 2;
-            spineWidth = dists[2];
-        } else if (finalMarks.length === 4) {
-            coverWidth = (dists[0] + dists[2]) / 2;
-            spineWidth = dists[1];
-            flapWidth = 0;
-        }
+    renderCropMarkers() {
+        const pageNum = this.currentPage;
+        const pageObj = this.scrollManager.pageElements.get(pageNum);
+        if (!pageObj || !pageObj.wrapper || !pageObj.canvas) return;
 
-        // 6. UI 반영
-        this.spineInput.value = spineWidth.toFixed(2);
-        this.coverInput.value = coverWidth.toFixed(2);
-        this.flapInput.value = flapWidth.toFixed(2);
+        this.clearCropMarkers();
 
-        this.coverCalculatorInputs.spine = spineWidth;
-        this.coverCalculatorInputs.cover = coverWidth;
-        this.coverCalculatorInputs.flap = flapWidth;
+        const canvas = pageObj.canvas;
+        const scaleX = canvas.clientWidth / canvas.width;
+        const showAll = this.showCandidatesToggle?.checked;
 
-        this.updatePageDimensionInfo();
-        this.calculateCoverSpread();
+        // 체크박스가 꺼져있으면 아무것도 표시 안 함
+        if (!showAll) return;
 
-        this.showLoading(`분석 완료! 책등: ${spineWidth.toFixed(2)}mm, 표지: ${coverWidth.toFixed(2)}mm`, '');
-        setTimeout(() => this.hideLoading(), 1500);
+        // 1. 선택된 점들 표시 (빨간색)
+        this.finalMarks.forEach((x, idx) => {
+            const marker = document.createElement('div');
+            marker.className = 'crop-marker selected';
+            marker.style.left = `${x * scaleX}px`;
+            marker.style.top = '0px';
+            marker.title = `선택됨 ${idx}번 (${Math.round(x)}px)`;
+
+            pageObj.wrapper.appendChild(marker);
+        });
+
+        // 2. 나머지 후보 표시 (노란색) - 선택된 점은 제외
+        this.allCandidates.forEach((cand) => {
+            // 이미 선택된 점인지 확인
+            const isSelected = this.finalMarks.some(fx => Math.abs(fx - cand.x) < 2);
+            if (isSelected) return;
+
+            const marker = document.createElement('div');
+            marker.className = 'crop-marker candidate';
+            marker.style.left = `${cand.x * scaleX}px`;
+            marker.style.top = '0px';
+            marker.title = `기타 후보 (${Math.round(cand.x)}px) - 클릭하여 지정`;
+
+            marker.onclick = (e) => {
+                e.stopPropagation();
+                const idxStr = prompt(`이 재단선을 몇 번 위치로 지정하시겠습니까?\n(0:왼쪽끝, 1:날개접지, 2:책등시작, 3:책등끝, 4:날개접지, 5:오른쪽끝)`);
+                const idx = parseInt(idxStr);
+                if (!isNaN(idx) && idx >= 0 && idx < 6) {
+                    this.finalMarks[idx] = cand.x;
+                    this.renderCropMarkers();
+                    this.calculateCoverSpread();
+                }
+            };
+
+            pageObj.wrapper.appendChild(marker);
+        });
+    }
+
+    updateDetectedMarksDropdown(candidates) {
+        // 기능 제거됨 - renderCropMarkers에서 처리
+    }
+
+    showCropMarker(pageNum, x) {
+        const pageObj = this.scrollManager.pageElements.get(pageNum);
+        if (!pageObj || !pageObj.wrapper || !pageObj.canvas) return;
+
+        this.clearCropMarkers();
+
+        const canvas = pageObj.canvas;
+        const marker = document.createElement('div');
+        marker.className = 'crop-marker';
+
+        // 마커 위치 계산 (캔버스 기준 좌표를 wrapper 기준 비율 또는 픽셀로 변환)
+        // wrapper는 canvas를 담고 있고, 캔버스는 스타일로 너비가 조정될 수 있음
+        const scaleX = canvas.clientWidth / canvas.width;
+        const leftPx = x * scaleX;
+
+        marker.style.left = `${leftPx}px`;
+        marker.style.top = '0px';
+
+        pageObj.wrapper.style.position = 'relative'; // 보장
+        pageObj.wrapper.appendChild(marker);
+
+        // 1초 후 자동 제거는 하지 않음 (사용자가 계속 보고 싶을 수 있으므로)
+        // 대신 스크롤 등으로 페이지가 넘어가면 clear됨
     }
 
     goToPage(pageNum) {
