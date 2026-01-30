@@ -487,6 +487,78 @@ h4 {
     padding-bottom: 12px;
 }
 
+.view-mode-section {
+    margin-bottom: 12px;
+}
+
+.view-mode-section h4 {
+    font-size: 0.8em;
+    color: #7f8c8d;
+    margin-bottom: 5px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.radio-group {
+    display: flex;
+    gap: 8px;
+    background: #f8f9fa;
+    padding: 4px;
+    border-radius: 6px;
+}
+
+.radio-group label {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 6px 10px;
+    background: white;
+    border: 1px solid #eee;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85em;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.radio-group label:hover {
+    background: #f0f7ff;
+    border-color: #3498db;
+    color: #3498db;
+}
+
+.radio-group input[type="radio"] {
+    display: none;
+}
+
+.radio-group label:has(input[type="radio"]:checked) {
+    background: #3498db;
+    color: white;
+    border-color: #3498db;
+}
+
+/* Single View Mode */
+.scroll-viewport.single-view {
+    overflow: auto !important;
+    /* 스크롤 허용 */
+}
+
+.scroll-viewport.single-view .scroll-content {
+    height: 100%;
+    justify-content: center;
+}
+
+.scroll-viewport.single-view .page-wrapper {
+    display: none;
+    margin: 0;
+}
+
+.scroll-viewport.single-view .page-wrapper.active {
+    display: flex;
+}
+
 .zoom-controls {
     margin-bottom: 10px;
     padding: 7px;
