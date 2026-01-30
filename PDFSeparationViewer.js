@@ -1720,7 +1720,7 @@ export class PDFSeparationViewer {
 
     // 재단선 자동 감지 (Image Processing)
     async detectCropMarks() {
-        this.showLoading('재단선 분석 중...');
+        this.showLoading('재단선 분석 중 (정밀 모드)...');
         const pageNum = this.currentPage;
         const pageObj = this.scrollManager.pageElements.get(pageNum);
         // 메타데이터가 없는 경우(이미지 파일 등)를 위한 Fallback
@@ -1750,101 +1750,113 @@ export class PDFSeparationViewer {
         const width = canvas.width;
         const height = canvas.height;
 
-        // 1. 실제 mm 너비 기반 비율 계산 (MediaBox 기반)
-        const totalMmWidth = metadata.mediaBox.width * 0.352778;
-        const pxToMm = totalMmWidth / width;
-
-        // 2. 상단 120px 확장 스캔 및 세로 투영 (Vertical Projection)
-        const sampleHeight = 120;
-        const imageData = ctx.getImageData(0, 0, width, Math.min(height, sampleHeight));
+        // 1. 상단 50px 정밀 스캔 (사용자 요청에 따라 범위를 좁힘)
+        const scanMaxY = Math.min(height, 50);
+        const imageData = ctx.getImageData(0, 0, width, scanMaxY);
         const pixels = imageData.data;
 
-        const blackCount = new Array(width).fill(0);
-        const topY = new Array(width).fill(999);
-        const darkThreshold = 150;
+        const colMinB = new Array(width).fill(255);
+        const colBlackCount = new Array(width).fill(0);
+        const colTopY = new Array(width).fill(999);
+
+        const darkThreshold = 160;
+        const extremeDarkThreshold = 75; // 헤어라인급 초박형 선 감지용 (밝기 0~255 기준)
 
         for (let x = 0; x < width; x++) {
-            for (let y = 0; y < Math.min(height, sampleHeight); y++) {
+            for (let y = 0; y < scanMaxY; y++) {
                 const idx = (y * width + x) * 4;
                 const brightness = (pixels[idx] + pixels[idx + 1] + pixels[idx + 2]) / 3;
+
                 if (brightness < darkThreshold) {
-                    blackCount[x]++;
-                    if (topY[x] === 999) topY[x] = y;
+                    colBlackCount[x]++;
+                    if (colTopY[x] === 999) colTopY[x] = y;
+                }
+                if (brightness < colMinB[x]) {
+                    colMinB[x] = brightness;
                 }
             }
         }
 
-        // 3. 클러스터링 및 후보 추출
-        // 조건: 120px 중 45px 이상이 검정색 && 시작점 topY가 55px 이내 (진짜 재단선)
+        // 2. 후보 추출 (하이브리드 조건: 면적 비율 OR 최소 밝기)
         let rawCandidates = [];
         for (let x = 0; x < width; x++) {
-            if (blackCount[x] >= 40 && topY[x] <= 55) {
-                rawCandidates.push({ x, topY: topY[x], count: blackCount[x] });
+            // 조건: 세로 20px 이상 어두움(굵은 선) OR 아주 어두운 픽셀 존재(헤어라인)
+            // 상단 50px 내에서만 감지
+            if ((colBlackCount[x] >= 20 || colMinB[x] <= extremeDarkThreshold) && colTopY[x] <= 50) {
+                rawCandidates.push({
+                    x,
+                    topY: colTopY[x],
+                    count: colBlackCount[x],
+                    minB: colMinB[x]
+                });
             }
         }
 
+        // 3. 클러스터링 (5px 이내 병합)
         let candidates = [];
         if (rawCandidates.length > 0) {
-            let temp = [rawCandidates[0]];
+            let group = [rawCandidates[0]];
+            const processGroup = (g) => {
+                const avgX = g.reduce((s, c) => s + c.x, 0) / g.length;
+                const minTopY = Math.min(...g.map(c => c.topY));
+                const maxCount = Math.max(...g.map(c => c.count));
+                const minMinB = Math.min(...g.map(c => c.minB));
+                candidates.push({ x: avgX, topY: minTopY, count: maxCount, minB: minMinB });
+            };
+
             for (let i = 1; i < rawCandidates.length; i++) {
-                if (rawCandidates[i].x - rawCandidates[i - 1].x <= 4) {
-                    temp.push(rawCandidates[i]);
+                if (rawCandidates[i].x - rawCandidates[i - 1].x <= 5) {
+                    group.push(rawCandidates[i]);
                 } else {
-                    const avgX = temp.reduce((s, c) => s + c.x, 0) / temp.length;
-                    const minTopY = Math.min(...temp.map(c => c.topY));
-                    const maxCount = Math.max(...temp.map(c => c.count));
-                    candidates.push({ x: avgX, topY: minTopY, count: maxCount });
-                    temp = [rawCandidates[i]];
+                    processGroup(group);
+                    group = [rawCandidates[i]];
                 }
             }
-            const avgX = temp.reduce((s, c) => s + c.x, 0) / temp.length;
-            const minTopY = Math.min(...temp.map(c => c.topY));
-            const maxCount = Math.max(...temp.map(c => c.count));
-            candidates.push({ x: avgX, topY: minTopY, count: maxCount });
+            processGroup(group);
         }
 
         console.log(`감지된 선 후보 (${candidates.length}개):`, candidates);
-
-        this.allCandidates = candidates; // 모든 후보 저장
+        this.allCandidates = candidates;
 
         if (candidates.length < 4) {
-            alert(`재단선을 충분히 찾지 못했습니다. (후보: ${candidates.length}개)\n페이지 상단에 명확한 재단선이 있는지 확인해 주세요.`);
+            alert(`재단선을 충분히 찾지 못했습니다. (후보: ${candidates.length}개)\n매우 얇은 헤어라인도 감지하도록 알고리즘이 개선되었으나, 파일 상단에 재단선이 보이지 않습니다.`);
             this.hideLoading();
             return;
         }
 
-        // 4. 상대적 위치 + 강도(Count) 기반 최종 선별 (6개 목표)
+        // 4. 상대적 위치 + 강도 기반 최종 선별 (6개 목표)
         candidates.sort((a, b) => a.x - b.x);
-        let finalMarks = [];
 
+        let finalMarks = [];
         const xMin = candidates[0].x;
         const xMax = candidates[candidates.length - 1].x;
         const midPx = (xMin + xMax) / 2;
-        const deadZone = 15; // 중앙 영역에서 겹치지 않도록
+        const deadZone = 15;
 
         const leftGroup = candidates.filter(c => c.x < midPx - deadZone);
         const rightGroup = candidates.filter(c => c.x > midPx + deadZone);
 
+        // 점수 계산 함수: 검정 픽셀 수와 선명도(낮은 밝기) 결합
+        const getScore = (c) => (c.count * 1) + (255 - c.minB) * 0.8;
+
         if (leftGroup.length >= 2 && rightGroup.length >= 2) {
-            // A. 확정 포인트 (바깥쪽 끝 & 책등 경계)
             const x0 = leftGroup[0].x;
             const x5 = rightGroup[rightGroup.length - 1].x;
             const x2 = leftGroup[leftGroup.length - 1].x;
             const x3 = rightGroup[0].x;
 
-            // B. 중간 포인트 선별 (가장 강한 선 선택)
             const midLeftCand = leftGroup.filter(c => c.x > x0 && c.x < x2);
             const midRightCand = rightGroup.filter(c => c.x > x3 && c.x < x5);
 
             let x1, x4;
             if (midLeftCand.length > 0) {
-                x1 = midLeftCand.sort((a, b) => b.count - a.count)[0].x;
+                x1 = midLeftCand.sort((a, b) => getScore(b) - getScore(a))[0].x;
             } else {
                 x1 = leftGroup[Math.floor(leftGroup.length / 2)].x;
             }
 
             if (midRightCand.length > 0) {
-                x4 = midRightCand.sort((a, b) => b.count - a.count)[0].x;
+                x4 = midRightCand.sort((a, b) => getScore(b) - getScore(a))[0].x;
             } else {
                 x4 = rightGroup[Math.floor(rightGroup.length / 2)].x;
             }
@@ -1862,7 +1874,6 @@ export class PDFSeparationViewer {
 
         this.renderCropMarkers(); // 마커 렌더링
         this.calculateCoverSpread(); // 계산기 업데이트
-
         this.showLoading(`분석 완료!`, '');
         setTimeout(() => this.hideLoading(), 1000);
     }
