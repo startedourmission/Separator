@@ -55,7 +55,7 @@
                     </div>
                     <div style="flex: 1; display: flex; align-items: center;">
                         <label style="font-size: 11px; cursor: pointer; display: flex; align-items: center; gap: 4px;">
-                            <input type="checkbox" id="show-candidates-toggle" style="width: auto;"> 모든 후보 표시
+                            <input type="checkbox" id="show-candidates-toggle" style="width: auto;"> 재단선 직접 선택 </br>(계산 오류 시 사용)
                         </label>
                     </div>
                 </div>
@@ -167,6 +167,39 @@
         </div>
 
         <div class="scroll-viewport" id="scroll-viewport">
+            <!-- 초기 안내 메시지 -->
+            <div class="welcome-message" id="welcome-message">
+                <div class="welcome-content">
+                    <h2>토인비분판</h2>
+                    <div class="feature-list">
+                        <div class="feature-item">
+                            <strong>CMYK 분판 분석</strong>
+                            <p>C, M, Y, K 각 채널별 온/오프 및 별색(Spot Color) 감지</p>
+                        </div>
+                        <div class="feature-item">
+                            <strong>잉크량 분석</strong>
+                            <p>마우스 위치의 실시간 TAC(Total Area Coverage) 표시</p>
+                        </div>
+                        <div class="feature-item">
+                            <strong>표지 계산기</strong>
+                            <p>재단선 기준 책등, 날개, 펼침면 크기 자동 계산</p>
+                        </div>
+                        <div class="feature-item">
+                            <strong>바코드 스캐너</strong>
+                            <p>드래그 영역의 바코드/QR 분석</p>
+                        </div>
+                        <div class="feature-item">
+                            <strong>이미지 내보내기</strong>
+                            <p>재단선 없는 펼침면 또는 홍보용 이미지 저장</p>
+                        </div>
+                        <div class="feature-item">
+                            <strong>워터마크</strong>
+                            <p>다수의 텍스트를 일괄 적용한 개별 PDF 및 압축 파일 생성</p>
+                        </div>
+                    </div>
+                    <p class="welcome-hint">왼쪽 상단에서 PDF 파일이나 이미지 파일을 선택하거나 드래그하여 시작하세요. <br/>이미지 파일은 클립보드에서 바로 붙여 넣을 수 있습니다.</p>
+                </div>
+            </div>
             <div class="scroll-content" id="scroll-content">
                 <!-- 동적으로 페이지 wrapper들이 추가됨 -->
             </div>
@@ -205,16 +238,16 @@
                 <h3>이미지 내보내기 (TrimBox)</h3>
                 <div style="margin-bottom: 15px;">
                     <button id="export-spread" class="tool-btn" style="width: 100%; margin-bottom: 8px;">
-                        원본 PDF 분할/내보내기 (TrimBox)
+                        재단선 없는 펼침면 내려받기
                     </button>
                     <p class="help-text">설정된 재단 크기(TrimBox)만큼 원본 PDF를 잘라내어 저장합니다.</p>
                 </div>
 
                 <div style="border-top: 1px solid #eee; padding-top: 15px;">
                     <button id="export-separated" class="tool-btn" style="width: 100%; margin-bottom: 8px;">
-                        표지/책등 분할 저장 (ZIP)
+                        홍보용 이미지 내려받기
                     </button>
-                    <p class="help-text">입력된 책등/날개 값을 기준으로 이미지를 분할하여 저장합니다.</p>
+                    <p class="help-text">입력된 책등/날개 값을 기준으로 이미지를 분할하여 저장합니다. 급할 때만 사용하세요.</p>
                 </div>
             </div>
 

@@ -815,6 +815,12 @@ export class PDFSeparationViewer {
         const file = event.target.files[0];
         if (!file) return;
 
+        // 안내 메시지 숨기기
+        const welcomeMessage = document.getElementById('welcome-message');
+        if (welcomeMessage) {
+            welcomeMessage.classList.add('hidden');
+        }
+
         if (file.type === 'application/pdf') {
             this.currentFileType = 'pdf';
             try {

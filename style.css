@@ -11,6 +11,69 @@ body {
     overflow: hidden;
 }
 
+/* 초기 안내 메시지 */
+.welcome-message {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: white;
+    z-index: 100;
+}
+
+.welcome-message.hidden {
+    display: none;
+}
+
+.welcome-content {
+    max-width: 700px;
+    padding: 40px;
+    text-align: center;
+}
+
+.welcome-content h2 {
+    color: #2c3e50;
+    font-size: 2em;
+    margin-bottom: 30px;
+}
+
+.feature-list {
+    text-align: left;
+    margin: 30px 0;
+}
+
+.feature-item {
+    margin-bottom: 20px;
+    padding: 15px;
+    background: #f8f9fa;
+    border-radius: 8px;
+    border-left: 4px solid #3498db;
+}
+
+.feature-item strong {
+    display: block;
+    color: #2c3e50;
+    font-size: 1.1em;
+    margin-bottom: 5px;
+}
+
+.feature-item p {
+    color: #666;
+    margin: 0;
+    line-height: 1.5;
+}
+
+.welcome-hint {
+    margin-top: 30px;
+    color: #3498db;
+    font-size: 1.1em;
+    font-weight: 600;
+}
+
 .container {
     max-width: 100%;
     margin: 0 auto;
