@@ -9,6 +9,7 @@ body {
     background-color: #f5f5f5;
     color: #333;
     overflow: hidden;
+    zoom: 0.8;
 }
 
 /* 초기 안내 메시지 */
@@ -75,14 +76,14 @@ body {
 }
 
 .container {
-    max-width: 100%;
+    width: 125vw;
+    height: 125vh;
     margin: 0 auto;
     padding: 20px;
     display: grid;
     grid-template-columns: minmax(min-content, 320px) 1fr minmax(min-content, 320px);
     grid-template-rows: auto minmax(0, 1fr);
     gap: 20px;
-    height: 100vh;
 }
 
 .container.left-collapsed {
