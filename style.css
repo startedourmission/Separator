@@ -15,15 +15,12 @@ body {
 /* 초기 안내 메시지 */
 .welcome-message {
     position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: white;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
     z-index: 100;
+    pointer-events: none;
 }
 
 .welcome-message.hidden {
@@ -31,48 +28,37 @@ body {
 }
 
 .welcome-content {
-    max-width: 700px;
-    padding: 40px;
-    text-align: center;
+    color: #999;
 }
 
-.welcome-content h2 {
-    color: #2c3e50;
-    font-size: 2em;
-    margin-bottom: 30px;
-}
-
-.feature-list {
-    text-align: left;
-    margin: 30px 0;
-}
-
-.feature-item {
+.welcome-title {
+    font-size: 1.5rem;
     margin-bottom: 20px;
-    padding: 15px;
-    background: #f8f9fa;
-    border-radius: 8px;
-    border-left: 4px solid #3498db;
+    opacity: 0.5;
 }
 
-.feature-item strong {
-    display: block;
-    color: #2c3e50;
-    font-size: 1.1em;
-    margin-bottom: 5px;
+.feature-simple-list {
+    text-align: left;
+    margin: 0 auto 30px;
+    padding: 0;
+    list-style-position: inside;
+    max-width: fit-content;
+    font-size: 0.9rem;
+    line-height: 1.8;
 }
 
-.feature-item p {
-    color: #666;
-    margin: 0;
-    line-height: 1.5;
+.feature-simple-list li {
+    opacity: 0.6;
 }
 
-.welcome-hint {
-    margin-top: 30px;
-    color: #3498db;
-    font-size: 1.1em;
+.feature-simple-list strong {
     font-weight: 600;
+}
+
+.welcome-guide {
+    font-size: 1rem;
+    opacity: 0.7;
+    margin-top: 20px;
 }
 
 .container {
