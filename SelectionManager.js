@@ -48,14 +48,20 @@ export class SelectionManager {
         }
     }
 
+    getZoomFactor() {
+        const zoom = parseFloat(getComputedStyle(document.body).zoom) || 1;
+        return zoom;
+    }
+
     handleMouseDown(e) {
         if (!this.isActive) return;
         // Only start selection if clicking on a page canvas or wrapper
         if (!e.target.closest('.page-wrapper')) return;
 
         this.isSelecting = true;
-        this.startX = e.clientX;
-        this.startY = e.clientY;
+        const zoom = this.getZoomFactor();
+        this.startX = e.clientX / zoom;
+        this.startY = e.clientY / zoom;
 
         this.selectionBox.style.left = `${this.startX}px`;
         this.selectionBox.style.top = `${this.startY}px`;
@@ -69,8 +75,9 @@ export class SelectionManager {
     handleMouseMove(e) {
         if (!this.isSelecting) return;
 
-        const currentX = e.clientX;
-        const currentY = e.clientY;
+        const zoom = this.getZoomFactor();
+        const currentX = e.clientX / zoom;
+        const currentY = e.clientY / zoom;
 
         const width = Math.abs(currentX - this.startX);
         const height = Math.abs(currentY - this.startY);
@@ -126,11 +133,13 @@ export class SelectionManager {
 
         try {
             // 1. Identify which page is under the selection
+            const zoom = this.getZoomFactor();
             const centerX = rect.x + rect.width / 2;
             const centerY = rect.y + rect.height / 2;
 
             this.selectionBox.style.display = 'none';
-            const targetEl = document.elementFromPoint(centerX, centerY);
+            // elementFromPoint expects viewport coordinates, so multiply back by zoom
+            const targetEl = document.elementFromPoint(centerX * zoom, centerY * zoom);
 
             const canvas = targetEl.closest('canvas');
             if (!canvas) {
@@ -138,7 +147,16 @@ export class SelectionManager {
             }
 
             // 2. Capture Image Data from Canvas
-            const canvasRect = canvas.getBoundingClientRect();
+            const canvasRectRaw = canvas.getBoundingClientRect();
+            // Convert viewport coordinates to zoom-adjusted coordinates
+            const canvasRect = {
+                left: canvasRectRaw.left / zoom,
+                top: canvasRectRaw.top / zoom,
+                right: canvasRectRaw.right / zoom,
+                bottom: canvasRectRaw.bottom / zoom,
+                width: canvasRectRaw.width / zoom,
+                height: canvasRectRaw.height / zoom
+            };
 
             const intersectX = Math.max(rect.x, canvasRect.left);
             const intersectY = Math.max(rect.y, canvasRect.top);
