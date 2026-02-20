@@ -3105,7 +3105,7 @@ export class PDFSeparationViewer {
                 throw new Error("PDF.js library is not loaded.");
             }
 
-            const loadingTask = pdfjsLib.getDocument({ data: this.currentPDFData.slice() });
+            const loadingTask = pdfjsLib.getDocument({ data: this.currentPDFData });
             const pdf = await loadingTask.promise;
             const page = await pdf.getPage(pageNum);
 
