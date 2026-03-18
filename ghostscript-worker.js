@@ -271,39 +271,71 @@ self.addEventListener('message', async function (e) {
 
             try {
                 const { pdfData, pageNum, dpi } = data;
-                const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
+                const gsOutput = [];
+                const moduleInstance = await Module(createModuleConfig({
+                    noExitRuntime: false,
+                    print: (text) => { gsOutput.push('[stdout] ' + text); },
+                    printErr: (text) => { gsOutput.push('[stderr] ' + text); }
+                }));
 
                 // PDF 파일 작성
                 moduleInstance.FS.writeFile("input.pdf", new Uint8Array(pdfData));
 
-                // tiffsep 디바이스로 렌더링 (1비트 분판용)
+                // tiffsep 디바이스로 렌더링 (분판용)
+                // WASM 메모리 제한으로 고DPI에서 실패할 수 있으므로 최대 150 DPI로 제한
+                const tiffsepDpi = 72; // 디버깅: 최저 DPI로 테스트
+                console.log(`[tiffsep worker] DPI: 요청=${dpi}, 실제 사용=${tiffsepDpi}`);
                 const args = [
                     '-dNOPAUSE',
                     '-dBATCH',
-                    '-dSAFER',
+                    '-dNOSAFER',
                     '-sDEVICE=tiffsep',
-                    `-r${dpi || 72}`,
+                    `-r${tiffsepDpi}`,
                     `-dFirstPage=${pageNum || 1}`,
                     `-dLastPage=${pageNum || 1}`,
-                    '-sOutputFile=plate%s.tif',
+                    '-dMaxSpots=10',
+                    '-sOutputFile=plate%d.tif',
                     'input.pdf'
                 ];
 
 
 
+                console.log('[tiffsep worker] 실행 args:', args);
                 try {
                     moduleInstance.callMain(args);
                 } catch (error) {
                     if (error?.name !== 'ExitStatus' || error.status !== 0) {
+                        console.error('[tiffsep worker] callMain 에러:', error.name, error.status, error.message);
+                        console.log('[tiffsep worker] GS 출력:\n' + gsOutput.join('\n'));
                         throw error;
                     }
+                    console.log('[tiffsep worker] callMain 완료 (ExitStatus 0)');
                 }
+                console.log('[tiffsep worker] GS 출력:\n' + gsOutput.join('\n'));
 
                 // 생성된 파일 목록 조회
                 const files = moduleInstance.FS.readdir('/');
-                const plateFiles = files.filter(f => f.startsWith('plate') && f.endsWith('.tif'));
+                const allPlateFiles = files.filter(f => f.startsWith('plate') && f.endsWith('.tif'));
+                console.log('[tiffsep worker] 생성된 전체 plate 파일:', allPlateFiles);
+                // composite 파일(plate1.tif 등 숫자만 있는 파일)과 분판 파일 분리
+                // tiffsep %d 모드: plate1.tif(composite), plate1(Cyan).tif(분판)
+                const plateFiles = allPlateFiles.filter(f => /plate\d+\(.+\)\.tif/.test(f) || /plate[A-Za-z]/.test(f));
+                const compositeFiles = allPlateFiles.filter(f => /^plate\d+\.tif$/.test(f));
+                console.log('[tiffsep worker] 분판 파일:', plateFiles, '| composite 파일:', compositeFiles);
 
 
+
+                // GS 출력에서 별색 이름 추출 (tiffsep 로그에서 파싱)
+                // 예: "  /Cyan /Magenta /Yellow /Black /PANTONE 185 C" 등
+                const spotColorNames = [];
+                for (const line of gsOutput) {
+                    // tiffsep은 "%%SeparationColor:" 또는 "Spot" 관련 로그를 출력할 수 있음
+                    const sepMatch = line.match(/SeparationColor.*?:\s*(.+)/i);
+                    if (sepMatch) {
+                        spotColorNames.push(sepMatch[1].trim());
+                    }
+                }
+                console.log('[tiffsep worker] GS에서 감지된 별색:', spotColorNames);
 
                 // 각 파일에서 색상명 추출 및 데이터 읽기
                 const channels = {};
@@ -311,17 +343,28 @@ self.addEventListener('message', async function (e) {
                 let width = 0;
                 let height = 0;
 
+                // %d 패턴 사용 시 CMYK 순서 매핑 (01=Cyan, 02=Magenta, 03=Yellow, 04=Black, 05+=별색)
+                const cmykOrder = ['Cyan', 'Magenta', 'Yellow', 'Black'];
+
+                // 파일을 숫자 순서대로 정렬
+                plateFiles.sort((a, b) => {
+                    const numA = parseInt(a.match(/\d+/)?.[0] || '0');
+                    const numB = parseInt(b.match(/\d+/)?.[0] || '0');
+                    return numA - numB;
+                });
+
                 for (const file of plateFiles) {
-                    // 파일명 패턴: plate(ColorName).tif 또는 plateCyan.tif 등
                     let colorName = null;
 
-                    // 패턴 1: plate(ColorName).tif
-                    let match = file.match(/plate\((.+?)\)\.tif/);
+                    // 패턴 1: plate1(ColorName).tif 또는 plate(ColorName).tif (%d+%s 혼합 패턴)
+                    let match = file.match(/plate\d*\((.+?)\)\.tif/);
                     if (match) {
                         colorName = match[1];
-                    } else {
-                        // 패턴 2: plateCyan.tif, plateMagenta.tif 등
-                        match = file.match(/plate(.+?)\.tif/);
+                    }
+
+                    // 패턴 2: plateCyan.tif 등 (%s 패턴 결과)
+                    if (!colorName) {
+                        match = file.match(/plate([A-Za-z].+?)\.tif/);
                         if (match) {
                             colorName = match[1];
                         }
@@ -330,10 +373,8 @@ self.addEventListener('message', async function (e) {
                     if (colorName) {
                         const tiffData = moduleInstance.FS.readFile(file, { encoding: "binary" });
 
-                        // 첫 번째 파일에서 이미지 크기 추출 (헤더 파싱 없이 파일 크기만 체크하거나, 나중에 메인 스레드에서 파싱)
-                        // 여기서는 메인 스레드에서 파싱하도록 원본 데이터 전송
-
                         channels[colorName] = tiffData;
+                        console.log(`[tiffsep worker] 플레이트: ${file} → 색상: ${colorName}, 크기: ${tiffData.length} bytes`);
 
                         // CMYK가 아닌 색상은 별색으로 분류
                         const normalizedColorName = colorName.toLowerCase();
@@ -346,7 +387,7 @@ self.addEventListener('message', async function (e) {
                 // 정리 (파일 삭제)
                 try {
                     moduleInstance.FS.unlink("input.pdf");
-                    plateFiles.forEach(f => moduleInstance.FS.unlink(f));
+                    allPlateFiles.forEach(f => moduleInstance.FS.unlink(f));
                 } catch (e) {
                     console.warn('파일 정리 중 오류:', e);
                 }

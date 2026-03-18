@@ -711,9 +711,42 @@ export class PDFSeparationViewer {
 
                 // 그레이스케일 채널 데이터 추출 (0-255)
                 const pixelCount = page.width * page.height;
-                const channelData = new Uint8Array(page.data);
+                const rawData = new Uint8Array(page.data);
+                console.log(`[TIFF 파싱] ${colorName}: ${page.width}x${page.height}, rawData.length=${rawData.length}, pixelCount=${pixelCount}, BPP=${page.t258?.[0] || '?'}, SamplesPerPixel=${page.t277?.[0] || '?'}`);
 
+                let channelData;
+                if (rawData.length >= pixelCount * 4) {
+                    // UTIF가 RGBA로 디코딩한 경우: R 채널만 추출 (그레이스케일)
+                    channelData = new Uint8Array(pixelCount);
+                    for (let i = 0; i < pixelCount; i++) {
+                        channelData[i] = rawData[i * 4];
+                    }
+                } else if (rawData.length >= pixelCount * 3) {
+                    // RGB로 디코딩된 경우: R 채널만 추출
+                    channelData = new Uint8Array(pixelCount);
+                    for (let i = 0; i < pixelCount; i++) {
+                        channelData[i] = rawData[i * 3];
+                    }
+                } else {
+                    // 이미 그레이스케일 (1바이트/픽셀)
+                    channelData = rawData.slice(0, pixelCount);
+                }
 
+                // tiffsep은 밝기/반사율 기준으로 출력: 255=잉크 없음, 0=최대 잉크
+                // 렌더링은 잉크량 기준: 0=잉크 없음, 255=최대 잉크
+                // → 반전 필요
+                for (let i = 0; i < channelData.length; i++) {
+                    channelData[i] = 255 - channelData[i];
+                }
+
+                // 값 분포 확인용 디버그 (반전 후)
+                let min = 255, max = 0, nonZero = 0;
+                for (let i = 0; i < channelData.length; i++) {
+                    if (channelData[i] < min) min = channelData[i];
+                    if (channelData[i] > max) max = channelData[i];
+                    if (channelData[i] > 0) nonZero++;
+                }
+                console.log(`[TIFF 파싱] ${colorName}: 반전 후 값 범위 ${min}~${max}, 잉크 있는 픽셀: ${nonZero}/${pixelCount} (${(nonZero/pixelCount*100).toFixed(1)}%)`);
 
                 resolve({
                     width: page.width,
@@ -1244,7 +1277,7 @@ export class PDFSeparationViewer {
             this.spotColorCheckboxes[colorName] = checkbox;
 
             // DOM에 추가
-            // controlDiv.appendChild(checkbox); // UI에서 별색 체크박스 제거
+            controlDiv.appendChild(checkbox);
             controlDiv.appendChild(label);
             controlDiv.appendChild(ratioSpan);
             this.spotControlsContainer.appendChild(controlDiv);
@@ -1567,11 +1600,19 @@ export class PDFSeparationViewer {
 
         if (hasSpotColors) {
             try {
+                console.log('[별색 디버그] tiffsep 시도 - 감지된 별색:', this.spotColors, 'DPI:', this.renderDPI);
                 const result = await this.ghostscript.processTiffsep(
                     this.currentPDFData,
                     pageNum,
                     this.renderDPI
                 );
+
+                console.log('[별색 디버그] tiffsep 결과:', result ? {
+                    channelNames: Object.keys(result.channels || {}),
+                    channelSizes: Object.fromEntries(Object.entries(result.channels || {}).map(([k, v]) => [k, v?.length || 0])),
+                    width: result.width,
+                    height: result.height
+                } : 'null');
 
                 if (result && result.channels && Object.keys(result.channels).length > 0) {
                     const { channels, width, height } = result;
@@ -1597,12 +1638,18 @@ export class PDFSeparationViewer {
                         if (channels[colorName]) {
                             const parsed = await this.parseSpotColorTIFF(channels[colorName], colorName);
                             spotColorData[colorName] = parsed.data;
+                            console.log(`[별색 디버그] 별색 플레이트 파싱 성공: ${colorName}, 데이터 크기: ${parsed.data?.length || 0}`);
+                        } else {
+                            console.warn(`[별색 디버그] 별색 플레이트 없음: ${colorName} (tiffsep이 이 별색을 출력하지 않음)`);
                         }
                     }
                     tiffsepSuccessful = true;
+                    console.log('[별색 디버그] tiffsep 성공! spotColorData 키:', Object.keys(spotColorData));
+                } else {
+                    console.warn('[별색 디버그] tiffsep 결과가 비어있음 - CMYK fallback으로 전환');
                 }
             } catch (error) {
-                console.error('tiffsep 렌더링 오류:', error);
+                console.error('[별색 디버그] tiffsep 렌더링 실패:', error.message, error);
             }
         }
 

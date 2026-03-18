@@ -294,37 +294,92 @@ export class VirtualScrollManager {
         const { cyan, magenta, yellow, black } = imageData.channels;
         const pixels = tempImageData.data;
 
+        // tiffsep 데이터가 있으면 별색이 CMY에도 근사값으로 포함되어 있으므로,
+        // 별색이 활성화된 경우 CMY에서 별색 기여분을 제거하고 별색 RGB로 대체
+        const hasSpotData = Object.keys(spotColorData).length > 0;
+
+        // 활성화된 별색의 RGB 값을 미리 계산
+        const activeSpots = [];
+        if (hasSpotData) {
+            for (const [colorName, colorData] of Object.entries(spotColorData)) {
+                if (separations.spotColors && separations.spotColors[colorName]) {
+                    activeSpots.push({ colorName, colorData, rgb: getSpotColorRGB(colorName) });
+                }
+            }
+        }
+
         for (let i = 0; i < srcWidth * srcHeight; i++) {
             let c = separations.cyan ? cyan[i] : 0;
             let m = separations.magenta ? magenta[i] : 0;
             let y = separations.yellow ? yellow[i] : 0;
             let k = separations.black ? black[i] : 0;
 
-            // 별색 합성
-            for (const [colorName, colorData] of Object.entries(spotColorData)) {
-                if (separations.spotColors && separations.spotColors[colorName]) {
-                    const spotValue = colorData[i] || 0;
+            if (hasSpotData && activeSpots.length > 0) {
+                // tiffsep 모드: CMY에 별색 근사값이 이미 포함되어 있음
+                // 별색 영역의 CMY 기여분을 제거하고, 별색 RGB로 직접 합성
+                for (const spot of activeSpots) {
+                    const spotValue = spot.colorData[i] || 0;
                     if (spotValue > 0) {
-                        const rgb = getSpotColorRGB(colorName);
                         const spotK = spotValue / 255;
-                        c = Math.min(255, c + (255 - rgb.r) * spotK);
-                        m = Math.min(255, m + (255 - rgb.g) * spotK);
-                        y = Math.min(255, y + (255 - rgb.b) * spotK);
+                        // 별색의 CMYK 근사값을 CMY에서 제거
+                        c = Math.max(0, c - (255 - spot.rgb.r) * spotK);
+                        m = Math.max(0, m - (255 - spot.rgb.g) * spotK);
+                        y = Math.max(0, y - (255 - spot.rgb.b) * spotK);
                     }
                 }
+
+                // CMYK to RGB (별색 기여분 제거된 CMY)
+                const kFactor = 1 - k / 255;
+                let r = 255 * (1 - c / 255) * kFactor;
+                let g = 255 * (1 - m / 255) * kFactor;
+                let b = 255 * (1 - y / 255) * kFactor;
+
+                // 별색을 RGB로 직접 합성 (오버프린트 방식)
+                for (const spot of activeSpots) {
+                    const spotValue = spot.colorData[i] || 0;
+                    if (spotValue > 0) {
+                        const spotK = spotValue / 255;
+                        r = r * (1 - spotK) + spot.rgb.r * spotK;
+                        g = g * (1 - spotK) + spot.rgb.g * spotK;
+                        b = b * (1 - spotK) + spot.rgb.b * spotK;
+                    }
+                }
+
+                const idx = i * 4;
+                pixels[idx] = Math.max(0, Math.min(255, r));
+                pixels[idx + 1] = Math.max(0, Math.min(255, g));
+                pixels[idx + 2] = Math.max(0, Math.min(255, b));
+                pixels[idx + 3] = 255;
+            } else {
+                // 별색 없음 또는 비활성: 기존 CMYK 렌더링
+                // 별색이 비활성이고 tiffsep 데이터면 CMY에 근사값이 포함되어 있으므로 그대로 사용
+                if (!hasSpotData) {
+                    // fallback 모드 (tiffsep 아님): 별색을 CMY에 가산
+                    for (const [colorName, colorData] of Object.entries(spotColorData)) {
+                        if (separations.spotColors && separations.spotColors[colorName]) {
+                            const spotValue = colorData[i] || 0;
+                            if (spotValue > 0) {
+                                const rgb = getSpotColorRGB(colorName);
+                                const spotK = spotValue / 255;
+                                c = Math.min(255, c + (255 - rgb.r) * spotK);
+                                m = Math.min(255, m + (255 - rgb.g) * spotK);
+                                y = Math.min(255, y + (255 - rgb.b) * spotK);
+                            }
+                        }
+                    }
+                }
+
+                const kFactor = 1 - k / 255;
+                const r = Math.max(0, Math.min(255, 255 * (1 - c / 255) * kFactor));
+                const g = Math.max(0, Math.min(255, 255 * (1 - m / 255) * kFactor));
+                const b = Math.max(0, Math.min(255, 255 * (1 - y / 255) * kFactor));
+
+                const idx = i * 4;
+                pixels[idx] = r;
+                pixels[idx + 1] = g;
+                pixels[idx + 2] = b;
+                pixels[idx + 3] = 255;
             }
-
-            // CMYK to RGB
-            const kFactor = 1 - k / 255;
-            const r = Math.max(0, Math.min(255, 255 * (1 - c / 255) * kFactor));
-            const g = Math.max(0, Math.min(255, 255 * (1 - m / 255) * kFactor));
-            const b = Math.max(0, Math.min(255, 255 * (1 - y / 255) * kFactor));
-
-            const idx = i * 4;
-            pixels[idx] = r;
-            pixels[idx + 1] = g;
-            pixels[idx + 2] = b;
-            pixels[idx + 3] = 255;
         }
 
         tempCtx.putImageData(tempImageData, 0, 0);

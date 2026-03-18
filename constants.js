@@ -9,8 +9,13 @@ export const PANTONE_RGB_MAP = {
     'PANTONE 109 C': { r: 255, g: 214, b: 0 },    // 노랑
     'PANTONE Cool Gray 11 C': { r: 83, g: 86, b: 90 },  // 회색
     'PANTONE 485 C': { r: 218, g: 41, b: 28 },    // 밝은 빨강
-    'PANTONE 300 C': { r: 0, g: 87, b: 184 }      // 진한 파랑
+    'PANTONE 300 C': { r: 0, g: 87, b: 184 },     // 진한 파랑
+    'PANTONE 266 C': { r: 109, g: 32, b: 119 },    // 보라
+    'PANTONE 266 U': { r: 127, g: 63, b: 152 }     // 보라 (Uncoated)
 };
+
+// 경고가 이미 출력된 색상 추적 (로그 폭탄 방지)
+const _warnedColors = new Set();
 
 // 팬톤 색상의 RGB 근사값 조회
 export function getSpotColorRGB(colorName) {
@@ -19,7 +24,10 @@ export function getSpotColorRGB(colorName) {
         return PANTONE_RGB_MAP[colorName];
     }
 
-    // 매핑되지 않은 색상은 기본 회색으로 표시
-    console.warn(`팬톤 색상 "${colorName}"의 RGB 근사값이 없습니다. 기본 회색으로 표시합니다.`);
+    // 매핑되지 않은 색상은 기본 회색으로 표시 (색상당 1회만 경고)
+    if (!_warnedColors.has(colorName)) {
+        _warnedColors.add(colorName);
+        console.warn(`팬톤 색상 "${colorName}"의 RGB 근사값이 없습니다. 기본 회색으로 표시합니다.`);
+    }
     return { r: 128, g: 128, b: 128 };
 }
