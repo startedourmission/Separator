@@ -2412,19 +2412,29 @@ export class PDFSeparationViewer {
 
         // 별색이 있으면 CMY에서 별색의 CMYK 근사 기여분을 감산
         // (tiff32nc 스캔은 별색을 CMY로 근사 변환하여 포함하므로)
-        if (this.spotColors && this.spotColors.length > 0 && this.totalSpotPixelCount > 0) {
-            for (const colorName of this.spotColors) {
-                const spotCount = this.totalChannelCounts[colorName] || 0;
-                const spotCoverage = spotCount / this.totalSpotPixelCount; // 0~1
-                const rgb = getSpotColorRGB(colorName);
-                // 별색의 CMY 기여분: RGB가 낮을수록 CMY가 높음
-                const spotC = (255 - rgb.r) / 255; // 0~1
-                const spotM = (255 - rgb.g) / 255;
-                const spotY = (255 - rgb.b) / 255;
-                // 별색 커버리지만큼 CMY 비율에서 감산
-                cyanRatio = Math.max(0, cyanRatio - spotCoverage * spotC * 100);
-                magentaRatio = Math.max(0, magentaRatio - spotCoverage * spotM * 100);
-                yellowRatio = Math.max(0, yellowRatio - spotCoverage * spotY * 100);
+        if (this.spotColors && this.spotColors.length > 0) {
+            if (this.totalSpotPixelCount > 0) {
+                // 별색 분석 완료: 실제 별색 커버리지로 정확한 감산
+                for (const colorName of this.spotColors) {
+                    const spotCount = this.totalChannelCounts[colorName] || 0;
+                    const spotCoverage = spotCount / this.totalSpotPixelCount; // 0~1
+                    const rgb = getSpotColorRGB(colorName);
+                    const spotC = (255 - rgb.r) / 255;
+                    const spotM = (255 - rgb.g) / 255;
+                    const spotY = (255 - rgb.b) / 255;
+                    cyanRatio = Math.max(0, cyanRatio - spotCoverage * spotC * 100);
+                    magentaRatio = Math.max(0, magentaRatio - spotCoverage * spotM * 100);
+                    yellowRatio = Math.max(0, yellowRatio - spotCoverage * spotY * 100);
+                }
+            } else {
+                // 별색 분석 전: CMY 비율을 아직 알 수 없으므로 null 반환
+                // (UI에 '-' 표시)
+                return {
+                    cyan: null,
+                    magenta: null,
+                    yellow: null,
+                    black: blackRatio
+                };
             }
         }
 
@@ -2472,17 +2482,19 @@ export class PDFSeparationViewer {
             return;
         }
 
-        // 각 채널의 비율을 소수점 1자리까지 표시
-        this.channelRatioElements.cyan.textContent = `${ratios.cyan.toFixed(1)}%`;
-        this.channelRatioElements.magenta.textContent = `${ratios.magenta.toFixed(1)}%`;
-        this.channelRatioElements.yellow.textContent = `${ratios.yellow.toFixed(1)}%`;
-        this.channelRatioElements.black.textContent = `${ratios.black.toFixed(1)}%`;
+        // 각 채널의 비율을 소수점 1자리까지 표시 (null이면 분석 대기 중)
+        const formatRatio = (value) => value === null ? '분석 중...' : `${value.toFixed(1)}%`;
+
+        this.channelRatioElements.cyan.textContent = formatRatio(ratios.cyan);
+        this.channelRatioElements.magenta.textContent = formatRatio(ratios.magenta);
+        this.channelRatioElements.yellow.textContent = formatRatio(ratios.yellow);
+        this.channelRatioElements.black.textContent = formatRatio(ratios.black);
 
         // progress bar 업데이트 (각 채널의 비율만큼 배경 표시)
         const updateProgress = (channel, ratio) => {
             const label = document.querySelector(`.color-label.${channel}`);
             if (label) {
-                label.style.backgroundSize = `${ratio}% 100%`;
+                label.style.backgroundSize = `${ratio === null ? 0 : ratio}% 100%`;
             }
         };
 

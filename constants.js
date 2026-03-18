@@ -70,11 +70,13 @@ export function getSpotColorRGB(colorName) {
         }
     }
 
-    // 3. C/U 접미사 없이 매칭 시도 (예: "PANTONE 2193" → "PANTONE 2193 C" 또는 "PANTONE 2193C")
-    const withoutSuffix = normalized.replace(/\s*[CU]$/, '');
+    // 3. C/U 접미사 모두 제거 후 매칭 (예: "pantone 2193c C" → "PANTONE 2193")
+    // "PANTONE 2193C C" → C 제거 → "PANTONE 2193C" → C 제거 → "PANTONE 2193"
+    const stripSuffix = (s) => s.replace(/\s*[CU]$/i, '').replace(/\s*[CU]$/i, '');
+    const withoutSuffix = stripSuffix(normalized);
     for (const [key, value] of Object.entries(PANTONE_RGB_MAP)) {
-        const keySuffix = key.toUpperCase().replace(/\s+/g, ' ').trim().replace(/\s*[CU]$/, '');
-        if (keySuffix === withoutSuffix) {
+        const keyStripped = stripSuffix(key.toUpperCase().replace(/\s+/g, ' ').trim());
+        if (keyStripped === withoutSuffix) {
             return value;
         }
     }
