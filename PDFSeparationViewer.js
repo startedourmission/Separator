@@ -2993,14 +2993,25 @@ export class PDFSeparationViewer {
             // 현재 로드된 PDF 데이터 사용
             const originalPdfBytes = this.currentPDFData; // Uint8Array
 
+            // 비-Latin 문자가 포함된 텍스트가 있으면 한글 폰트 로드
+            const containsNonLatin = (text) => /[^\u0000-\u007F]/.test(text);
+            const needsKoreanFont = emails.some(e => containsNonLatin(e));
+            let koreanFontBytes = null;
+            if (needsKoreanFont) {
+                koreanFontBytes = await fetch('fonts/NotoSansKR-Regular.otf').then(r => r.arrayBuffer());
+            }
+
             for (let i = 0; i < emails.length; i++) {
                 const email = emails[i];
                 this.wmStatus.textContent = `[${i + 1}/${emails.length}] ${email} 처리 중...`;
 
                 // Load PDF
                 const pdfDoc = await PDFDocument.load(originalPdfBytes);
+                if (koreanFontBytes) pdfDoc.registerFontkit(fontkit);
                 const pages = pdfDoc.getPages();
-                const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+                const font = containsNonLatin(email)
+                    ? await pdfDoc.embedFont(koreanFontBytes)
+                    : await pdfDoc.embedFont(StandardFonts.Helvetica);
 
                 const fontSize = parseInt(fontSizeInput.value) || 50;
                 const opacityVal = parseFloat(opacityInput.value) || 0.3;
@@ -3008,7 +3019,7 @@ export class PDFSeparationViewer {
                 // Draw watermark
                 pages.forEach(page => {
                     const { width, height } = page.getSize();
-                    const textWidth = helveticaFont.widthOfTextAtSize(email, fontSize);
+                    const textWidth = font.widthOfTextAtSize(email, fontSize);
 
                     // 중앙 정렬 좌표 계산
                     const angle = Math.PI / 4;
@@ -3025,7 +3036,7 @@ export class PDFSeparationViewer {
                         x: x,
                         y: y,
                         size: fontSize,
-                        font: helveticaFont,
+                        font: font,
                         color: rgb(0.7, 0.7, 0.7),
                         opacity: opacityVal,
                         rotate: degrees(45),

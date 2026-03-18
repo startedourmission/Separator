@@ -241,6 +241,8 @@
                 <textarea id="watermark-text" rows="5"
                     placeholder="user1@example.com&#13;&#10;user2@example.com&#13;&#10;user3@example.com"></textarea>
                 <button id="apply-watermark" , onclick="downloadWatermarkedPdf()">적용</button>
+                <hr style="margin: 12px 0; border: none; border-top: 1px solid #ddd;">
+                <a href="https://rabbitlab.co.kr" target="_blank" rel="noopener noreferrer" class="btn-rabbitlab">래빗랩으로 돌아가기</a>
             </div>
         </div>
     </div>
@@ -256,6 +258,7 @@
 
     <script src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.js"></script>
     <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+    <script src="https://unpkg.com/@pdf-lib/fontkit/dist/fontkit.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -266,6 +269,11 @@
     <script>
         // PDF.js worker 설정
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        // 한글 포함 여부 감지
+        function containsNonLatin(text) {
+            return /[^\u0000-\u007F]/.test(text);
+        }
 
         // 워터마크 다운로드 함수
         async function downloadWatermarkedPdf() {
@@ -295,6 +303,13 @@
                 const fileArrayBuffer = await fileInput.files[0].arrayBuffer();
                 const { PDFDocument, rgb, degrees, StandardFonts } = PDFLib;
 
+                // 비-Latin 문자가 포함된 텍스트가 있으면 한글 폰트 로드
+                const needsKoreanFont = texts.some(t => containsNonLatin(t));
+                let koreanFontBytes = null;
+                if (needsKoreanFont) {
+                    koreanFontBytes = await fetch('fonts/NotoSansKR-Regular.otf').then(r => r.arrayBuffer());
+                }
+
                 // ZIP 생성 필요 여부 확인 (2개 이상일 때)
                 if (texts.length > 1) {
                     const zip = new JSZip();
@@ -305,7 +320,10 @@
 
                         // PDF 로드
                         const pdfDoc = await PDFDocument.load(fileArrayBuffer);
-                        const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+                        if (koreanFontBytes) pdfDoc.registerFontkit(fontkit);
+                        const font = containsNonLatin(text)
+                            ? await pdfDoc.embedFont(koreanFontBytes)
+                            : await pdfDoc.embedFont(StandardFonts.Helvetica);
                         const pages = pdfDoc.getPages();
                         const fontSize = 50;
 
@@ -313,7 +331,7 @@
                             const { width, height } = page.getSize();
 
                             // 중앙 정렬 및 45도 회전 계산
-                            const textWidth = helveticaFont.widthOfTextAtSize(text, fontSize);
+                            const textWidth = font.widthOfTextAtSize(text, fontSize);
                             const angle = Math.PI / 4; // 45도
                             const cos = Math.cos(angle);
                             const sin = Math.sin(angle);
@@ -328,7 +346,7 @@
                                 x: x,
                                 y: y,
                                 size: fontSize,
-                                font: helveticaFont,
+                                font: font,
                                 color: rgb(0.5, 0.5, 0.5),
                                 opacity: 0.3,
                                 rotate: degrees(45),
@@ -347,13 +365,16 @@
                     // 단일 파일 처리
                     const text = texts[0];
                     const pdfDoc = await PDFDocument.load(fileArrayBuffer);
-                    const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+                    if (koreanFontBytes) pdfDoc.registerFontkit(fontkit);
+                    const font = containsNonLatin(text)
+                        ? await pdfDoc.embedFont(koreanFontBytes)
+                        : await pdfDoc.embedFont(StandardFonts.Helvetica);
                     const pages = pdfDoc.getPages();
                     const fontSize = 50;
 
                     pages.forEach(page => {
                         const { width, height } = page.getSize();
-                        const textWidth = helveticaFont.widthOfTextAtSize(text, fontSize);
+                        const textWidth = font.widthOfTextAtSize(text, fontSize);
 
                         // 중앙 정렬 및 45도 회전
                         const angle = Math.PI / 4;
@@ -369,7 +390,7 @@
                             x: x,
                             y: y,
                             size: fontSize,
-                            font: helveticaFont,
+                            font: font,
                             color: rgb(0.5, 0.5, 0.5),
                             opacity: 0.3,
                             rotate: degrees(45),
