@@ -283,100 +283,101 @@ export class VirtualScrollManager {
         const dstWidth = canvas.width;
         const dstHeight = canvas.height;
 
-        // 임시 캔버스에 원본 크기로 렌더링
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = srcWidth;
-        tempCanvas.height = srcHeight;
-        const tempCtx = tempCanvas.getContext('2d');
+        // 임시 캔버스 재사용 (크기 변경 시에만 재생성)
+        if (!this._tempCanvas || this._tempW !== srcWidth || this._tempH !== srcHeight) {
+            this._tempCanvas = document.createElement('canvas');
+            this._tempCanvas.width = srcWidth;
+            this._tempCanvas.height = srcHeight;
+            this._tempCtx = this._tempCanvas.getContext('2d');
+            this._tempW = srcWidth;
+            this._tempH = srcHeight;
+        }
+        const tempCanvas = this._tempCanvas;
+        const tempCtx = this._tempCtx;
         const tempImageData = tempCtx.createImageData(srcWidth, srcHeight);
 
         const { cyan, magenta, yellow, black } = imageData.channels;
         const pixels = tempImageData.data;
 
-        // tiffsep 데이터가 있으면 별색이 CMY에도 근사값으로 포함되어 있으므로,
-        // 별색이 활성화된 경우 CMY에서 별색 기여분을 제거하고 별색 RGB로 대체
-        const hasSpotData = Object.keys(spotColorData).length > 0;
+        // 분판 플래그 캐싱 (매 픽셀 property 접근 방지)
+        const showC = separations.cyan;
+        const showM = separations.magenta;
+        const showY = separations.yellow;
+        const showK = separations.black;
 
-        // 활성화된 별색의 RGB 값을 미리 계산
+        // 별색 데이터 준비 (RGB 컴포넌트를 플랫 배열로 사전 추출)
+        const hasSpotData = Object.keys(spotColorData).length > 0;
         const activeSpots = [];
         if (hasSpotData) {
             for (const [colorName, colorData] of Object.entries(spotColorData)) {
                 if (separations.spotColors && separations.spotColors[colorName]) {
-                    activeSpots.push({ colorName, colorData, rgb: getSpotColorRGB(colorName) });
+                    const rgb = getSpotColorRGB(colorName);
+                    // CMY 기여분도 사전 계산
+                    activeSpots.push({
+                        data: colorData,
+                        r: rgb.r, g: rgb.g, b: rgb.b,
+                        cContrib: (255 - rgb.r) / 255,
+                        mContrib: (255 - rgb.g) / 255,
+                        yContrib: (255 - rgb.b) / 255
+                    });
                 }
             }
         }
 
-        for (let i = 0; i < srcWidth * srcHeight; i++) {
-            let c = separations.cyan ? cyan[i] : 0;
-            let m = separations.magenta ? magenta[i] : 0;
-            let y = separations.yellow ? yellow[i] : 0;
-            let k = separations.black ? black[i] : 0;
+        const totalPixels = srcWidth * srcHeight;
+        const hasActiveSpots = hasSpotData && activeSpots.length > 0;
 
-            if (hasSpotData && activeSpots.length > 0) {
-                // tiffsep 모드: CMY에 별색 근사값이 이미 포함되어 있음
-                // 별색 영역의 CMY 기여분을 제거하고, 별색 RGB로 직접 합성
-                for (const spot of activeSpots) {
-                    const spotValue = spot.colorData[i] || 0;
-                    if (spotValue > 0) {
-                        const spotK = spotValue / 255;
-                        // 별색의 CMYK 근사값을 CMY에서 제거
-                        c = Math.max(0, c - (255 - spot.rgb.r) * spotK);
-                        m = Math.max(0, m - (255 - spot.rgb.g) * spotK);
-                        y = Math.max(0, y - (255 - spot.rgb.b) * spotK);
+        for (let i = 0; i < totalPixels; i++) {
+            let c = showC ? cyan[i] : 0;
+            let m = showM ? magenta[i] : 0;
+            let y = showY ? yellow[i] : 0;
+            let k = showK ? black[i] : 0;
+
+            if (hasActiveSpots) {
+                // 한 번의 순회로 CMY 감산 + RGB 블렌딩 준비
+                const kFactor = 1 - k / 255;
+                let r, g, b;
+
+                // CMY에서 별색 기여분 제거
+                for (let s = 0; s < activeSpots.length; s++) {
+                    const spot = activeSpots[s];
+                    const sv = spot.data[i];
+                    if (sv > 0) {
+                        const sk = sv / 255;
+                        c = c - spot.cContrib * sv > 0 ? c - spot.cContrib * sv : 0;
+                        m = m - spot.mContrib * sv > 0 ? m - spot.mContrib * sv : 0;
+                        y = y - spot.yContrib * sv > 0 ? y - spot.yContrib * sv : 0;
                     }
                 }
 
-                // CMYK to RGB (별색 기여분 제거된 CMY)
-                const kFactor = 1 - k / 255;
-                let r = 255 * (1 - c / 255) * kFactor;
-                let g = 255 * (1 - m / 255) * kFactor;
-                let b = 255 * (1 - y / 255) * kFactor;
+                r = 255 * (1 - c / 255) * kFactor;
+                g = 255 * (1 - m / 255) * kFactor;
+                b = 255 * (1 - y / 255) * kFactor;
 
-                // 별색을 RGB로 직접 합성 (오버프린트 방식)
-                for (const spot of activeSpots) {
-                    const spotValue = spot.colorData[i] || 0;
-                    if (spotValue > 0) {
-                        const spotK = spotValue / 255;
-                        r = r * (1 - spotK) + spot.rgb.r * spotK;
-                        g = g * (1 - spotK) + spot.rgb.g * spotK;
-                        b = b * (1 - spotK) + spot.rgb.b * spotK;
+                // 별색 RGB 블렌딩 (같은 순회 데이터 재사용)
+                for (let s = 0; s < activeSpots.length; s++) {
+                    const spot = activeSpots[s];
+                    const sv = spot.data[i];
+                    if (sv > 0) {
+                        const sk = sv / 255;
+                        const isk = 1 - sk;
+                        r = r * isk + spot.r * sk;
+                        g = g * isk + spot.g * sk;
+                        b = b * isk + spot.b * sk;
                     }
                 }
 
                 const idx = i * 4;
-                pixels[idx] = Math.max(0, Math.min(255, r));
-                pixels[idx + 1] = Math.max(0, Math.min(255, g));
-                pixels[idx + 2] = Math.max(0, Math.min(255, b));
+                pixels[idx] = r > 255 ? 255 : r < 0 ? 0 : r;
+                pixels[idx + 1] = g > 255 ? 255 : g < 0 ? 0 : g;
+                pixels[idx + 2] = b > 255 ? 255 : b < 0 ? 0 : b;
                 pixels[idx + 3] = 255;
             } else {
-                // 별색 없음 또는 비활성: 기존 CMYK 렌더링
-                // 별색이 비활성이고 tiffsep 데이터면 CMY에 근사값이 포함되어 있으므로 그대로 사용
-                if (!hasSpotData) {
-                    // fallback 모드 (tiffsep 아님): 별색을 CMY에 가산
-                    for (const [colorName, colorData] of Object.entries(spotColorData)) {
-                        if (separations.spotColors && separations.spotColors[colorName]) {
-                            const spotValue = colorData[i] || 0;
-                            if (spotValue > 0) {
-                                const rgb = getSpotColorRGB(colorName);
-                                const spotK = spotValue / 255;
-                                c = Math.min(255, c + (255 - rgb.r) * spotK);
-                                m = Math.min(255, m + (255 - rgb.g) * spotK);
-                                y = Math.min(255, y + (255 - rgb.b) * spotK);
-                            }
-                        }
-                    }
-                }
-
                 const kFactor = 1 - k / 255;
-                const r = Math.max(0, Math.min(255, 255 * (1 - c / 255) * kFactor));
-                const g = Math.max(0, Math.min(255, 255 * (1 - m / 255) * kFactor));
-                const b = Math.max(0, Math.min(255, 255 * (1 - y / 255) * kFactor));
-
                 const idx = i * 4;
-                pixels[idx] = r;
-                pixels[idx + 1] = g;
-                pixels[idx + 2] = b;
+                pixels[idx] = 255 * (1 - c / 255) * kFactor;
+                pixels[idx + 1] = 255 * (1 - m / 255) * kFactor;
+                pixels[idx + 2] = 255 * (1 - y / 255) * kFactor;
                 pixels[idx + 3] = 255;
             }
         }

@@ -50,41 +50,49 @@ export const PANTONE_RGB_MAP = {
     '우아한 형제들 메인 색상': { r: 0, g: 155, b: 145 }  // PANTONE 7710C 계열
 };
 
-// 경고가 이미 출력된 색상 추적 (로그 폭탄 방지)
+// 사전 구축된 정규화 조회맵 (O(1) 검색)
+const _normalizedMap = new Map();
+const _strippedMap = new Map();
+const _stripSuffix = (s) => s.replace(/\s*[CU]$/i, '').replace(/\s*[CU]$/i, '');
+
+for (const [key, value] of Object.entries(PANTONE_RGB_MAP)) {
+    const norm = key.toUpperCase().replace(/\s+/g, ' ').trim();
+    _normalizedMap.set(norm, value);
+    _strippedMap.set(_stripSuffix(norm), value);
+}
+
+// 조회 결과 캐시 (한번 찾은 이름은 O(1))
+const _lookupCache = new Map();
 const _warnedColors = new Set();
+const _defaultGray = { r: 128, g: 128, b: 128 };
 
 // 팬톤 색상의 RGB 근사값 조회
 export function getSpotColorRGB(colorName) {
+    // 캐시 히트
+    const cached = _lookupCache.get(colorName);
+    if (cached) return cached;
+
     // 1. 정확한 매칭
-    if (PANTONE_RGB_MAP[colorName]) {
-        return PANTONE_RGB_MAP[colorName];
-    }
-
-    // 2. 공백/대소문자 정규화 매칭
-    // "PANTONE 2193C" ↔ "PANTONE 2193 C", "Pantone 192C" 등
-    const normalized = colorName.toUpperCase().replace(/\s+/g, ' ').trim();
-    for (const [key, value] of Object.entries(PANTONE_RGB_MAP)) {
-        const normalizedKey = key.toUpperCase().replace(/\s+/g, ' ').trim();
-        if (normalizedKey === normalized) {
-            return value;
+    let result = PANTONE_RGB_MAP[colorName];
+    if (!result) {
+        // 2. 정규화 매칭
+        const normalized = colorName.toUpperCase().replace(/\s+/g, ' ').trim();
+        result = _normalizedMap.get(normalized);
+        if (!result) {
+            // 3. 접미사 제거 매칭
+            result = _strippedMap.get(_stripSuffix(normalized));
         }
     }
 
-    // 3. C/U 접미사 모두 제거 후 매칭 (예: "pantone 2193c C" → "PANTONE 2193")
-    // "PANTONE 2193C C" → C 제거 → "PANTONE 2193C" → C 제거 → "PANTONE 2193"
-    const stripSuffix = (s) => s.replace(/\s*[CU]$/i, '').replace(/\s*[CU]$/i, '');
-    const withoutSuffix = stripSuffix(normalized);
-    for (const [key, value] of Object.entries(PANTONE_RGB_MAP)) {
-        const keyStripped = stripSuffix(key.toUpperCase().replace(/\s+/g, ' ').trim());
-        if (keyStripped === withoutSuffix) {
-            return value;
-        }
+    if (result) {
+        _lookupCache.set(colorName, result);
+        return result;
     }
 
-    // 매핑되지 않은 색상은 기본 회색으로 표시 (색상당 1회만 경고)
     if (!_warnedColors.has(colorName)) {
         _warnedColors.add(colorName);
         console.warn(`팬톤 색상 "${colorName}"의 RGB 근사값이 없습니다. 기본 회색으로 표시합니다.`);
     }
-    return { r: 128, g: 128, b: 128 };
+    _lookupCache.set(colorName, _defaultGray);
+    return _defaultGray;
 }

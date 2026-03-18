@@ -711,37 +711,20 @@ export class PDFSeparationViewer {
                 const pixelCount = page.width * page.height;
                 const rawData = new Uint8Array(page.data);
 
-                let channelData;
+                // 추출 + 반전을 한 루프에서 처리 (255=잉크없음 → 0=잉크없음)
+                const channelData = new Uint8Array(pixelCount);
                 if (rawData.length >= pixelCount * 4) {
-                    // UTIF가 RGBA로 디코딩한 경우: R 채널만 추출 (그레이스케일)
-                    channelData = new Uint8Array(pixelCount);
                     for (let i = 0; i < pixelCount; i++) {
-                        channelData[i] = rawData[i * 4];
+                        channelData[i] = 255 - rawData[i * 4];
                     }
                 } else if (rawData.length >= pixelCount * 3) {
-                    // RGB로 디코딩된 경우: R 채널만 추출
-                    channelData = new Uint8Array(pixelCount);
                     for (let i = 0; i < pixelCount; i++) {
-                        channelData[i] = rawData[i * 3];
+                        channelData[i] = 255 - rawData[i * 3];
                     }
                 } else {
-                    // 이미 그레이스케일 (1바이트/픽셀)
-                    channelData = rawData.slice(0, pixelCount);
-                }
-
-                // tiffsep은 밝기/반사율 기준으로 출력: 255=잉크 없음, 0=최대 잉크
-                // 렌더링은 잉크량 기준: 0=잉크 없음, 255=최대 잉크
-                // → 반전 필요
-                for (let i = 0; i < channelData.length; i++) {
-                    channelData[i] = 255 - channelData[i];
-                }
-
-                // 값 분포 확인용 디버그 (반전 후)
-                let min = 255, max = 0, nonZero = 0;
-                for (let i = 0; i < channelData.length; i++) {
-                    if (channelData[i] < min) min = channelData[i];
-                    if (channelData[i] > max) max = channelData[i];
-                    if (channelData[i] > 0) nonZero++;
+                    for (let i = 0; i < pixelCount; i++) {
+                        channelData[i] = 255 - rawData[i];
+                    }
                 }
 
                 resolve({
@@ -2296,27 +2279,21 @@ export class PDFSeparationViewer {
             };
         }
 
-        // 각 채널에서 잉크가 있는 픽셀 수 카운트 (threshold 이상)
-        const threshold = 5; // 노이즈 제거
+        // 로컬 카운터로 캐싱 (property 접근 최소화)
+        let lc = 0, lm = 0, ly = 0, lk = 0;
+        const threshold = 5;
         for (let i = 0; i < totalPixels; i++) {
-            if (cyan[i] > threshold) {
-                this.totalChannelCounts.cyan++;
-                this.pageChannelData[pageNum].cyan++;
-            }
-            if (magenta[i] > threshold) {
-                this.totalChannelCounts.magenta++;
-                this.pageChannelData[pageNum].magenta++;
-            }
-            if (yellow[i] > threshold) {
-                this.totalChannelCounts.yellow++;
-                this.pageChannelData[pageNum].yellow++;
-            }
-            if (black[i] > threshold) {
-                this.totalChannelCounts.black++;
-                this.pageChannelData[pageNum].black++;
-            }
+            if (cyan[i] > threshold) lc++;
+            if (magenta[i] > threshold) lm++;
+            if (yellow[i] > threshold) ly++;
+            if (black[i] > threshold) lk++;
         }
-
+        const pd = this.pageChannelData[pageNum];
+        pd.cyan += lc; pd.magenta += lm; pd.yellow += ly; pd.black += lk;
+        this.totalChannelCounts.cyan += lc;
+        this.totalChannelCounts.magenta += lm;
+        this.totalChannelCounts.yellow += ly;
+        this.totalChannelCounts.black += lk;
         this.totalPixelCount += totalPixels;
     }
 
