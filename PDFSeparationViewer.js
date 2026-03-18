@@ -472,7 +472,6 @@ export class PDFSeparationViewer {
             // 병렬 스캔용 WorkerPool 초기화
             this.workerPool = new WorkerPool('./ghostscript-worker.js', this.workerPoolSize);
             await this.workerPool.init();
-            console.log(`WorkerPool initialized with ${this.workerPoolSize} workers for parallel scanning`);
 
             this.ghostscript = {
                 loadPDF: async (data) => {
@@ -680,7 +679,6 @@ export class PDFSeparationViewer {
         return new Promise((resolve, reject) => {
             try {
                 if (!tiffData) {
-                    console.warn(`별색 ${colorName} 데이터가 없습니다. 빈 채널로 처리합니다.`);
                     const emptyData = new Uint8Array((this.baseWidth || 800) * (this.baseHeight || 600)).fill(0);
                     resolve({
                         width: this.baseWidth || 800,
@@ -712,7 +710,6 @@ export class PDFSeparationViewer {
                 // 그레이스케일 채널 데이터 추출 (0-255)
                 const pixelCount = page.width * page.height;
                 const rawData = new Uint8Array(page.data);
-                console.log(`[TIFF 파싱] ${colorName}: ${page.width}x${page.height}, rawData.length=${rawData.length}, pixelCount=${pixelCount}, BPP=${page.t258?.[0] || '?'}, SamplesPerPixel=${page.t277?.[0] || '?'}`);
 
                 let channelData;
                 if (rawData.length >= pixelCount * 4) {
@@ -746,7 +743,6 @@ export class PDFSeparationViewer {
                     if (channelData[i] > max) max = channelData[i];
                     if (channelData[i] > 0) nonZero++;
                 }
-                console.log(`[TIFF 파싱] ${colorName}: 반전 후 값 범위 ${min}~${max}, 잉크 있는 픽셀: ${nonZero}/${pixelCount} (${(nonZero/pixelCount*100).toFixed(1)}%)`);
 
                 resolve({
                     width: page.width,
@@ -1027,7 +1023,6 @@ export class PDFSeparationViewer {
                     const pageSize = await this.ghostscript.getPageSize(1);
                     aspectRatio = pageSize.width / pageSize.height;
                 } catch (e) {
-                    console.warn('페이지 크기 조회 실패, 기본 비율 사용');
                 }
 
                 // 스크롤 뷰어 초기화
@@ -1124,7 +1119,6 @@ export class PDFSeparationViewer {
         try {
             // WorkerPool이 있으면 병렬 처리, 없으면 순차 처리
             if (this.workerPool) {
-                console.log(`병렬 스캔 시작: ${this.totalPages}페이지, ${this.workerPoolSize}개 Worker`);
 
                 // 배치 크기를 Worker 수의 2배로 설정 (메모리와 성능 균형)
                 const batchSize = this.workerPoolSize * 2;
@@ -1138,11 +1132,9 @@ export class PDFSeparationViewer {
 
                 const endTime = performance.now();
                 const elapsedSeconds = ((endTime - startTime) / 1000).toFixed(1);
-                console.log(`병렬 스캔 완료: ${this.totalPages}페이지, ${elapsedSeconds}초 소요`);
 
             } else {
                 // Fallback: 기존 순차 처리
-                console.log('WorkerPool 없음, 순차 스캔으로 대체');
                 for (const pageNum of pageNumbers) {
                     const options = optionsGenerator(pageNum);
                     try {
@@ -1256,7 +1248,6 @@ export class PDFSeparationViewer {
     updateSpotColorControls() {
         // 별색 컨트롤 컨테이너가 없으면 생성하지 않음
         if (!this.spotControlsContainer) {
-            console.warn('별색 컨트롤 컨테이너가 없습니다.');
             return;
         }
 
@@ -1376,7 +1367,6 @@ export class PDFSeparationViewer {
                         }
                     }
                 } catch (e) {
-                    console.warn(`페이지 ${pageNum} TrimBox 추출 실패, MediaBox로 대체`, e);
                 }
 
                 // 유효성 검사: width/height가 없거나 숫자가 아니면 MediaBox 사용
@@ -1400,7 +1390,6 @@ export class PDFSeparationViewer {
                 });
             });
 
-            console.log('PDF 메타데이터 추출 완료:', this.pageMetadata);
 
             // 현재 페이지 정보 업데이트
             this.updatePageDimensionInfo();
@@ -1606,7 +1595,6 @@ export class PDFSeparationViewer {
             pageSize = await this.ghostscript.getPageSize(pageNum);
             pdfAspectRatio = pageSize.width / pageSize.height;
         } catch (error) {
-            console.warn('PDF 크기 조회 실패, 기본 비율 사용:', error);
             pdfAspectRatio = 1 / 1.414;
         }
 
@@ -1635,19 +1623,11 @@ export class PDFSeparationViewer {
 
         if (hasSpotColors) {
             try {
-                console.log('[별색 디버그] tiffsep 시도 - 감지된 별색:', this.spotColors, 'DPI:', this.renderDPI);
                 const result = await this.ghostscript.processTiffsep(
                     this.currentPDFData,
                     pageNum,
                     this.renderDPI
                 );
-
-                console.log('[별색 디버그] tiffsep 결과:', result ? {
-                    channelNames: Object.keys(result.channels || {}),
-                    channelSizes: Object.fromEntries(Object.entries(result.channels || {}).map(([k, v]) => [k, v?.length || 0])),
-                    width: result.width,
-                    height: result.height
-                } : 'null');
 
                 if (result && result.channels && Object.keys(result.channels).length > 0) {
                     const { channels, width, height } = result;
@@ -1673,13 +1653,10 @@ export class PDFSeparationViewer {
                         if (channels[colorName]) {
                             const parsed = await this.parseSpotColorTIFF(channels[colorName], colorName);
                             spotColorData[colorName] = parsed.data;
-                            console.log(`[별색 디버그] 별색 플레이트 파싱 성공: ${colorName}, 데이터 크기: ${parsed.data?.length || 0}`);
                         } else {
-                            console.warn(`[별색 디버그] 별색 플레이트 없음: ${colorName} (tiffsep이 이 별색을 출력하지 않음)`);
                         }
                     }
                     tiffsepSuccessful = true;
-                    console.log('[별색 디버그] tiffsep 성공! spotColorData 키:', Object.keys(spotColorData));
 
                     // 별색 비율 누적 및 UI 업데이트
                     const tiffsepWidth = imageData.width;
@@ -1695,7 +1672,6 @@ export class PDFSeparationViewer {
                         }
                     }
                 } else {
-                    console.warn('[별색 디버그] tiffsep 결과가 비어있음 - CMYK fallback으로 전환');
                 }
             } catch (error) {
                 console.error('[별색 디버그] tiffsep 렌더링 실패:', error.message, error);
@@ -1911,7 +1887,6 @@ export class PDFSeparationViewer {
             processGroup(group);
         }
 
-        console.log(`감지된 선 후보 (${candidates.length}개):`, candidates);
         this.allCandidates = candidates;
 
         if (candidates.length < 4) {
@@ -1965,7 +1940,6 @@ export class PDFSeparationViewer {
             finalMarks = [candidates[0].x, candidates[1].x, candidates[candidates.length - 2].x, candidates[candidates.length - 1].x];
         }
 
-        console.log(`최종 선발된 재단선 (px):`, finalMarks);
         this.finalMarks = finalMarks; // 최종 선택된 마커 저장
 
         this.renderCropMarkers(); // 마커 렌더링
@@ -2058,7 +2032,6 @@ export class PDFSeparationViewer {
     goToPage(pageNum) {
         // 유효성 검증
         if (isNaN(pageNum) || pageNum < 1 || pageNum > this.totalPages) {
-            console.warn('유효하지 않은 페이지 번호:', pageNum);
             // 현재 페이지로 되돌리기
             this.currentPageInput.value = this.currentPage;
             return;
@@ -2186,7 +2159,6 @@ export class PDFSeparationViewer {
             return checkbox && checkbox.checked;
         });
 
-        console.log('CMYK + 별색 렌더링:', separations, '별색:', selectedSpotColors);
 
         // RGB 이미지로 변환 (CMYK + 별색 합성)
         const pixelCount = width * height;
@@ -2394,7 +2366,6 @@ export class PDFSeparationViewer {
             }
         }
 
-        console.log(`페이지 ${pageNum} 별색 데이터 누적 완료`);
     }
 
 
@@ -2550,12 +2521,10 @@ export class PDFSeparationViewer {
         // 별색 비율을 spotColorRatios 객체에 저장
         this.spotColorRatios = ratios;
 
-        console.log('별색 비율 UI 업데이트 완료:', ratios);
     }
 
     createDummyImageData(width = 800, height = 600) {
         // 개발/테스트 목적의 더미 이미지 데이터 생성
-        console.log(`더미 이미지 생성: ${width}x${height}`);
 
         // 임시 캔버스를 사용하여 ImageData 생성
         const tempCanvas = document.createElement('canvas');
@@ -3019,16 +2988,11 @@ export class PDFSeparationViewer {
     // 전역 접근용 tiffsep 테스트 메서드
     async testTiffsep() {
         try {
-            console.log('🧪 tiffsep 지원 테스트 시작...');
             const result = await this.ghostscript.testTiffsep();
 
             if (result.supported) {
-                console.log('✅ tiffsep 지원됨!');
-                console.log('생성된 파일:', result.files);
                 return { supported: true, files: result.files };
             } else {
-                console.log('❌ tiffsep 미지원');
-                console.log('메시지:', result.message);
                 return { supported: false, message: result.message };
             }
         } catch (error) {
@@ -3040,23 +3004,7 @@ export class PDFSeparationViewer {
     // 사용 가능한 디바이스 목록 조회
     async listDevices() {
         try {
-            console.log('📋 Ghostscript 디바이스 목록 조회 중...');
             const result = await this.ghostscript.listDevices();
-
-            console.log('사용 가능한 디바이스:', result.devices);
-
-            // CMYK 관련 디바이스 필터링
-            const cmykDevices = result.devices.filter(d =>
-                d.toLowerCase().includes('cmyk') ||
-                d.toLowerCase().includes('tiff') ||
-                d.toLowerCase().includes('psd') ||
-                d.toLowerCase().includes('sep')
-            );
-
-            if (cmykDevices.length > 0) {
-                console.log('🎨 CMYK/분판 관련 디바이스:', cmykDevices);
-            }
-
             return result;
         } catch (error) {
             console.error('❌ 디바이스 목록 조회 실패:', error);
@@ -3067,17 +3015,11 @@ export class PDFSeparationViewer {
     // 특정 디바이스 테스트
     async testDevice(device, outputFile) {
         try {
-            console.log(`🧪 ${device} 디바이스 테스트 중...`);
             const result = await this.ghostscript.testDevice(device, outputFile);
 
             if (result.supported) {
-                console.log(`✅ ${device} 성공!`);
-                console.log('생성된 파일:', result.files);
-                console.log('파일 크기:', result.fileSize, 'bytes');
                 return { supported: true, files: result.files, fileSize: result.fileSize };
             } else {
-                console.log(`❌ ${device} 실패`);
-                console.log('메시지:', result.message);
                 return { supported: false, message: result.message };
             }
         } catch (error) {

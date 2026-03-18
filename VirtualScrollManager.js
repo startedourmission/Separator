@@ -48,7 +48,6 @@ export class VirtualScrollManager {
         // 초기 첫 페이지 즉시 렌더링 (로딩 완료 직후 바로 표시)
         this.priorityRenderFirstPages();
 
-        console.log(`VirtualScrollManager 초기화: ${totalPages}페이지, 비율 ${aspectRatio.toFixed(3)}`);
     }
 
     // 모드 설정

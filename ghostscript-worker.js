@@ -7,7 +7,7 @@ function createModuleConfig(overrides = {}) {
     return Object.assign({
         locateFile: (path) => new URL(path, self.location.href).href,
         print: () => { },
-        printErr: (text) => console.warn('GS:', text)
+        printErr: () => { }
     }, overrides);
 }
 
@@ -283,7 +283,6 @@ self.addEventListener('message', async function (e) {
 
                 // tiffsep 디바이스로 렌더링 (분판용)
                 const tiffsepDpi = Math.min(dpi || 300, 300);
-                console.log(`[tiffsep worker] DPI: 요청=${dpi}, 실제 사용=${tiffsepDpi}`);
                 const args = [
                     '-dNOPAUSE',
                     '-dBATCH',
@@ -299,28 +298,21 @@ self.addEventListener('message', async function (e) {
 
 
 
-                console.log('[tiffsep worker] 실행 args:', args);
                 try {
                     moduleInstance.callMain(args);
                 } catch (error) {
                     if (error?.name !== 'ExitStatus' || error.status !== 0) {
-                        console.error('[tiffsep worker] callMain 에러:', error.name, error.status, error.message);
-                        console.log('[tiffsep worker] GS 출력:\n' + gsOutput.join('\n'));
                         throw error;
                     }
-                    console.log('[tiffsep worker] callMain 완료 (ExitStatus 0)');
                 }
-                console.log('[tiffsep worker] GS 출력:\n' + gsOutput.join('\n'));
 
                 // 생성된 파일 목록 조회
                 const files = moduleInstance.FS.readdir('/');
                 const allPlateFiles = files.filter(f => f.startsWith('plate') && f.endsWith('.tif'));
-                console.log('[tiffsep worker] 생성된 전체 plate 파일:', allPlateFiles);
                 // composite 파일(plate1.tif 등 숫자만 있는 파일)과 분판 파일 분리
                 // tiffsep %d 모드: plate1.tif(composite), plate1(Cyan).tif(분판)
                 const plateFiles = allPlateFiles.filter(f => /plate\d+\(.+\)\.tif/.test(f) || /plate[A-Za-z]/.test(f));
                 const compositeFiles = allPlateFiles.filter(f => /^plate\d+\.tif$/.test(f));
-                console.log('[tiffsep worker] 분판 파일:', plateFiles, '| composite 파일:', compositeFiles);
 
 
 
@@ -334,7 +326,6 @@ self.addEventListener('message', async function (e) {
                         spotColorNames.push(sepMatch[1].trim());
                     }
                 }
-                console.log('[tiffsep worker] GS에서 감지된 별색:', spotColorNames);
 
                 // 각 파일에서 색상명 추출 및 데이터 읽기
                 const channels = {};
@@ -377,7 +368,6 @@ self.addEventListener('message', async function (e) {
                                 // EUC-KR 디코딩 시도
                                 try {
                                     const decoded = new TextDecoder('euc-kr', { fatal: true }).decode(byteArray);
-                                    console.log(`[tiffsep worker] 별색 이름 EUC-KR 디코딩: "${colorName}" → "${decoded}"`);
                                     colorName = decoded;
                                 } catch {
                                     // UTF-8 시도
@@ -388,7 +378,7 @@ self.addEventListener('message', async function (e) {
                                     }
                                 }
                             } catch (e) {
-                                console.warn('[tiffsep worker] 별색 이름 디코딩 실패:', e);
+                                // 디코딩 실패 시 원본 유지
                             }
                         }
                         // 비ASCII 문자가 직접 포함된 경우 (URL 인코딩 없이)
@@ -396,7 +386,6 @@ self.addEventListener('message', async function (e) {
                             try {
                                 const bytes = new Uint8Array([...colorName].map(c => c.charCodeAt(0)));
                                 const decoded = new TextDecoder('euc-kr', { fatal: true }).decode(bytes);
-                                console.log(`[tiffsep worker] 별색 이름 EUC-KR 디코딩: "${colorName}" → "${decoded}"`);
                                 colorName = decoded;
                             } catch {
                                 // 디코딩 실패 시 원본 유지
@@ -416,8 +405,6 @@ self.addEventListener('message', async function (e) {
                         const tiffData = moduleInstance.FS.readFile(file, { encoding: "binary" });
 
                         channels[colorName] = tiffData;
-                        console.log(`[tiffsep worker] 플레이트: ${file} → 색상: ${colorName}, 크기: ${tiffData.length} bytes`);
-
                         // CMYK가 아닌 색상은 별색으로 분류
                         const normalizedColorName = colorName.toLowerCase();
                         if (!['cyan', 'magenta', 'yellow', 'black'].includes(normalizedColorName)) {
@@ -431,7 +418,7 @@ self.addEventListener('message', async function (e) {
                     moduleInstance.FS.unlink("input.pdf");
                     allPlateFiles.forEach(f => moduleInstance.FS.unlink(f));
                 } catch (e) {
-                    console.warn('파일 정리 중 오류:', e);
+                    // 파일 정리 실패 무시
                 }
 
                 self.postMessage({
@@ -451,8 +438,6 @@ self.addEventListener('message', async function (e) {
                 });
             }
         } else if (type === 'listDevices') {
-            console.log('=== Ghostscript 디바이스 목록 조회 ===');
-
             try {
                 const outputs = [];
                 const captureOutput = (text) => {
@@ -472,8 +457,6 @@ self.addEventListener('message', async function (e) {
                     }));
 
                     const args = ['-h'];
-                    console.log('명령 실행: gs -h');
-
                     try {
                         moduleInstance.callMain(args);
                     } catch (error) {
@@ -485,9 +468,6 @@ self.addEventListener('message', async function (e) {
 
                 // "Available devices:" 섹션 추출
                 const allOutput = outputs.join('\n');
-                console.log('=== Ghostscript 출력 ===');
-                console.log(allOutput);
-
                 // 디바이스 목록 파싱
                 const deviceSection = allOutput.split('Available devices:')[1];
                 const devices = deviceSection ? deviceSection.split('\n')
@@ -496,8 +476,6 @@ self.addEventListener('message', async function (e) {
                     .flatMap(line => line.split(/\s+/))
                     .filter(d => d.length > 0)
                     : [];
-
-                console.log('파싱된 디바이스:', devices);
 
                 self.postMessage({
                     type: 'listDevices',
@@ -516,8 +494,6 @@ self.addEventListener('message', async function (e) {
                 });
             }
         } else if (type === 'testDevice') {
-            console.log('=== 디바이스 테스트 시작 ===');
-
             try {
                 const { pdfData, device, outputFile } = data;
                 const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
@@ -537,8 +513,6 @@ self.addEventListener('message', async function (e) {
                     'input.pdf'
                 ];
 
-                console.log(`${device} 명령 실행:`, args.join(' '));
-
                 try {
                     moduleInstance.callMain(args);
                 } catch (error) {
@@ -549,8 +523,6 @@ self.addEventListener('message', async function (e) {
 
                 // 생성된 파일 확인
                 const files = moduleInstance.FS.readdir('/');
-                console.log('생성된 파일 목록:', files);
-
                 const outputFiles = files.filter(f =>
                     f.endsWith('.tif') ||
                     f.endsWith('.psd') ||
@@ -559,11 +531,7 @@ self.addEventListener('message', async function (e) {
                 );
 
                 if (outputFiles.length > 0) {
-                    console.log(`✅ ${device} 성공! 생성된 파일:`, outputFiles);
-
-                    // 첫 번째 파일의 크기 확인
                     const fileData = moduleInstance.FS.readFile(outputFiles[0]);
-                    console.log(`파일 크기: ${fileData.length} bytes`);
 
                     self.postMessage({
                         type: 'testDevice',
@@ -574,7 +542,6 @@ self.addEventListener('message', async function (e) {
                         fileSize: fileData.length
                     });
                 } else {
-                    console.log(`❌ ${device} 파일 생성 실패`);
                     self.postMessage({
                         type: 'testDevice',
                         requestId: requestId,
