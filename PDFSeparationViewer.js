@@ -1264,11 +1264,14 @@ export class PDFSeparationViewer {
                 this.updateSelectAllCheckbox();
             });
 
-            // 레이블 생성 (CMYK와 동일한 스타일)
+            // 레이블 생성 (CMYK와 동일한 스타일 + 별색 고유 색상)
             const label = document.createElement('label');
             label.htmlFor = checkbox.id;
             label.className = 'color-label spot-color';
             label.textContent = colorName;
+            const spotRgb = getSpotColorRGB(colorName);
+            label.style.backgroundColor = `rgba(${spotRgb.r}, ${spotRgb.g}, ${spotRgb.b}, 0.15)`;
+            label.style.backgroundImage = `linear-gradient(to right, rgb(${spotRgb.r}, ${spotRgb.g}, ${spotRgb.b}), rgb(${spotRgb.r}, ${spotRgb.g}, ${spotRgb.b}))`;
 
             // 비율 표시 요소 생성
             const ratioSpan = document.createElement('span');

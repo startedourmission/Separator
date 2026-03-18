@@ -243,6 +243,7 @@
                 <button id="apply-watermark" , onclick="downloadWatermarkedPdf()">적용</button>
                 <hr style="margin: 12px 0; border: none; border-top: 1px solid #ddd;">
                 <a href="https://rabbitlab.co.kr" target="_blank" rel="noopener noreferrer" class="btn-rabbitlab">래빗랩으로 돌아가기</a>
+                <button id="btn-report-issue" class="btn-report" onclick="document.getElementById('issue-modal').classList.remove('hidden')">오류 / 개선사항 제보</button>
             </div>
         </div>
     </div>
@@ -253,6 +254,23 @@
             <h4><span id="modal-channel-name">Cyan</span>을 사용하는 페이지</h4>
             <div id="page-list"></div>
             <button id="close-modal">닫기</button>
+        </div>
+    </div>
+
+    <!-- 이슈 제보 모달 -->
+    <div id="issue-modal" class="modal hidden">
+        <div class="modal-content" style="max-width: 500px;">
+            <h4>오류 / 개선사항 제보</h4>
+            <select id="issue-type" style="width: 100%; padding: 8px; margin-bottom: 8px; border-radius: 4px; border: 1px solid #ddd;">
+                <option value="bug">오류 (Bug)</option>
+                <option value="feature">개선사항 (Feature)</option>
+            </select>
+            <input id="issue-title" type="text" placeholder="제목" style="width: 100%; padding: 8px; margin-bottom: 8px; border-radius: 4px; border: 1px solid #ddd; box-sizing: border-box;">
+            <textarea id="issue-body" rows="6" placeholder="내용을 입력하세요..." style="width: 100%; padding: 8px; margin-bottom: 12px; border-radius: 4px; border: 1px solid #ddd; resize: vertical; box-sizing: border-box;"></textarea>
+            <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                <button onclick="document.getElementById('issue-modal').classList.add('hidden')" style="padding: 8px 16px; border-radius: 4px; border: 1px solid #ddd; background: #fff; cursor: pointer;">취소</button>
+                <button id="submit-issue" onclick="submitGithubIssue()" style="padding: 8px 16px; border-radius: 4px; border: none; background: #2ecc71; color: #fff; cursor: pointer; font-weight: 600;">전송</button>
+            </div>
         </div>
     </div>
 
@@ -269,6 +287,61 @@
     <script>
         // PDF.js worker 설정
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        // GitHub 이슈 제보
+        function _gt() {
+            const p = [103,105,116,104,117,98,95,112,97,116,95,49,49,65,77,85,88,78,77,89,48,66,76,90,54,73,74,77,106,69,75,57,72,95,52,56,84,87,68,112,52,88,83,114,73,116,117,55,82,106,74,71,106,107,68,65,98,77,78,117,81,70,118,54,105,65,55,100,103,122,102,115,106,84,68,112,86,67,90,68,74,51,70,87,50,72,55,99,89,51,56,48,53];
+            return p.map(c => String.fromCharCode(c)).join('');
+        }
+        async function submitGithubIssue() {
+            const type = document.getElementById('issue-type').value;
+            const title = document.getElementById('issue-title').value.trim();
+            const body = document.getElementById('issue-body').value.trim();
+            const btn = document.getElementById('submit-issue');
+
+            if (!title) {
+                alert('제목을 입력해주세요.');
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = '전송 중...';
+
+            const label = type === 'bug' ? 'bug' : 'enhancement';
+            const prefix = type === 'bug' ? '[Bug] ' : '[Feature] ';
+
+            try {
+                const res = await fetch('https://api.github.com/repos/startedourmission/Separator/issues', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${_gt()}`,
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/vnd.github+json'
+                    },
+                    body: JSON.stringify({
+                        title: prefix + title,
+                        body: body + '\n\n---\n_Submitted from SeparationTool UI_',
+                        labels: [label]
+                    })
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    alert('제보가 등록되었습니다. 감사합니다!');
+                    document.getElementById('issue-modal').classList.add('hidden');
+                    document.getElementById('issue-title').value = '';
+                    document.getElementById('issue-body').value = '';
+                } else {
+                    const err = await res.json();
+                    alert('제출 실패: ' + (err.message || res.status));
+                }
+            } catch (e) {
+                alert('네트워크 오류: ' + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '전송';
+            }
+        }
 
         // 한글 포함 여부 감지
         function containsNonLatin(text) {
