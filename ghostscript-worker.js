@@ -359,6 +359,49 @@ self.addEventListener('message', async function (e) {
                     let match = file.match(/plate\d*\((.+?)\)\.tif/);
                     if (match) {
                         colorName = match[1];
+                        // %XX URL 인코딩 패턴이 포함되면 바이트로 변환 후 EUC-KR 디코딩
+                        if (/%[0-9A-Fa-f]{2}/.test(colorName)) {
+                            try {
+                                const bytes = [];
+                                let i = 0;
+                                while (i < colorName.length) {
+                                    if (colorName[i] === '%' && i + 2 < colorName.length) {
+                                        bytes.push(parseInt(colorName.substring(i + 1, i + 3), 16));
+                                        i += 3;
+                                    } else {
+                                        bytes.push(colorName.charCodeAt(i));
+                                        i++;
+                                    }
+                                }
+                                const byteArray = new Uint8Array(bytes);
+                                // EUC-KR 디코딩 시도
+                                try {
+                                    const decoded = new TextDecoder('euc-kr', { fatal: true }).decode(byteArray);
+                                    console.log(`[tiffsep worker] 별색 이름 EUC-KR 디코딩: "${colorName}" → "${decoded}"`);
+                                    colorName = decoded;
+                                } catch {
+                                    // UTF-8 시도
+                                    try {
+                                        colorName = new TextDecoder('utf-8', { fatal: true }).decode(byteArray);
+                                    } catch {
+                                        // 실패 시 원본 유지
+                                    }
+                                }
+                            } catch (e) {
+                                console.warn('[tiffsep worker] 별색 이름 디코딩 실패:', e);
+                            }
+                        }
+                        // 비ASCII 문자가 직접 포함된 경우 (URL 인코딩 없이)
+                        else if (/[^\x00-\x7F]/.test(colorName)) {
+                            try {
+                                const bytes = new Uint8Array([...colorName].map(c => c.charCodeAt(0)));
+                                const decoded = new TextDecoder('euc-kr', { fatal: true }).decode(bytes);
+                                console.log(`[tiffsep worker] 별색 이름 EUC-KR 디코딩: "${colorName}" → "${decoded}"`);
+                                colorName = decoded;
+                            } catch {
+                                // 디코딩 실패 시 원본 유지
+                            }
+                        }
                     }
 
                     // 패턴 2: plateCyan.tif 등 (%s 패턴 결과)

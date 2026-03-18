@@ -1190,8 +1190,43 @@ export class PDFSeparationViewer {
                 let match;
                 while ((match = separationRegex.exec(text)) !== null) {
                     let name = match[1];
-                    // PDF Name 이스케이프 처리 (#20 -> space)
-                    name = name.replace(/#([0-9A-Fa-f]{2})/g, (m, code) => String.fromCharCode(parseInt(code, 16)));
+                    // PDF Name 이스케이프 처리 (#XX → 바이트)
+                    // 비ASCII 바이트가 포함되면 EUC-KR 디코딩 시도
+                    const hasEscapedBytes = /#[0-9A-Fa-f]{2}/.test(name);
+                    if (hasEscapedBytes) {
+                        // #XX를 바이트 배열로 변환
+                        const bytes = [];
+                        let i = 0;
+                        while (i < name.length) {
+                            if (name[i] === '#' && i + 2 < name.length) {
+                                bytes.push(parseInt(name.substring(i + 1, i + 3), 16));
+                                i += 3;
+                            } else {
+                                bytes.push(name.charCodeAt(i));
+                                i++;
+                            }
+                        }
+                        const byteArray = new Uint8Array(bytes);
+                        // 비ASCII 바이트가 있으면 EUC-KR 디코딩 시도
+                        const hasNonAscii = bytes.some(b => b > 127);
+                        if (hasNonAscii) {
+                            try {
+                                const euckrDecoder = new TextDecoder('euc-kr', { fatal: true });
+                                name = euckrDecoder.decode(byteArray);
+                            } catch {
+                                // EUC-KR 실패 시 UTF-8 시도
+                                try {
+                                    const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+                                    name = utf8Decoder.decode(byteArray);
+                                } catch {
+                                    // 둘 다 실패하면 Latin-1 폴백
+                                    name = String.fromCharCode(...bytes);
+                                }
+                            }
+                        } else {
+                            name = String.fromCharCode(...bytes);
+                        }
+                    }
 
                     if (name !== 'All' && name !== 'None' && !['Cyan', 'Magenta', 'Yellow', 'Black'].includes(name)) {
                         spotColors.add(name);
@@ -1653,6 +1688,11 @@ export class PDFSeparationViewer {
                     const spotRatios = this.calculateSpotColorRatios();
                     if (spotRatios) {
                         this.updateSpotColorRatios(spotRatios);
+                        // 별색 데이터가 갱신되면 CMYK 비율도 재계산 (별색 기여분 감산 반영)
+                        const cmykRatios = this.calculateTotalChannelRatios();
+                        if (cmykRatios) {
+                            this.updateChannelRatios(cmykRatios);
+                        }
                     }
                 } else {
                     console.warn('[별색 디버그] tiffsep 결과가 비어있음 - CMYK fallback으로 전환');
@@ -2365,11 +2405,34 @@ export class PDFSeparationViewer {
             return null;
         }
 
+        let cyanRatio = (this.totalChannelCounts.cyan / this.totalPixelCount) * 100;
+        let magentaRatio = (this.totalChannelCounts.magenta / this.totalPixelCount) * 100;
+        let yellowRatio = (this.totalChannelCounts.yellow / this.totalPixelCount) * 100;
+        let blackRatio = (this.totalChannelCounts.black / this.totalPixelCount) * 100;
+
+        // 별색이 있으면 CMY에서 별색의 CMYK 근사 기여분을 감산
+        // (tiff32nc 스캔은 별색을 CMY로 근사 변환하여 포함하므로)
+        if (this.spotColors && this.spotColors.length > 0 && this.totalSpotPixelCount > 0) {
+            for (const colorName of this.spotColors) {
+                const spotCount = this.totalChannelCounts[colorName] || 0;
+                const spotCoverage = spotCount / this.totalSpotPixelCount; // 0~1
+                const rgb = getSpotColorRGB(colorName);
+                // 별색의 CMY 기여분: RGB가 낮을수록 CMY가 높음
+                const spotC = (255 - rgb.r) / 255; // 0~1
+                const spotM = (255 - rgb.g) / 255;
+                const spotY = (255 - rgb.b) / 255;
+                // 별색 커버리지만큼 CMY 비율에서 감산
+                cyanRatio = Math.max(0, cyanRatio - spotCoverage * spotC * 100);
+                magentaRatio = Math.max(0, magentaRatio - spotCoverage * spotM * 100);
+                yellowRatio = Math.max(0, yellowRatio - spotCoverage * spotY * 100);
+            }
+        }
+
         return {
-            cyan: (this.totalChannelCounts.cyan / this.totalPixelCount) * 100,
-            magenta: (this.totalChannelCounts.magenta / this.totalPixelCount) * 100,
-            yellow: (this.totalChannelCounts.yellow / this.totalPixelCount) * 100,
-            black: (this.totalChannelCounts.black / this.totalPixelCount) * 100
+            cyan: cyanRatio,
+            magenta: magentaRatio,
+            yellow: yellowRatio,
+            black: blackRatio
         };
     }
 
@@ -2825,10 +2888,28 @@ export class PDFSeparationViewer {
         const pageList = [];
         for (const pageNum in this.pageChannelData) {
             const pageData = this.pageChannelData[pageNum];
-            const usage = pageData[channel];
-            if (usage > 0) {
-                const ratio = (usage / pageData.totalPixels) * 100;
-                pageList.push({ pageNum: parseInt(pageNum), usage, ratio });
+            let ratio = (pageData[channel] / pageData.totalPixels) * 100;
+
+            // 별색이 있으면 CMY에서 별색 기여분 감산
+            if (['cyan', 'magenta', 'yellow'].includes(channel) &&
+                this.spotColors && this.spotColors.length > 0 &&
+                this.pageSpotColorData[pageNum]) {
+                const spotPageData = this.pageSpotColorData[pageNum];
+                for (const colorName of this.spotColors) {
+                    const spotUsage = spotPageData[colorName] || 0;
+                    if (spotUsage > 0 && spotPageData.totalPixels > 0) {
+                        const spotCoverage = spotUsage / spotPageData.totalPixels;
+                        const rgb = getSpotColorRGB(colorName);
+                        const contribution = channel === 'cyan' ? (255 - rgb.r) / 255
+                            : channel === 'magenta' ? (255 - rgb.g) / 255
+                            : (255 - rgb.b) / 255;
+                        ratio = Math.max(0, ratio - spotCoverage * contribution * 100);
+                    }
+                }
+            }
+
+            if (ratio > 0.1) {
+                pageList.push({ pageNum: parseInt(pageNum), usage: pageData[channel], ratio });
             }
         }
 
