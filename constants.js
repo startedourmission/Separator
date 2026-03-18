@@ -46,6 +46,21 @@ export const PANTONE_RGB_MAP = {
     'PANTONE 146 C': { r: 179, g: 127, b: 31 },   // 금색 (MUST HAVE / 원칙)
     'PANTONE 146C': { r: 179, g: 127, b: 31 },
 
+    // 추가 팬톤 색상
+    'PANTONE 285 C': { r: 0, g: 114, b: 198 },     // 파랑
+    'PANTONE 285C': { r: 0, g: 114, b: 198 },
+    'PANTONE 717 C': { r: 227, g: 120, b: 18 },    // 오렌지
+    'PANTONE 717C': { r: 227, g: 120, b: 18 },
+    'PANTONE 2228 C': { r: 0, g: 130, b: 100 },    // 청록
+    'PANTONE 2228C': { r: 0, g: 130, b: 100 },
+    'PANTONE 2925 C': { r: 0, g: 159, b: 227 },    // 하늘색 (중복이지만 명시)
+    'PANTONE 3534 C': { r: 0, g: 160, b: 175 },    // 틸
+    'PANTONE 3534C': { r: 0, g: 160, b: 175 },
+    'PANTONE 3538 C': { r: 0, g: 137, b: 154 },    // 어두운 틸
+    'PANTONE 3538C': { r: 0, g: 137, b: 154 },
+    'PANTONE 3556 C': { r: 212, g: 50, b: 88 },    // 핑크 레드
+    'PANTONE 3556C': { r: 212, g: 50, b: 88 },
+
     // 한글 커스텀 별색 이름
     '우아한 형제들 메인 색상': { r: 0, g: 155, b: 145 }  // PANTONE 7710C 계열
 };
