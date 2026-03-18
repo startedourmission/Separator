@@ -282,8 +282,7 @@ self.addEventListener('message', async function (e) {
                 moduleInstance.FS.writeFile("input.pdf", new Uint8Array(pdfData));
 
                 // tiffsep 디바이스로 렌더링 (분판용)
-                // WASM 메모리 제한으로 고DPI에서 실패할 수 있으므로 최대 150 DPI로 제한
-                const tiffsepDpi = 72; // 디버깅: 최저 DPI로 테스트
+                const tiffsepDpi = Math.min(dpi || 300, 300);
                 console.log(`[tiffsep worker] DPI: 요청=${dpi}, 실제 사용=${tiffsepDpi}`);
                 const args = [
                     '-dNOPAUSE',

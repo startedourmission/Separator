@@ -1645,6 +1645,15 @@ export class PDFSeparationViewer {
                     }
                     tiffsepSuccessful = true;
                     console.log('[별색 디버그] tiffsep 성공! spotColorData 키:', Object.keys(spotColorData));
+
+                    // 별색 비율 누적 및 UI 업데이트
+                    const tiffsepWidth = imageData.width;
+                    const tiffsepHeight = imageData.height;
+                    this.accumulateSpotColorData(spotColorData, pageNum, tiffsepWidth, tiffsepHeight);
+                    const spotRatios = this.calculateSpotColorRatios();
+                    if (spotRatios) {
+                        this.updateSpotColorRatios(spotRatios);
+                    }
                 } else {
                     console.warn('[별색 디버그] tiffsep 결과가 비어있음 - CMYK fallback으로 전환');
                 }
@@ -2275,21 +2284,22 @@ export class PDFSeparationViewer {
             };
         }
 
-        // 각 채널에서 잉크가 있는 픽셀 수 카운트 (0이 아닌 값)
+        // 각 채널에서 잉크가 있는 픽셀 수 카운트 (threshold 이상)
+        const threshold = 5; // 노이즈 제거
         for (let i = 0; i < totalPixels; i++) {
-            if (cyan[i] > 0) {
+            if (cyan[i] > threshold) {
                 this.totalChannelCounts.cyan++;
                 this.pageChannelData[pageNum].cyan++;
             }
-            if (magenta[i] > 0) {
+            if (magenta[i] > threshold) {
                 this.totalChannelCounts.magenta++;
                 this.pageChannelData[pageNum].magenta++;
             }
-            if (yellow[i] > 0) {
+            if (yellow[i] > threshold) {
                 this.totalChannelCounts.yellow++;
                 this.pageChannelData[pageNum].yellow++;
             }
-            if (black[i] > 0) {
+            if (black[i] > threshold) {
                 this.totalChannelCounts.black++;
                 this.pageChannelData[pageNum].black++;
             }
@@ -2306,6 +2316,12 @@ export class PDFSeparationViewer {
 
         const totalPixels = width * height;
 
+        // 별색 전용 픽셀 카운트 추적
+        if (!this.totalSpotPixelCount) {
+            this.totalSpotPixelCount = 0;
+        }
+        this.totalSpotPixelCount += totalPixels;
+
         // 페이지별 별색 데이터 초기화
         if (!this.pageSpotColorData[pageNum]) {
             this.pageSpotColorData[pageNum] = {
@@ -2313,7 +2329,7 @@ export class PDFSeparationViewer {
             };
         }
 
-        // 각 별색에 대해 잉크 사용 픽셀 카운트
+        // 각 별색에 대해 잉크량 합산
         for (const colorName of this.spotColors) {
             const channelData = spotColorChannels[colorName];
             if (!channelData) continue;
@@ -2328,9 +2344,10 @@ export class PDFSeparationViewer {
                 this.totalChannelCounts[colorName] = 0;
             }
 
-            // 잉크가 있는 픽셀 수 카운트 (0이 아닌 값)
+            // 잉크가 있는 픽셀 수 카운트 (threshold 이상)
+            const threshold = 5;
             for (let i = 0; i < totalPixels; i++) {
-                if (channelData[i] > 0) {
+                if (channelData[i] > threshold) {
                     this.totalChannelCounts[colorName]++;
                     this.pageSpotColorData[pageNum][colorName]++;
                 }
@@ -2358,16 +2375,17 @@ export class PDFSeparationViewer {
 
     calculateSpotColorRatios() {
         // 전체 페이지의 누적 데이터로 별색 비율 계산
-        if (this.totalPixelCount === 0 || !this.spotColors || this.spotColors.length === 0) {
+        const denominator = this.totalSpotPixelCount || this.totalPixelCount;
+        if (denominator === 0 || !this.spotColors || this.spotColors.length === 0) {
             return null;
         }
 
         const ratios = {};
 
-        // 각 별색의 사용 비율을 백분율로 계산
+        // 각 별색의 잉크 커버리지를 백분율로 계산
         for (const colorName of this.spotColors) {
             const count = this.totalChannelCounts[colorName] || 0;
-            ratios[colorName] = (count / this.totalPixelCount) * 100;
+            ratios[colorName] = (count / denominator) * 100;
         }
 
         return ratios;
