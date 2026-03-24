@@ -242,6 +242,8 @@
                     placeholder="user1@example.com&#13;&#10;user2@example.com&#13;&#10;user3@example.com"></textarea>
                 <button id="apply-watermark" , onclick="downloadWatermarkedPdf()">적용</button>
                 <hr style="margin: 12px 0; border: none; border-top: 1px solid #ddd;">
+                <button id="btn-style-finder" class="tool-btn" style="width: 100%;">텍스트 스타일 분석</button>
+                <hr style="margin: 12px 0; border: none; border-top: 1px solid #ddd;">
                 <a href="https://rabbitlab.co.kr" target="_blank" rel="noopener noreferrer" class="btn-rabbitlab">래빗랩으로 돌아가기</a>
                 <button id="btn-report-issue" class="btn-report" onclick="document.getElementById('issue-modal').classList.remove('hidden')">오류 / 개선사항 제보</button>
             </div>
@@ -272,6 +274,11 @@
                 <button id="submit-issue" onclick="submitGithubIssue()" style="padding: 8px 16px; border-radius: 4px; border: none; background: #2ecc71; color: #fff; cursor: pointer; font-weight: 600;">전송</button>
             </div>
         </div>
+    </div>
+
+    <!-- 스타일 분석 모달 -->
+    <div id="style-finder-modal" class="modal hidden">
+        <div class="modal-content style-finder-modal-content"></div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.js"></script>

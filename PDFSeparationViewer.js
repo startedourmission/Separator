@@ -1021,6 +1021,9 @@ export class PDFSeparationViewer {
                 // 메타데이터 추출 (비동기)
                 this.extractPDFMetadata();
 
+                // 스타일 분석기 초기화
+                if (this.styleFinder) this.styleFinder.reset();
+
 
             } else {
                 throw new Error('PDF 로딩 실패');
