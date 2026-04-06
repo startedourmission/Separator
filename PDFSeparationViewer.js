@@ -1398,7 +1398,7 @@ export class PDFSeparationViewer {
         }
 
         // 포인트 -> mm 변환 (1 pt = 0.352778 mm)
-        const ptToMm = 0.352778;
+        const ptToMm = 25.4 / 72;
 
         const mediaW = (metadata.mediaBox.width * ptToMm).toFixed(2);
         const mediaH = (metadata.mediaBox.height * ptToMm).toFixed(2);
@@ -1435,7 +1435,7 @@ export class PDFSeparationViewer {
         const pageNum = this.currentPage;
         const metadata = this.pageMetadata.get(pageNum);
         if (metadata && metadata.trimBox) {
-            const ptToMm = 0.352778;
+            const ptToMm = 25.4 / 72;
             trimHeightMm = metadata.trimBox.height * ptToMm;
         }
 
@@ -1453,15 +1453,23 @@ export class PDFSeparationViewer {
                 return;
             }
 
-            // x 변환 비율 재계산 (최신 캔버스/메타데이터 기준)
-            const pageObj = this.scrollManager.pageElements.get(pageNum);
-            if (!pageObj || !pageObj.canvas || !metadata) return;
-            const pxToMm = (metadata.mediaBox.width * 0.352778) / pageObj.canvas.width;
-
             const sortedMarks = [...this.finalMarks].sort((a, b) => a - b);
             const dists = [];
-            for (let i = 1; i < sortedMarks.length; i++) {
-                dists.push((sortedMarks[i] - sortedMarks[i - 1]) * pxToMm);
+
+            if (this.cropMarksInPt) {
+                // 벡터 감지: finalMarks가 pt 단위 → 직접 mm 변환 (오차 0)
+                const ptToMmConv = 25.4 / 72;
+                for (let i = 1; i < sortedMarks.length; i++) {
+                    dists.push((sortedMarks[i] - sortedMarks[i - 1]) * ptToMmConv);
+                }
+            } else {
+                // 이미지 폴백: finalMarks가 캔버스 px 단위
+                const pageObj = this.scrollManager.pageElements.get(pageNum);
+                if (!pageObj || !pageObj.canvas || !metadata) return;
+                const pxToMm = (metadata.mediaBox.width * (25.4 / 72)) / pageObj.canvas.width;
+                for (let i = 1; i < sortedMarks.length; i++) {
+                    dists.push((sortedMarks[i] - sortedMarks[i - 1]) * pxToMm);
+                }
             }
 
             if (sortedMarks.length === 6) {
@@ -1776,31 +1784,235 @@ export class PDFSeparationViewer {
         }
     }
 
-    // 재단선 자동 감지 (Image Processing)
+    // 재단선 자동 감지 (벡터 기반 — PDF path 좌표 직접 추출)
     async detectCropMarks() {
-        this.showLoading('재단선 분석 중 (정밀 모드)...');
+        this.showLoading('재단선 분석 중...');
         const pageNum = this.currentPage;
         const pageObj = this.scrollManager.pageElements.get(pageNum);
-        // 메타데이터가 없는 경우(이미지 파일 등)를 위한 Fallback
-        if (!this.pageMetadata.has(pageNum)) {
-            // 임시 메타데이터 생성 (캔버스 크기 기준)
-            if (pageObj && pageObj.canvas) {
-                const widthPt = pageObj.canvas.width * (72 / this.renderDPI); // px -> pt approximation
-                const heightPt = pageObj.canvas.height * (72 / this.renderDPI);
-                this.pageMetadata.set(pageNum, {
-                    mediaBox: { x: 0, y: 0, width: widthPt, height: heightPt },
-                    trimBox: { x: 0, y: 0, width: widthPt, height: heightPt }, // Default to full size
-                    cropBox: { x: 0, y: 0, width: widthPt, height: heightPt }
-                });
+        const metadata = this.pageMetadata.get(pageNum);
+
+        if (!pageObj || !pageObj.canvas) {
+            alert('현재 페이지를 찾을 수 없습니다.');
+            this.hideLoading();
+            return;
+        }
+
+        // 벡터 분석 시도 → 실패 시 이미지 폴백
+        let vectorResult = null;
+        try {
+            vectorResult = await this._detectCropMarksVector(pageNum, metadata);
+        } catch (e) {
+            console.warn('벡터 재단선 감지 실패, 이미지 폴백:', e);
+        }
+
+        if (vectorResult && vectorResult.length >= 4) {
+            // 벡터 결과: 포인트(pt) 단위 x 좌표 배열
+            this.cropMarksInPt = true; // pt 단위 플래그
+            this.allCandidates = vectorResult.map(x => ({ x }));
+            this.finalMarks = vectorResult;
+        } else {
+            // 이미지 기반 폴백
+            this.cropMarksInPt = false;
+            this._detectCropMarksImage(pageNum, pageObj, metadata);
+            if (!this.finalMarks || this.finalMarks.length < 4) return;
+        }
+
+        this.renderCropMarkers();
+        this.calculateCoverSpread();
+        this.showLoading(`분석 완료! (${this.cropMarksInPt ? '벡터' : '이미지'} 감지)`, '');
+        setTimeout(() => this.hideLoading(), 1000);
+    }
+
+    // 벡터 기반 재단선 감지: pdf.js operator list에서 수직선 추출
+    async _detectCropMarksVector(pageNum, metadata) {
+        if (!this.currentPDFData) return null;
+
+        const pdf = await pdfjsLib.getDocument({ data: this.currentPDFData.slice(0) }).promise;
+        const page = await pdf.getPage(pageNum);
+        const ops = await page.getOperatorList();
+        const OPS = pdfjsLib.OPS;
+
+        const pageHeight = metadata ? metadata.mediaBox.height : 842; // A4 기본값
+        const pageWidth = metadata ? metadata.mediaBox.width : 595;
+
+        // CTM(Current Transformation Matrix) 스택 추적
+        const ctmStack = [];
+        let ctm = [1, 0, 0, 1, 0, 0]; // identity
+
+        // 수직선 수집: moveTo→lineTo에서 x 동일, y 변화가 있는 선분
+        const verticalLines = [];
+        let currentPath = []; // {op, x, y} 배열
+
+        const applyCtm = (x, y) => {
+            return [
+                ctm[0] * x + ctm[2] * y + ctm[4],
+                ctm[1] * x + ctm[3] * y + ctm[5]
+            ];
+        };
+
+        for (let i = 0; i < ops.fnArray.length; i++) {
+            const fn = ops.fnArray[i];
+            const args = ops.argsArray[i];
+
+            switch (fn) {
+                case OPS.save:
+                    ctmStack.push([...ctm]);
+                    break;
+                case OPS.restore:
+                    if (ctmStack.length > 0) ctm = ctmStack.pop();
+                    break;
+                case OPS.transform:
+                    if (args && args.length >= 6) {
+                        const [a, b, c, d, e, f] = args;
+                        const newCtm = [
+                            ctm[0] * a + ctm[2] * b,
+                            ctm[1] * a + ctm[3] * b,
+                            ctm[0] * c + ctm[2] * d,
+                            ctm[1] * c + ctm[3] * d,
+                            ctm[0] * e + ctm[2] * f + ctm[4],
+                            ctm[1] * e + ctm[3] * f + ctm[5]
+                        ];
+                        ctm = newCtm;
+                    }
+                    break;
+                case OPS.constructPath: {
+                    const [subOps, subArgs] = args;
+                    let argIdx = 0;
+                    for (const subOp of subOps) {
+                        if (subOp === OPS.moveTo) {
+                            const [tx, ty] = applyCtm(subArgs[argIdx], subArgs[argIdx + 1]);
+                            currentPath = [{ op: 'M', x: tx, y: ty }];
+                            argIdx += 2;
+                        } else if (subOp === OPS.lineTo) {
+                            const [tx, ty] = applyCtm(subArgs[argIdx], subArgs[argIdx + 1]);
+                            currentPath.push({ op: 'L', x: tx, y: ty });
+                            argIdx += 2;
+                        } else if (subOp === OPS.curveTo) {
+                            argIdx += 6;
+                        } else if (subOp === OPS.curveTo2) {
+                            argIdx += 4;
+                        } else if (subOp === OPS.curveTo3) {
+                            argIdx += 2;
+                        } else if (subOp === OPS.rectangle) {
+                            argIdx += 4;
+                        } else if (subOp === OPS.closePath) {
+                            // no args
+                        }
+                    }
+                    break;
+                }
+                case OPS.stroke:
+                case OPS.fillStroke:
+                case OPS.closeStroke:
+                case OPS.closeFillStroke: {
+                    // 현재 path에서 수직선 추출
+                    for (let j = 1; j < currentPath.length; j++) {
+                        const p0 = currentPath[j - 1];
+                        const p1 = currentPath[j];
+                        const dx = Math.abs(p1.x - p0.x);
+                        const dy = Math.abs(p1.y - p0.y);
+
+                        // 수직선 조건: x 변화 < 0.5pt, y 변화 3~30pt (재단선 길이)
+                        if (dx < 0.5 && dy >= 3 && dy <= 30) {
+                            const xCoord = (p0.x + p1.x) / 2;
+                            const maxY = Math.max(p0.y, p1.y);
+                            const minY = Math.min(p0.y, p1.y);
+
+                            // 페이지 가장자리 근처(상단/하단)에 있는 선만
+                            const nearTop = minY < 20 || maxY > pageHeight - 20;
+                            const nearBottom = minY < 20;
+                            if (nearTop || nearBottom) {
+                                verticalLines.push({
+                                    x: xCoord,
+                                    y: minY,
+                                    length: dy,
+                                    nearEdge: true
+                                });
+                            }
+                        }
+                    }
+                    currentPath = [];
+                    break;
+                }
+                case OPS.endPath:
+                    currentPath = [];
+                    break;
             }
         }
 
-        const metadata = this.pageMetadata.get(pageNum);
+        page.cleanup();
+        pdf.destroy();
 
-        if (!pageObj || !pageObj.canvas || !metadata) {
-            alert('현재 페이지의 이미지 또는 메타데이터를 찾을 수 없습니다.');
-            this.hideLoading();
-            return;
+        if (verticalLines.length < 4) return null;
+
+        // x 좌표 기준 클러스터링 (1pt 이내 병합)
+        verticalLines.sort((a, b) => a.x - b.x);
+        const clusters = [];
+        let cluster = [verticalLines[0]];
+
+        for (let i = 1; i < verticalLines.length; i++) {
+            if (verticalLines[i].x - verticalLines[i - 1].x <= 1) {
+                cluster.push(verticalLines[i]);
+            } else {
+                clusters.push(cluster);
+                cluster = [verticalLines[i]];
+            }
+        }
+        clusters.push(cluster);
+
+        // 각 클러스터의 중심 x좌표 (pt)
+        let candidates = clusters.map(c => {
+            const avgX = c.reduce((s, l) => s + l.x, 0) / c.length;
+            return avgX;
+        });
+
+        if (candidates.length < 4) return null;
+
+        // 6점 또는 4점 선별 (기존 로직과 동일)
+        candidates.sort((a, b) => a - b);
+        const xMin = candidates[0];
+        const xMax = candidates[candidates.length - 1];
+        const mid = (xMin + xMax) / 2;
+        const deadZonePt = 5; // 5pt 데드존
+
+        const leftGroup = candidates.filter(c => c < mid - deadZonePt);
+        const rightGroup = candidates.filter(c => c > mid + deadZonePt);
+
+        let finalMarks = [];
+        if (leftGroup.length >= 2 && rightGroup.length >= 2) {
+            const x0 = leftGroup[0];
+            const x5 = rightGroup[rightGroup.length - 1];
+            const x2 = leftGroup[leftGroup.length - 1];
+            const x3 = rightGroup[0];
+
+            const midLeft = leftGroup.filter(c => c > x0 + 1 && c < x2 - 1);
+            const midRight = rightGroup.filter(c => c > x3 + 1 && c < x5 - 1);
+
+            const x1 = midLeft.length > 0 ? midLeft[Math.floor(midLeft.length / 2)] : leftGroup[Math.floor(leftGroup.length / 2)];
+            const x4 = midRight.length > 0 ? midRight[Math.floor(midRight.length / 2)] : rightGroup[Math.floor(rightGroup.length / 2)];
+
+            finalMarks = [x0, x1, x2, x3, x4, x5];
+        }
+
+        if (finalMarks.length < 6 && candidates.length >= 4) {
+            finalMarks = [candidates[0], candidates[1], candidates[candidates.length - 2], candidates[candidates.length - 1]];
+        }
+
+        return finalMarks.length >= 4 ? finalMarks : null;
+    }
+
+    // 이미지 기반 폴백 (벡터 감지 실패 시)
+    _detectCropMarksImage(pageNum, pageObj, metadata) {
+        if (!this.pageMetadata.has(pageNum)) {
+            if (pageObj && pageObj.canvas) {
+                const widthPt = pageObj.canvas.width * (72 / this.renderDPI);
+                const heightPt = pageObj.canvas.height * (72 / this.renderDPI);
+                this.pageMetadata.set(pageNum, {
+                    mediaBox: { x: 0, y: 0, width: widthPt, height: heightPt },
+                    trimBox: { x: 0, y: 0, width: widthPt, height: heightPt },
+                    cropBox: { x: 0, y: 0, width: widthPt, height: heightPt }
+                });
+            }
         }
 
         const canvas = pageObj.canvas;
@@ -1808,7 +2020,6 @@ export class PDFSeparationViewer {
         const width = canvas.width;
         const height = canvas.height;
 
-        // 1. 상단 50px 정밀 스캔 (사용자 요청에 따라 범위를 좁힘)
         const scanMaxY = Math.min(height, 50);
         const imageData = ctx.getImageData(0, 0, width, scanMaxY);
         const pixels = imageData.data;
@@ -1818,57 +2029,41 @@ export class PDFSeparationViewer {
         const colTopY = new Array(width).fill(999);
 
         const darkThreshold = 160;
-        const extremeDarkThreshold = 75; // 헤어라인급 초박형 선 감지용 (밝기 0~255 기준)
+        const extremeDarkThreshold = 75;
 
         for (let x = 0; x < width; x++) {
             for (let y = 0; y < scanMaxY; y++) {
                 const idx = (y * width + x) * 4;
                 const brightness = (pixels[idx] + pixels[idx + 1] + pixels[idx + 2]) / 3;
-
                 if (brightness < darkThreshold) {
                     colBlackCount[x]++;
                     if (colTopY[x] === 999) colTopY[x] = y;
                 }
-                if (brightness < colMinB[x]) {
-                    colMinB[x] = brightness;
-                }
+                if (brightness < colMinB[x]) colMinB[x] = brightness;
             }
         }
 
-        // 2. 후보 추출 (하이브리드 조건: 면적 비율 OR 최소 밝기)
         let rawCandidates = [];
         for (let x = 0; x < width; x++) {
-            // 조건: 세로 20px 이상 어두움(굵은 선) OR 아주 어두운 픽셀 존재(헤어라인)
-            // 상단 50px 내에서만 감지
             if ((colBlackCount[x] >= 20 || colMinB[x] <= extremeDarkThreshold) && colTopY[x] <= 50) {
-                rawCandidates.push({
-                    x,
-                    topY: colTopY[x],
-                    count: colBlackCount[x],
-                    minB: colMinB[x]
-                });
+                rawCandidates.push({ x, topY: colTopY[x], count: colBlackCount[x], minB: colMinB[x] });
             }
         }
 
-        // 3. 클러스터링 (5px 이내 병합)
         let candidates = [];
         if (rawCandidates.length > 0) {
             let group = [rawCandidates[0]];
             const processGroup = (g) => {
-                const avgX = g.reduce((s, c) => s + c.x, 0) / g.length;
-                const minTopY = Math.min(...g.map(c => c.topY));
-                const maxCount = Math.max(...g.map(c => c.count));
-                const minMinB = Math.min(...g.map(c => c.minB));
-                candidates.push({ x: avgX, topY: minTopY, count: maxCount, minB: minMinB });
+                const totalWeight = g.reduce((s, c) => s + (255 - c.minB) + c.count, 0);
+                const avgX = totalWeight > 0
+                    ? g.reduce((s, c) => s + c.x * ((255 - c.minB) + c.count), 0) / totalWeight
+                    : g.reduce((s, c) => s + c.x, 0) / g.length;
+                candidates.push({ x: avgX, topY: Math.min(...g.map(c => c.topY)), count: Math.max(...g.map(c => c.count)), minB: Math.min(...g.map(c => c.minB)) });
             };
-
             for (let i = 1; i < rawCandidates.length; i++) {
                 if (rawCandidates[i].x - rawCandidates[i - 1].x <= 5) {
                     group.push(rawCandidates[i]);
-                } else {
-                    processGroup(group);
-                    group = [rawCandidates[i]];
-                }
+                } else { processGroup(group); group = [rawCandidates[i]]; }
             }
             processGroup(group);
         }
@@ -1876,14 +2071,12 @@ export class PDFSeparationViewer {
         this.allCandidates = candidates;
 
         if (candidates.length < 4) {
-            alert(`재단선을 충분히 찾지 못했습니다. (후보: ${candidates.length}개)\n매우 얇은 헤어라인도 감지하도록 알고리즘이 개선되었으나, 파일 상단에 재단선이 보이지 않습니다.`);
+            alert(`재단선을 충분히 찾지 못했습니다. (후보: ${candidates.length}개)`);
             this.hideLoading();
             return;
         }
 
-        // 4. 상대적 위치 + 강도 기반 최종 선별 (6개 목표)
         candidates.sort((a, b) => a.x - b.x);
-
         let finalMarks = [];
         const xMin = candidates[0].x;
         const xMax = candidates[candidates.length - 1].x;
@@ -1892,46 +2085,23 @@ export class PDFSeparationViewer {
 
         const leftGroup = candidates.filter(c => c.x < midPx - deadZone);
         const rightGroup = candidates.filter(c => c.x > midPx + deadZone);
-
-        // 점수 계산 함수: 검정 픽셀 수와 선명도(낮은 밝기) 결합
-        const getScore = (c) => (c.count * 1) + (255 - c.minB) * 0.8;
+        const getScore = (c) => c.count + (255 - c.minB) * 0.8;
 
         if (leftGroup.length >= 2 && rightGroup.length >= 2) {
-            const x0 = leftGroup[0].x;
-            const x5 = rightGroup[rightGroup.length - 1].x;
-            const x2 = leftGroup[leftGroup.length - 1].x;
-            const x3 = rightGroup[0].x;
-
+            const x0 = leftGroup[0].x, x5 = rightGroup[rightGroup.length - 1].x;
+            const x2 = leftGroup[leftGroup.length - 1].x, x3 = rightGroup[0].x;
             const midLeftCand = leftGroup.filter(c => c.x > x0 && c.x < x2);
             const midRightCand = rightGroup.filter(c => c.x > x3 && c.x < x5);
-
-            let x1, x4;
-            if (midLeftCand.length > 0) {
-                x1 = midLeftCand.sort((a, b) => getScore(b) - getScore(a))[0].x;
-            } else {
-                x1 = leftGroup[Math.floor(leftGroup.length / 2)].x;
-            }
-
-            if (midRightCand.length > 0) {
-                x4 = midRightCand.sort((a, b) => getScore(b) - getScore(a))[0].x;
-            } else {
-                x4 = rightGroup[Math.floor(rightGroup.length / 2)].x;
-            }
-
+            const x1 = midLeftCand.length > 0 ? midLeftCand.sort((a, b) => getScore(b) - getScore(a))[0].x : leftGroup[Math.floor(leftGroup.length / 2)].x;
+            const x4 = midRightCand.length > 0 ? midRightCand.sort((a, b) => getScore(b) - getScore(a))[0].x : rightGroup[Math.floor(rightGroup.length / 2)].x;
             finalMarks = [x0, x1, x2, x3, x4, x5];
         }
 
-        // 6점이 안 만들어졌거나 실패 시 4점 기본 로직
         if (finalMarks.length < 6 && candidates.length >= 4) {
             finalMarks = [candidates[0].x, candidates[1].x, candidates[candidates.length - 2].x, candidates[candidates.length - 1].x];
         }
 
-        this.finalMarks = finalMarks; // 최종 선택된 마커 저장
-
-        this.renderCropMarkers(); // 마커 렌더링
-        this.calculateCoverSpread(); // 계산기 업데이트
-        this.showLoading(`분석 완료!`, '');
-        setTimeout(() => this.hideLoading(), 1000);
+        this.finalMarks = finalMarks;
     }
 
     renderCropMarkers() {
@@ -1942,34 +2112,42 @@ export class PDFSeparationViewer {
         this.clearCropMarkers();
 
         const canvas = pageObj.canvas;
-        const scaleX = canvas.clientWidth / canvas.width;
         const showAll = this.showCandidatesToggle?.checked;
-
-        // 체크박스가 꺼져있으면 아무것도 표시 안 함
         if (!showAll) return;
+
+        // pt 단위면 pt→화면px 변환, 아니면 기존 캔버스px→화면px 변환
+        let toScreenX;
+        if (this.cropMarksInPt) {
+            const metadata = this.pageMetadata.get(pageNum);
+            const mediaWidthPt = metadata ? metadata.mediaBox.width : canvas.width;
+            toScreenX = (ptX) => (ptX / mediaWidthPt) * canvas.clientWidth;
+        } else {
+            const scaleX = canvas.clientWidth / canvas.width;
+            toScreenX = (pxX) => pxX * scaleX;
+        }
+
+        const unit = this.cropMarksInPt ? 'pt' : 'px';
 
         // 1. 선택된 점들 표시 (빨간색)
         this.finalMarks.forEach((x, idx) => {
             const marker = document.createElement('div');
             marker.className = 'crop-marker selected';
-            marker.style.left = `${x * scaleX}px`;
+            marker.style.left = `${toScreenX(x)}px`;
             marker.style.top = '0px';
-            marker.title = `선택됨 ${idx}번 (${Math.round(x)}px)`;
-
+            marker.title = `선택됨 ${idx}번 (${x.toFixed(2)}${unit})`;
             pageObj.wrapper.appendChild(marker);
         });
 
-        // 2. 나머지 후보 표시 (노란색) - 선택된 점은 제외
+        // 2. 나머지 후보 표시 (노란색)
         this.allCandidates.forEach((cand) => {
-            // 이미 선택된 점인지 확인
-            const isSelected = this.finalMarks.some(fx => Math.abs(fx - cand.x) < 2);
+            const isSelected = this.finalMarks.some(fx => Math.abs(fx - cand.x) < (this.cropMarksInPt ? 1 : 2));
             if (isSelected) return;
 
             const marker = document.createElement('div');
             marker.className = 'crop-marker candidate';
-            marker.style.left = `${cand.x * scaleX}px`;
+            marker.style.left = `${toScreenX(cand.x)}px`;
             marker.style.top = '0px';
-            marker.title = `기타 후보 (${Math.round(cand.x)}px) - 클릭하여 지정`;
+            marker.title = `기타 후보 (${cand.x.toFixed(2)}${unit}) - 클릭하여 지정`;
 
             marker.onclick = (e) => {
                 e.stopPropagation();
