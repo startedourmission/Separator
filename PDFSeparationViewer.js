@@ -1912,16 +1912,19 @@ export class PDFSeparationViewer {
                         const dx = Math.abs(p1.x - p0.x);
                         const dy = Math.abs(p1.y - p0.y);
 
-                        // 수직선 조건: x 변화 < 0.5pt, y 변화 3~30pt (재단선 길이)
-                        if (dx < 0.5 && dy >= 3 && dy <= 30) {
+                        // 수직선 조건: x 변화 < 0.5pt, y 변화 3~200pt
+                        // (CTM 적용 전 raw 좌표 기준이라 실제 재단선 길이보다 크게 나올 수 있음)
+                        if (dx < 0.5 && dy >= 3 && dy <= 200) {
                             const xCoord = (p0.x + p1.x) / 2;
                             const maxY = Math.max(p0.y, p1.y);
                             const minY = Math.min(p0.y, p1.y);
 
-                            // 페이지 가장자리 근처(상단/하단)에 있는 선만
-                            const nearTop = minY < 20 || maxY > pageHeight - 20;
-                            const nearBottom = minY < 20;
-                            if (nearTop || nearBottom) {
+                            // x 범위: 페이지 너비 ±50% 이내 (블리드 포함)
+                            const inXRange = xCoord >= -pageWidth * 0.5 && xCoord <= pageWidth * 1.5;
+                            // y 범위: 페이지 상단/하단 100pt 이내 (블리드 밖 재단선 포함)
+                            const nearEdge = minY < 100 || maxY > pageHeight - 100
+                                          || minY < -50 || maxY > pageHeight + 50;
+                            if (inXRange && nearEdge) {
                                 verticalLines.push({
                                     x: xCoord,
                                     y: minY,
