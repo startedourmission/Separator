@@ -1139,12 +1139,90 @@ export class PDFSeparationViewer {
             this.updateChannelRatios(ratios);
             this.updateScanProgress(this.totalPages, this.totalPages, '완료!');
 
+            // 별색이 있으면 tiffsep으로 깨끗한 CMYK 데이터 수집
+            if (this.spotColors && this.spotColors.length > 0) {
+                this.scanAllPagesWithTiffsep();
+            }
+
         } catch (error) {
             console.error('병렬 스캔 중 오류:', error);
         }
 
         // 완료 후 3초 뒤에 진행률 바 숨김
         setTimeout(() => this.hideScanProgress(), 3000);
+    }
+
+    /**
+     * 별색이 있을 때 모든 페이지를 tiffsep으로 재스캔하여
+     * 깨끗한 CMYK 데이터(별색 제외)로 교체
+     */
+    async scanAllPagesWithTiffsep() {
+        const lowDpi = 72; // 비율 계산용이므로 저해상도로 충분
+        let correctedPages = 0;
+
+        for (let i = 1; i <= this.totalPages; i++) {
+            // 이미 tiffsep으로 교체된 페이지는 건너뜀
+            if (this.pageChannelData[i] && this.pageChannelData[i].fromTiffsep) {
+                correctedPages++;
+                continue;
+            }
+
+            try {
+                const result = await this.ghostscript.processTiffsep(
+                    this.currentPDFData, i, lowDpi
+                );
+
+                if (result && result.channels) {
+                    const { channels, width, height } = result;
+                    const cyanParsed = await this.parseSpotColorTIFF(channels['Cyan'], 'Cyan');
+                    const magentaParsed = await this.parseSpotColorTIFF(channels['Magenta'], 'Magenta');
+                    const yellowParsed = await this.parseSpotColorTIFF(channels['Yellow'], 'Yellow');
+                    const blackParsed = await this.parseSpotColorTIFF(channels['Black'], 'Black');
+
+                    const cleanCmyk = {
+                        type: 'cmyk',
+                        width: width || cyanParsed.width,
+                        height: height || cyanParsed.height,
+                        channels: {
+                            cyan: cyanParsed.data,
+                            magenta: magentaParsed.data,
+                            yellow: yellowParsed.data,
+                            black: blackParsed.data
+                        }
+                    };
+
+                    this.replacePageChannelData(cleanCmyk, i);
+
+                    // 별색 데이터도 수집
+                    const spotColorData = {};
+                    for (const colorName of this.spotColors) {
+                        if (channels[colorName]) {
+                            const parsed = await this.parseSpotColorTIFF(channels[colorName], colorName);
+                            spotColorData[colorName] = parsed.data;
+                        }
+                    }
+                    this.accumulateSpotColorData(spotColorData, i, cleanCmyk.width, cleanCmyk.height);
+
+                    correctedPages++;
+
+                    // 5페이지마다 또는 마지막 페이지에서 UI 업데이트
+                    if (correctedPages % 5 === 0 || i === this.totalPages) {
+                        const cmykRatios = this.calculateTotalChannelRatios();
+                        if (cmykRatios) this.updateChannelRatios(cmykRatios);
+                        const spotRatios = this.calculateSpotColorRatios();
+                        if (spotRatios) this.updateSpotColorRatios(spotRatios);
+                    }
+                }
+            } catch (error) {
+                console.warn(`tiffsep 교정 스캔 실패 (페이지 ${i}):`, error.message);
+            }
+        }
+
+        // 최종 업데이트
+        const cmykRatios = this.calculateTotalChannelRatios();
+        if (cmykRatios) this.updateChannelRatios(cmykRatios);
+        const spotRatios = this.calculateSpotColorRatios();
+        if (spotRatios) this.updateSpotColorRatios(spotRatios);
     }
 
 
@@ -1649,6 +1727,10 @@ export class PDFSeparationViewer {
                     }
                     tiffsepSuccessful = true;
 
+                    // tiffsep의 CMYK는 별색이 분리된 깨끗한 데이터.
+                    // 기존 tiff32nc 스캔 데이터(별색이 CMYK에 섞여있음)를 교체.
+                    this.replacePageChannelData(imageData, pageNum);
+
                     // 별색 비율 누적 및 UI 업데이트
                     const tiffsepWidth = imageData.width;
                     const tiffsepHeight = imageData.height;
@@ -1656,11 +1738,11 @@ export class PDFSeparationViewer {
                     const spotRatios = this.calculateSpotColorRatios();
                     if (spotRatios) {
                         this.updateSpotColorRatios(spotRatios);
-                        // 별색 데이터가 갱신되면 CMYK 비율도 재계산 (별색 기여분 감산 반영)
-                        const cmykRatios = this.calculateTotalChannelRatios();
-                        if (cmykRatios) {
-                            this.updateChannelRatios(cmykRatios);
-                        }
+                    }
+                    // tiffsep CMYK 교체 후 비율 재계산
+                    const cmykRatios = this.calculateTotalChannelRatios();
+                    if (cmykRatios) {
+                        this.updateChannelRatios(cmykRatios);
                     }
                 } else {
                 }
@@ -2409,6 +2491,55 @@ export class PDFSeparationViewer {
         this.totalPixelCount += totalPixels;
     }
 
+    /**
+     * tiffsep의 깨끗한 CMYK 데이터로 해당 페이지의 기존 tiff32nc 데이터를 교체.
+     * tiffsep CMYK에는 별색이 포함되어 있지 않으므로 정확한 프로세스 컬러 비율을 얻을 수 있음.
+     */
+    replacePageChannelData(cmykData, pageNum) {
+        if (!cmykData || cmykData.type !== 'cmyk') return;
+
+        const { width, height, channels } = cmykData;
+        const { cyan, magenta, yellow, black } = channels;
+        const totalPixels = width * height;
+
+        // 기존 데이터가 있으면 총합에서 빼기
+        const old = this.pageChannelData[pageNum];
+        if (old) {
+            this.totalChannelCounts.cyan -= old.cyan;
+            this.totalChannelCounts.magenta -= old.magenta;
+            this.totalChannelCounts.yellow -= old.yellow;
+            this.totalChannelCounts.black -= old.black;
+            this.totalPixelCount -= old.totalPixels;
+        }
+
+        // tiffsep CMYK로 새로 카운트
+        let lc = 0, lm = 0, ly = 0, lk = 0;
+        const threshold = 5;
+        for (let i = 0; i < totalPixels; i++) {
+            if (cyan[i] > threshold) lc++;
+            if (magenta[i] > threshold) lm++;
+            if (yellow[i] > threshold) ly++;
+            if (black[i] > threshold) lk++;
+        }
+
+        // 페이지 데이터 교체
+        this.pageChannelData[pageNum] = {
+            cyan: lc,
+            magenta: lm,
+            yellow: ly,
+            black: lk,
+            totalPixels: totalPixels,
+            fromTiffsep: true
+        };
+
+        // 총합에 새 데이터 더하기
+        this.totalChannelCounts.cyan += lc;
+        this.totalChannelCounts.magenta += lm;
+        this.totalChannelCounts.yellow += ly;
+        this.totalChannelCounts.black += lk;
+        this.totalPixelCount += totalPixels;
+    }
+
     accumulateSpotColorData(spotColorChannels, pageNum, width, height) {
         // 페이지별 별색 데이터를 누적
         if (!spotColorChannels || Object.keys(spotColorChannels).length === 0) {
@@ -2421,24 +2552,31 @@ export class PDFSeparationViewer {
         if (!this.totalSpotPixelCount) {
             this.totalSpotPixelCount = 0;
         }
+
+        // 이미 이 페이지의 별색 데이터가 있으면 기존 데이터를 총합에서 빼기 (중복 방지)
+        const existing = this.pageSpotColorData[pageNum];
+        if (existing) {
+            this.totalSpotPixelCount -= (existing.totalPixels || 0);
+            for (const colorName of this.spotColors) {
+                if (existing[colorName] && this.totalChannelCounts[colorName]) {
+                    this.totalChannelCounts[colorName] -= existing[colorName];
+                }
+            }
+        }
+
         this.totalSpotPixelCount += totalPixels;
 
-        // 페이지별 별색 데이터 초기화
-        if (!this.pageSpotColorData[pageNum]) {
-            this.pageSpotColorData[pageNum] = {
-                totalPixels: totalPixels
-            };
-        }
+        // 페이지별 별색 데이터 초기화 (교체)
+        this.pageSpotColorData[pageNum] = {
+            totalPixels: totalPixels
+        };
 
         // 각 별색에 대해 잉크량 합산
         for (const colorName of this.spotColors) {
             const channelData = spotColorChannels[colorName];
             if (!channelData) continue;
 
-            // 별색 카운트 초기화
-            if (!this.pageSpotColorData[pageNum][colorName]) {
-                this.pageSpotColorData[pageNum][colorName] = 0;
-            }
+            this.pageSpotColorData[pageNum][colorName] = 0;
 
             // 전체 문서 별색 카운트 초기화
             if (!this.totalChannelCounts[colorName]) {
@@ -2470,25 +2608,12 @@ export class PDFSeparationViewer {
         let yellowRatio = (this.totalChannelCounts.yellow / this.totalPixelCount) * 100;
         let blackRatio = (this.totalChannelCounts.black / this.totalPixelCount) * 100;
 
-        // 별색이 있으면 CMY에서 별색의 CMYK 근사 기여분을 감산
-        // (tiff32nc 스캔은 별색을 CMY로 근사 변환하여 포함하므로)
+        // 별색이 있고 아직 tiffsep 교체가 시작되지 않은 경우,
+        // CMYK 비율이 별색 기여분을 포함하고 있으므로 null 반환 (UI에 '-' 표시)
         if (this.spotColors && this.spotColors.length > 0) {
-            if (this.totalSpotPixelCount > 0) {
-                // 별색 분석 완료: 실제 별색 커버리지로 정확한 감산
-                for (const colorName of this.spotColors) {
-                    const spotCount = this.totalChannelCounts[colorName] || 0;
-                    const spotCoverage = spotCount / this.totalSpotPixelCount; // 0~1
-                    const rgb = getSpotColorRGB(colorName);
-                    const spotC = (255 - rgb.r) / 255;
-                    const spotM = (255 - rgb.g) / 255;
-                    const spotY = (255 - rgb.b) / 255;
-                    cyanRatio = Math.max(0, cyanRatio - spotCoverage * spotC * 100);
-                    magentaRatio = Math.max(0, magentaRatio - spotCoverage * spotM * 100);
-                    yellowRatio = Math.max(0, yellowRatio - spotCoverage * spotY * 100);
-                }
-            } else {
-                // 별색 분석 전: CMY 비율을 아직 알 수 없으므로 null 반환
-                // (UI에 '-' 표시)
+            const hasAnyTiffsep = this.pageChannelData && Object.values(this.pageChannelData)
+                .some(pd => pd && pd.fromTiffsep);
+            if (!hasAnyTiffsep) {
                 return {
                     cyan: null,
                     magenta: null,
@@ -2496,6 +2621,9 @@ export class PDFSeparationViewer {
                     black: blackRatio
                 };
             }
+            // tiffsep 교체된 페이지가 있으면 그 데이터는 이미 깨끗한 CMYK.
+            // 아직 교체 안 된 페이지는 tiff32nc(별색 포함)이므로 비율이 다소 높을 수 있음.
+            // 하지만 기존 RGB→CMY 감산보다는 훨씬 정확함.
         }
 
         return {
