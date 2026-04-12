@@ -364,6 +364,11 @@ export class PDFSeparationViewer {
             exportSeparatedBtn.addEventListener('click', () => this.exportSeparatedImages());
         }
 
+        const exportABTestBtn = document.getElementById('export-ab-test');
+        if (exportABTestBtn) {
+            exportABTestBtn.addEventListener('click', () => this.exportABTestCovers());
+        }
+
         // Drag and Drop & Clipboard
         this.setupDragAndDrop();
         this.setupClipboardPaste();
@@ -3561,6 +3566,106 @@ export class PDFSeparationViewer {
         } catch (error) {
             console.error('PDF 분할 실패:', error);
             alert('PDF 분할 중 오류가 발생했습니다: ' + error.message);
+            this.hideLoading();
+        }
+    }
+
+    /**
+     * AB 테스트용 표지 내려받기
+     * 모든 페이지에서 앞표지(표1) 영역만 잘라서 ZIP으로 내려받기
+     */
+    async exportABTestCovers() {
+        // 입력값 업데이트
+        this.coverCalculatorInputs.spine = parseFloat(this.spineInput.value) || 0;
+        this.coverCalculatorInputs.cover = parseFloat(this.coverInput.value) || 0;
+        this.coverCalculatorInputs.flap = parseFloat(this.flapInput.value) || 0;
+
+        const spineMm = this.coverCalculatorInputs.spine;
+        const coverMm = this.coverCalculatorInputs.cover;
+        const flapMm = this.coverCalculatorInputs.flap;
+
+        if (!this.currentPDFData) {
+            alert('PDF 파일이 로드되지 않았습니다.');
+            return;
+        }
+
+        if (!spineMm && !coverMm) {
+            alert('책등과 표지 너비가 설정되지 않았습니다. "자동 계산"을 먼저 실행하거나 값을 입력해주세요.');
+            return;
+        }
+
+        if (!window.JSZip && typeof JSZip === 'undefined') {
+            alert('JSZip 라이브러리가 로드되지 않았습니다.');
+            return;
+        }
+
+        this.showLoading('AB 테스트용 앞표지 추출 중...');
+
+        try {
+            const { PDFDocument } = window.PDFLib;
+            const ZipLib = window.JSZip || JSZip;
+            const zip = new ZipLib();
+
+            const sourcePdf = await PDFDocument.load(this.currentPDFData);
+            const totalPages = sourcePdf.getPageCount();
+
+            // 앞표지 시작 오프셋 (mm): 뒷날개 + 뒷표지 + 책등
+            const frontCoverOffsetMm = (flapMm > 0 ? flapMm : 0) + coverMm + spineMm;
+            const totalMm = (flapMm > 0 ? flapMm * 2 : 0) + (coverMm * 2) + spineMm;
+
+            for (let i = 0; i < totalPages; i++) {
+                const pageNum = i + 1;
+                this.showLoading(`AB 테스트용 앞표지 추출 중... (${pageNum}/${totalPages})`);
+
+                // 해당 페이지의 metadata에서 trimBox 가져오기
+                const metadata = this.pageMetadata.get(pageNum);
+                if (!metadata || !metadata.trimBox) {
+                    console.warn(`페이지 ${pageNum}: TrimBox 없음, 건너뜀`);
+                    continue;
+                }
+
+                const trimBox = metadata.trimBox;
+                const trimX = trimBox.x;
+                const trimY = trimBox.y;
+                const trimW = trimBox.width;
+                const trimH = trimBox.height;
+
+                const ptPerMm = trimW / totalMm;
+                const frontCoverX = trimX + (frontCoverOffsetMm * ptPerMm);
+                const frontCoverW = coverMm * ptPerMm;
+
+                // 새 PDF에 앞표지 영역만 크롭
+                const newPdf = await PDFDocument.create();
+                const [copiedPage] = await newPdf.copyPages(sourcePdf, [i]);
+                newPdf.addPage(copiedPage);
+
+                copiedPage.setCropBox(frontCoverX, trimY, frontCoverW, trimH);
+                copiedPage.setMediaBox(frontCoverX, trimY, frontCoverW, trimH);
+
+                // PDF → JPG 변환
+                const pdfBytes = await newPdf.save();
+                const partPdf = await pdfjsLib.getDocument({ data: pdfBytes }).promise;
+                const partPage = await partPdf.getPage(1);
+                const jpgScale = 600 / 72;
+                const partViewport = partPage.getViewport({ scale: jpgScale });
+                const partCanvas = document.createElement('canvas');
+                partCanvas.width = Math.floor(partViewport.width);
+                partCanvas.height = Math.floor(partViewport.height);
+                const partCtx = partCanvas.getContext('2d');
+                await partPage.render({ canvasContext: partCtx, viewport: partViewport }).promise;
+                const jpgBlob = await new Promise(resolve => partCanvas.toBlob(resolve, 'image/jpeg', 0.95));
+                zip.file(`cover_${String(pageNum).padStart(3, '0')}.jpg`, jpgBlob);
+                partPdf.destroy();
+            }
+
+            const content = await zip.generateAsync({ type: "blob" });
+            this.downloadBlob(content, `ab_test_covers.zip`);
+
+            this.hideLoading();
+
+        } catch (error) {
+            console.error('AB 테스트 표지 추출 실패:', error);
+            alert('AB 테스트 표지 추출 중 오류가 발생했습니다: ' + error.message);
             this.hideLoading();
         }
     }
