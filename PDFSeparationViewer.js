@@ -359,6 +359,14 @@ export class PDFSeparationViewer {
             exportSpreadBtn.addEventListener('click', () => this.exportSpreadImage());
         }
 
+        const exportSpreadModeSel = document.getElementById('export-spread-mode');
+        const exportSpreadRangeInp = document.getElementById('export-spread-range');
+        if (exportSpreadModeSel && exportSpreadRangeInp) {
+            exportSpreadModeSel.addEventListener('change', () => {
+                exportSpreadRangeInp.style.display = exportSpreadModeSel.value === 'range' ? 'block' : 'none';
+            });
+        }
+
         const exportSeparatedBtn = document.getElementById('export-separated');
         if (exportSeparatedBtn) {
             exportSeparatedBtn.addEventListener('click', () => this.exportSeparatedImages());
@@ -3468,16 +3476,66 @@ export class PDFSeparationViewer {
      * 원본 PDF를 가져와서 TrimBox 크기로 크롭하여 내보냅니다.
      * (벡터 정보 및 원본 색상 프로파일 보존)
      */
-    async exportPDFTrimmed() {
-        const pageNum = this.currentPage;
-        const metadata = this.pageMetadata.get(pageNum);
+    parsePageRange(rangeStr, maxPage) {
+        const result = new Set();
+        const parts = (rangeStr || '').split(',').map(s => s.trim()).filter(Boolean);
+        for (const part of parts) {
+            const m = part.match(/^(\d+)\s*-\s*(\d+)$/);
+            if (m) {
+                let a = parseInt(m[1], 10);
+                let b = parseInt(m[2], 10);
+                if (a > b) [a, b] = [b, a];
+                for (let i = a; i <= b; i++) {
+                    if (i >= 1 && i <= maxPage) result.add(i);
+                }
+            } else if (/^\d+$/.test(part)) {
+                const n = parseInt(part, 10);
+                if (n >= 1 && n <= maxPage) result.add(n);
+            } else {
+                throw new Error(`잘못된 범위 형식: "${part}"`);
+            }
+        }
+        return Array.from(result).sort((a, b) => a - b);
+    }
 
+    async exportPDFTrimmed() {
         if (!this.currentPDFData) {
             alert('PDF 파일이 로드되지 않았습니다.');
             return;
         }
 
-        if (!metadata || !metadata.trimBox) {
+        const modeSel = document.getElementById('export-spread-mode');
+        const rangeInp = document.getElementById('export-spread-range');
+        const mode = modeSel ? modeSel.value : 'current';
+
+        let targetPages = [];
+        try {
+            if (mode === 'current') {
+                targetPages = [this.currentPage];
+            } else if (mode === 'all') {
+                targetPages = Array.from({ length: this.totalPages }, (_, i) => i + 1);
+            } else if (mode === 'range') {
+                const rangeStr = rangeInp ? rangeInp.value.trim() : '';
+                if (!rangeStr) {
+                    alert('쪽수 범위를 입력해주세요. (예: 1-3,5,7-9)');
+                    return;
+                }
+                targetPages = this.parsePageRange(rangeStr, this.totalPages);
+                if (targetPages.length === 0) {
+                    alert('유효한 쪽 번호가 없습니다.');
+                    return;
+                }
+            }
+        } catch (e) {
+            alert(e.message);
+            return;
+        }
+
+        const missing = targetPages.filter(p => {
+            const md = this.pageMetadata.get(p);
+            return !md || !md.trimBox;
+        });
+        if (missing.length === targetPages.length) {
             alert('재단 영역(TrimBox) 정보가 없습니다. 먼저 "자동 계산"을 실행해주세요.');
             return;
         }
@@ -3489,21 +3547,38 @@ export class PDFSeparationViewer {
             const sourcePdf = await PDFDocument.load(this.currentPDFData);
             const exportPdf = await PDFDocument.create();
 
-            // 현재 페이지 복사
-            const [copiedPage] = await exportPdf.copyPages(sourcePdf, [pageNum - 1]);
-            exportPdf.addPage(copiedPage);
+            const validPages = targetPages.filter(p => {
+                const md = this.pageMetadata.get(p);
+                return md && md.trimBox;
+            });
 
-            // TrimBox 영역으로 CropBox 설정
-            // PDF 좌표계는 좌하단이 (0,0)임
-            const { x, y, width, height } = metadata.trimBox;
-            copiedPage.setCropBox(x, y, width, height);
-            copiedPage.setMediaBox(x, y, width, height);
+            const copiedPages = await exportPdf.copyPages(sourcePdf, validPages.map(p => p - 1));
+            copiedPages.forEach((page, i) => {
+                const md = this.pageMetadata.get(validPages[i]);
+                const { x, y, width, height } = md.trimBox;
+                page.setCropBox(x, y, width, height);
+                page.setMediaBox(x, y, width, height);
+                exportPdf.addPage(page);
+            });
 
             const pdfBytes = await exportPdf.save();
             const blob = new Blob([pdfBytes], { type: 'application/pdf' });
-            this.downloadBlob(blob, `cover_original_trimmed_${pageNum}.pdf`);
+
+            let filename;
+            if (mode === 'current') {
+                filename = `cover_original_trimmed_${this.currentPage}.pdf`;
+            } else if (mode === 'all') {
+                filename = `cover_original_trimmed_all.pdf`;
+            } else {
+                filename = `cover_original_trimmed_p${validPages[0]}-${validPages[validPages.length - 1]}.pdf`;
+            }
+            this.downloadBlob(blob, filename);
 
             this.hideLoading();
+
+            if (missing.length > 0) {
+                alert(`${missing.length}개 페이지는 TrimBox 정보가 없어 제외되었습니다: ${missing.join(', ')}`);
+            }
         } catch (error) {
             console.error('PDF 내보내기 실패:', error);
             alert('PDF 처리 중 오류가 발생했습니다: ' + error.message);
