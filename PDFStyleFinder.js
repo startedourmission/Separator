@@ -6,7 +6,6 @@ export class PDFStyleFinder {
     constructor(viewer) {
         this.viewer = viewer;
         this.styles = new Map();      // styleKey -> StyleEntry
-        this.pageSpans = new Map();   // pageNum -> SpanRecord[]
         this.isAnalyzed = false;
         this.isAnalyzing = false;
         this.aborted = false;
@@ -23,7 +22,6 @@ export class PDFStyleFinder {
 
     reset() {
         this.styles.clear();
-        this.pageSpans.clear();
         this.isAnalyzed = false;
         this.isAnalyzing = false;
         this.aborted = false;
@@ -37,136 +35,121 @@ export class PDFStyleFinder {
     }
 
     // ── 스타일 키 생성 ──
-    makeStyleKey(fontName, fontSize, color) {
-        const r = color.r, g = color.g, b = color.b;
-        return `${fontName}|${fontSize}|${r},${g},${b}`;
+    makeStyleKey(fontName, fontSize) {
+        return `${fontName}|${fontSize}`;
     }
 
-    // ── 색상을 hex로 변환 ──
-    colorToHex(color) {
-        const toHex = (v) => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0');
-        return `#${toHex(color.r)}${toHex(color.g)}${toHex(color.b)}`;
+    // ── operatorList + commonObjs에서 실제 폰트명 맵 구축 ──
+    // 주의: page.render() 완료 후 호출해야 commonObjs가 채워져 있음
+    async buildFontNameMap(page) {
+        try {
+            const ops = await page.getOperatorList();
+            const OPS = pdfjsLib.OPS;
+            const refToName = new Map();
+            for (let i = 0; i < ops.fnArray.length; i++) {
+                if (ops.fnArray[i] === OPS.setFont) {
+                    const fontRef = ops.argsArray[i][0];
+                    if (refToName.has(fontRef)) continue;
+                    try {
+                        const font = page.commonObjs.get(fontRef);
+                        if (font?.name) {
+                            refToName.set(fontRef, this.normalizeFontName(font.name));
+                        }
+                    } catch(e) { /* 개별 폰트 실패 무시 */ }
+                }
+            }
+
+            const suffixToName = new Map();
+            for (const [ref, name] of refToName) {
+                const m = ref.match(/f(\d+)$/);
+                if (m) suffixToName.set(m[1], name);
+            }
+            return suffixToName;
+        } catch(e) {
+            // operatorList 자체 실패 시 빈 맵 반환 (폰트명은 fallback 사용)
+            return new Map();
+        }
     }
 
-    // ── 페이지 분석: 텍스트 + 색상 추출 ──
-    async extractPageStyleData(pdf, pageNum) {
-        const page = await pdf.getPage(pageNum);
-        const textContent = await page.getTextContent();
-        const ops = await page.getOperatorList();
-
-        // Phase 1: operator list에서 색상 상태 추적
-        const OPS = pdfjsLib.OPS;
-        const textOps = [];
-        let currentColor = { r: 0, g: 0, b: 0 };
-        let currentFont = '';
-        let currentFontSize = 0;
-        const stateStack = [];
-
-        for (let i = 0; i < ops.fnArray.length; i++) {
-            const fn = ops.fnArray[i];
-            const args = ops.argsArray[i];
-
-            switch (fn) {
-                case OPS.save:
-                    stateStack.push({
-                        color: { ...currentColor },
-                        font: currentFont,
-                        fontSize: currentFontSize
-                    });
-                    break;
-                case OPS.restore:
-                    if (stateStack.length > 0) {
-                        const s = stateStack.pop();
-                        currentColor = s.color;
-                        currentFont = s.font;
-                        currentFontSize = s.fontSize;
-                    }
-                    break;
-                case OPS.setFillRGBColor:
-                    currentColor = {
-                        r: Math.round(args[0] * 255),
-                        g: Math.round(args[1] * 255),
-                        b: Math.round(args[2] * 255)
-                    };
-                    break;
-                case OPS.setFillGrayColor:
-                    const gray = Math.round(args[0] * 255);
-                    currentColor = { r: gray, g: gray, b: gray };
-                    break;
-                case OPS.setFillCMYKColor:
-                    if (args.length >= 4) {
-                        const [c, m, y, k] = args;
-                        currentColor = {
-                            r: Math.round(255 * (1 - c) * (1 - k)),
-                            g: Math.round(255 * (1 - m) * (1 - k)),
-                            b: Math.round(255 * (1 - y) * (1 - k))
-                        };
-                    }
-                    break;
-                case OPS.setFont:
-                    if (args[0]) currentFont = args[0];
-                    if (args[1]) currentFontSize = args[1];
-                    break;
-                case OPS.showText:
-                case OPS.showSpacedText:
-                    textOps.push({
-                        color: { ...currentColor },
-                        font: currentFont,
-                        fontSize: currentFontSize
-                    });
-                    break;
+    // ── textContent fontName → 실제 폰트명 해석 ──
+    resolveFontFamily(fontKey, styles, fontMap) {
+        // fontMap에서 fN 접미사로 매칭
+        if (fontMap) {
+            const m = fontKey.match(/f(\d+)$/);
+            if (m && fontMap.has(m[1])) return fontMap.get(m[1]);
+        }
+        // fallback: textContent.styles
+        if (styles?.[fontKey]) {
+            const family = styles[fontKey].fontFamily;
+            if (family && family !== 'monospace' && family !== 'sans-serif' && family !== 'serif') {
+                return family;
             }
         }
+        const cleaned = this.normalizeFontName(fontKey);
+        if (/^g_d\d+_f\d+$/.test(cleaned)) return styles?.[fontKey]?.fontFamily || 'sans-serif';
+        return cleaned;
+    }
 
-        // Phase 2: textContent items와 매칭
+    // ── 인접 item 병합: 같은 스타일의 쪼개진 텍스트를 합침 ──
+    mergeAdjacentSpans(rawSpans) {
+        if (rawSpans.length === 0) return rawSpans;
+
+        const merged = [rawSpans[0]];
+        for (let i = 1; i < rawSpans.length; i++) {
+            const prev = merged[merged.length - 1];
+            const curr = rawSpans[i];
+
+            // 같은 페이지, 같은 스타일, Y좌표 비슷하고, X좌표가 이어지는 경우 병합
+            const sameStyle = prev.fontName === curr.fontName &&
+                              prev.fontSize === curr.fontSize;
+            const sameLine = Math.abs(prev.bbox.y - curr.bbox.y) < prev.fontSize * 0.5;
+            const adjacent = (curr.bbox.x - (prev.bbox.x + prev.bbox.width)) < prev.fontSize * 1.5;
+
+            if (sameStyle && sameLine && adjacent) {
+                prev.text += curr.text;
+                prev.bbox.width = (curr.bbox.x + curr.bbox.width) - prev.bbox.x;
+            } else {
+                merged.push(curr);
+            }
+        }
+        return merged;
+    }
+
+    // ── 페이지 분석: 텍스트 + 폰트/크기 추출 ──
+    async extractPageStyleData(pdf, pageNum) {
+        const page = await pdf.getPage(pageNum);
+
+        // 극소 해상도로 render해서 commonObjs에 폰트 데이터 채우기
+        const viewport = page.getViewport({ scale: 0.1 });
+        const canvas = document.createElement('canvas');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext('2d');
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        canvas.width = canvas.height = 0; // 즉시 해제
+
+        const [textContent, fontMap] = await Promise.all([
+            page.getTextContent(),
+            this.buildFontNameMap(page)
+        ]);
+
         const spans = [];
         const items = textContent.items;
-        let textOpIdx = 0;
-        const useFallback = textOps.length !== items.length;
-
-        // 폰트 이름 resolve 캐시
-        const fontNameCache = new Map();
+        const styles = textContent.styles;
 
         for (let i = 0; i < items.length; i++) {
             const item = items[i];
-            if (!item.str || item.str.trim() === '') {
-                if (!useFallback) textOpIdx++;
-                continue;
-            }
+            if (!item.str || item.str.trim() === '') continue;
 
-            // 색상: 매칭 또는 폴백
-            let color;
-            if (!useFallback && textOpIdx < textOps.length) {
-                color = textOps[textOpIdx].color;
-                textOpIdx++;
-            } else if (useFallback && textOps.length > 0) {
-                // 폴백: 비율 기반 인덱스
-                const ratio = items.length > 1 ? i / (items.length - 1) : 0;
-                const idx = Math.min(Math.round(ratio * (textOps.length - 1)), textOps.length - 1);
-                color = textOps[idx].color;
-            } else {
-                color = { r: 0, g: 0, b: 0 };
-            }
-
-            // 폰트명 resolve
-            let fontName = item.fontName || 'Unknown';
-            if (!fontNameCache.has(fontName)) {
-                const resolved = this.normalizeFontName(fontName);
-                fontNameCache.set(fontName, resolved);
-            }
-            fontName = fontNameCache.get(fontName);
-
-            // 크기: transform[0] 또는 transform[3]
-            const fontSize = Math.round(Math.abs(item.transform[3] || item.transform[0]) * 10) / 10;
-
-            const styleKey = this.makeStyleKey(fontName, fontSize, color);
+            const fontName = this.resolveFontFamily(item.fontName, styles, fontMap);
+            const fontSize = Math.round(Math.abs(item.transform[3] || item.transform[0]) * 100) / 100;
+            const styleKey = `${fontName}|${fontSize}`;
 
             spans.push({
                 pageNum,
                 text: item.str,
                 fontName,
                 fontSize,
-                color,
                 styleKey,
                 bbox: {
                     x: item.transform[4],
@@ -177,8 +160,9 @@ export class PDFStyleFinder {
             });
         }
 
+        const merged = this.mergeAdjacentSpans(spans);
         page.cleanup();
-        return spans;
+        return merged;
     }
 
     // ── 전체 문서 분석 ──
@@ -191,43 +175,53 @@ export class PDFStyleFinder {
         this.isAnalyzing = true;
         this.aborted = false;
         this.styles.clear();
-        this.pageSpans.clear();
 
         this.renderProgress(0, '분석 준비 중...');
 
         try {
             const pdf = await pdfjsLib.getDocument({ data: this.viewer.currentPDFData.slice(0) }).promise;
             const total = pdf.numPages;
+            const BATCH = 4; // 동시 처리 페이지 수
 
-            for (let p = 1; p <= total; p++) {
+            for (let start = 1; start <= total; start += BATCH) {
                 if (this.aborted) {
                     this.renderMessage('분석이 취소되었습니다.');
                     this.isAnalyzing = false;
                     return;
                 }
 
-                this.renderProgress(p / total, `${p} / ${total} 페이지 분석 중...`);
-                const spans = await this.extractPageStyleData(pdf, p);
-                this.pageSpans.set(p, spans);
+                const end = Math.min(start + BATCH - 1, total);
+                this.renderProgress(end / total, `${end} / ${total} 페이지 분석 중...`);
 
-                // 스타일 집계
-                for (const span of spans) {
-                    if (!this.styles.has(span.styleKey)) {
-                        this.styles.set(span.styleKey, {
-                            styleKey: span.styleKey,
-                            fontName: span.fontName,
-                            fontSize: span.fontSize,
-                            color: span.color,
-                            count: 0,
-                            spans: []
-                        });
+                // 배치 병렬 처리 (개별 페이지 실패 시 빈 결과로 대체)
+                const batch = [];
+                for (let p = start; p <= end; p++) {
+                    batch.push(
+                        this.extractPageStyleData(pdf, p)
+                            .then(spans => ({ p, spans }))
+                            .catch(() => ({ p, spans: [] }))
+                    );
+                }
+                const results = await Promise.all(batch);
+
+                for (const { p, spans } of results) {
+                    for (const span of spans) {
+                        if (!this.styles.has(span.styleKey)) {
+                            this.styles.set(span.styleKey, {
+                                styleKey: span.styleKey,
+                                fontName: span.fontName,
+                                fontSize: span.fontSize,
+                                count: 0,
+                                spans: []
+                            });
+                        }
+                        const entry = this.styles.get(span.styleKey);
+                        entry.count++;
+                        entry.spans.push(span);
                     }
-                    const entry = this.styles.get(span.styleKey);
-                    entry.count++;
-                    entry.spans.push(span);
                 }
 
-                // UI 블로킹 방지
+                // UI 업데이트 기회
                 await new Promise(r => setTimeout(r, 0));
             }
 
@@ -313,8 +307,8 @@ export class PDFStyleFinder {
         this.modalContent.querySelector('.sf-close-btn').addEventListener('click', () => this.closeModal());
     }
 
-    // ── UI: 탭 헤더 생성 ──
-    _renderTabs(activeTab) {
+    // ── UI: 헤더 + 탭 생성 ──
+    _renderHeader(activeTab = 'styles') {
         return `
             <div class="sf-header">
                 <h3>텍스트 스타일 분석</h3>
@@ -325,18 +319,18 @@ export class PDFStyleFinder {
             </div>
             <div class="sf-tabs">
                 <button class="sf-tab ${activeTab === 'styles' ? 'active' : ''}" data-tab="styles">스타일 목록</button>
-                <button class="sf-tab ${activeTab === 'pages' ? 'active' : ''}" data-tab="pages">페이지별 보기</button>
+                <button class="sf-tab ${activeTab === 'numbering' ? 'active' : ''}" data-tab="numbering">번호 검증</button>
             </div>
         `;
     }
 
-    _bindTabEvents() {
+    _bindHeaderEvents() {
         this.modalContent.querySelector('.sf-close-btn').addEventListener('click', () => this.closeModal());
         this.modalContent.querySelectorAll('.sf-tab').forEach(tab => {
             tab.addEventListener('click', () => {
                 const t = tab.dataset.tab;
                 if (t === 'styles') this.renderStyleList();
-                else if (t === 'pages') this.renderPageDump(1);
+                else if (t === 'numbering') this.renderNumberingCheck();
             });
         });
         const exportBtn = this.modalContent.querySelector('.sf-export-btn');
@@ -349,7 +343,7 @@ export class PDFStyleFinder {
     renderStyleList() {
         const sorted = [...this.styles.values()].sort((a, b) => b.count - a.count);
 
-        let html = this._renderTabs('styles');
+        let html = this._renderHeader();
         html += '<div class="sf-body sf-style-list">';
 
         if (sorted.length === 0) {
@@ -357,17 +351,22 @@ export class PDFStyleFinder {
         } else {
             html += `<p class="sf-summary">${sorted.length}개 스타일, 총 ${[...this.styles.values()].reduce((s, e) => s + e.count, 0)}개 텍스트 span</p>`;
             for (const entry of sorted) {
-                const hex = this.colorToHex(entry.color);
-                const textColor = this._contrastColor(entry.color);
+                // 대표 텍스트 미리보기 (처음 3개 span)
+                const previews = entry.spans.slice(0, 3)
+                    .map(s => s.text.length > 30 ? s.text.substring(0, 30) + '…' : s.text);
+                const previewText = previews.map(p => `"${this._esc(p)}"`).join(', ');
+                const moreCount = entry.count > 3 ? ` 외 ${entry.count - 3}개` : '';
                 html += `
                     <div class="sf-style-item" data-key="${this._escAttr(entry.styleKey)}">
-                        <span class="sf-color-swatch" style="background:${hex}; color:${textColor};">Aa</span>
-                        <span class="sf-style-info">
-                            <span class="sf-font-name">${this._esc(entry.fontName)}</span>
-                            <span class="sf-font-size">${entry.fontSize}pt</span>
-                            <span class="sf-font-color">${hex}</span>
-                        </span>
-                        <span class="sf-style-count">${entry.count}</span>
+                        <span class="sf-color-swatch">Aa</span>
+                        <div class="sf-style-info">
+                            <div class="sf-style-meta">
+                                <span class="sf-font-name">${this._esc(entry.fontName)}</span>
+                                <span class="sf-font-size">${entry.fontSize}pt</span>
+                                <span class="sf-style-count">${entry.count}</span>
+                            </div>
+                            <div class="sf-style-preview">${previewText}${moreCount}</div>
+                        </div>
                     </div>
                 `;
             }
@@ -375,7 +374,7 @@ export class PDFStyleFinder {
 
         html += '</div>';
         this.modalContent.innerHTML = html;
-        this._bindTabEvents();
+        this._bindHeaderEvents();
 
         // 스타일 항목 클릭 이벤트
         this.modalContent.querySelectorAll('.sf-style-item').forEach(el => {
@@ -391,15 +390,14 @@ export class PDFStyleFinder {
         const entry = this.styles.get(styleKey);
         if (!entry) return;
 
-        const hex = this.colorToHex(entry.color);
-        let html = this._renderTabs('styles');
+        let html = this._renderHeader();
 
         html += `<div class="sf-body">`;
         html += `<div class="sf-match-header">
             <button class="sf-back-btn">← 목록으로</button>
             <div class="sf-match-info">
-                <span class="sf-color-swatch" style="background:${hex}; color:${this._contrastColor(entry.color)};">Aa</span>
-                <strong>${this._esc(entry.fontName)}</strong> ${entry.fontSize}pt ${hex}
+                <span class="sf-color-swatch">Aa</span>
+                <strong>${this._esc(entry.fontName)}</strong> ${entry.fontSize}pt
                 <span class="sf-style-count">${entry.count}</span>
             </div>
         </div>`;
@@ -426,7 +424,7 @@ export class PDFStyleFinder {
 
         html += '</div></div>';
         this.modalContent.innerHTML = html;
-        this._bindTabEvents();
+        this._bindHeaderEvents();
 
         this.modalContent.querySelector('.sf-back-btn').addEventListener('click', () => this.renderStyleList());
 
@@ -441,50 +439,174 @@ export class PDFStyleFinder {
         });
     }
 
-    // ── UI: 페이지별 보기 ──
-    renderPageDump(pageNum) {
-        const totalPages = this.viewer.totalPages || this.pageSpans.size;
-        pageNum = Math.max(1, Math.min(pageNum, totalPages));
+    // ── 번호 검증: 텍스트에서 구조적 번호 패턴만 감지 ──
+    _extractNumberSequences() {
+        const results = [];
 
-        let html = this._renderTabs('pages');
-        html += `<div class="sf-body">`;
-        html += `<div class="sf-page-nav">
-            <button class="sf-page-prev" ${pageNum <= 1 ? 'disabled' : ''}>◀</button>
-            <span>페이지 <input type="number" class="sf-page-input" value="${pageNum}" min="1" max="${totalPages}"> / ${totalPages}</span>
-            <button class="sf-page-next" ${pageNum >= totalPages ? 'disabled' : ''}>▶</button>
-        </div>`;
+        // 번호 패턴 정의: 텍스트 시작부에 번호가 있는 구조적 패턴만
+        const numPatterns = [
+            { name: 'prefix_dot',   re: /^(\d+)\.\s/,                    extract: m => parseInt(m[1]) },  // "1. 제목"
+            { name: 'prefix_paren', re: /^(\d+)\)\s/,                    extract: m => parseInt(m[1]) },  // "1) 제목"
+            { name: 'prefix_space', re: /^(\d{2,})\s+[가-힣a-zA-Z]/,    extract: m => parseInt(m[1]) },  // "01 제목" (2자리 이상)
+            { name: 'chapter_kr',   re: /^[제]?\s*(\d+)\s*[장절편화회부]/,  extract: m => parseInt(m[1]) },  // "제1장" "1장"
+            { name: 'step',         re: /^(?:Step|STEP|step)\s*(\d+)/i,  extract: m => parseInt(m[1]) },  // "Step 1"
+            { name: 'part',         re: /^(?:Part|PART|part)\s*(\d+)/i,  extract: m => parseInt(m[1]) },  // "PART 1"
+            { name: 'sub_number',   re: /^(\d+)-(\d+)[\s.]/,            extract: m => parseFloat(`${m[1]}.${m[2]}`) }, // "1-1 제목"
+        ];
 
-        const spans = this.pageSpans.get(pageNum) || [];
+        for (const entry of this.styles.values()) {
+            if (entry.spans.length < 3) continue;
 
-        if (spans.length === 0) {
-            html += '<p style="text-align:center; color:#7f8c8d; padding:20px;">이 페이지에 텍스트가 없습니다.</p>';
-        } else {
-            html += `<p class="sf-summary">${spans.length}개 텍스트 span</p>`;
-            html += '<div class="sf-dump-table"><table><thead><tr><th>텍스트</th><th>폰트</th><th>크기</th><th>색상</th></tr></thead><tbody>';
-            for (const span of spans) {
-                const hex = this.colorToHex(span.color);
-                const truncated = span.text.length > 60 ? span.text.substring(0, 60) + '...' : span.text;
-                html += `<tr>
-                    <td class="sf-cell-text">${this._esc(truncated)}</td>
-                    <td>${this._esc(span.fontName)}</td>
-                    <td>${span.fontSize}</td>
-                    <td><span class="sf-color-dot" style="background:${hex};"></span>${hex}</td>
-                </tr>`;
+            // 페이지 순 정렬
+            const sorted = [...entry.spans].sort((a, b) => {
+                if (a.pageNum !== b.pageNum) return a.pageNum - b.pageNum;
+                return b.bbox.y - a.bbox.y;
+            });
+
+            for (const pat of numPatterns) {
+                const matches = [];
+                for (const span of sorted) {
+                    const text = span.text.trim();
+                    const m = text.match(pat.re);
+                    if (m) {
+                        matches.push({ span, num: pat.extract(m), matchText: m[0] });
+                    }
+                }
+
+                // 최소 3개, 매칭률 80% 이상
+                if (matches.length < 3 || matches.length / entry.spans.length < 0.8) continue;
+
+                // 첫 번호가 0 또는 1로 시작하는지 확인
+                const firstNum = matches[0].num;
+                if (firstNum !== 0 && firstNum !== 1) continue;
+
+                // 연속 증가 비율 확인: +1 증가가 전체의 70% 이상
+                let seqCount = 0;
+                for (let i = 1; i < matches.length; i++) {
+                    if (matches[i].num - matches[i - 1].num === 1) seqCount++;
+                }
+                if (seqCount / (matches.length - 1) < 0.7) continue;
+
+                // 유효한 시퀀스 — 문제 감지
+                const issues = [];
+                for (let i = 1; i < matches.length; i++) {
+                    const curr = matches[i];
+                    const prev = matches[i - 1];
+                    const diff = curr.num - prev.num;
+
+                    if (diff === 0) {
+                        issues.push({
+                            type: 'duplicate', index: i,
+                            message: `중복: ${curr.num}`,
+                            span: curr.span
+                        });
+                    } else if (diff > 1 && Number.isInteger(curr.num) && Number.isInteger(prev.num)) {
+                        const missing = [];
+                        for (let n = prev.num + 1; n < curr.num && missing.length < 10; n++) missing.push(n);
+                        const suffix = (curr.num - prev.num - 1) > 10 ? ` 외 ${curr.num - prev.num - 1 - 10}개` : '';
+                        issues.push({
+                            type: 'gap', index: i,
+                            message: `누락: ${missing.join(', ')}${suffix}`,
+                            span: curr.span
+                        });
+                    } else if (diff < 0) {
+                        issues.push({
+                            type: 'order', index: i,
+                            message: `순서 오류: ${prev.num} → ${curr.num}`,
+                            span: curr.span
+                        });
+                    }
+                }
+
+                results.push({
+                    entry, sorted: matches, issues,
+                    patternName: pat.name
+                });
+                break; // 한 스타일에 하나의 패턴만
             }
-            html += '</tbody></table></div>';
+        }
+
+        // 이슈 있는 것 먼저
+        results.sort((a, b) => b.issues.length - a.issues.length);
+        return results;
+    }
+
+    // ── UI: 번호 검증 탭 ──
+    renderNumberingCheck() {
+        const sequences = this._extractNumberSequences();
+
+        let html = this._renderHeader('numbering');
+        html += '<div class="sf-body">';
+
+        if (sequences.length === 0) {
+            html += '<p style="text-align:center; color:#7f8c8d; padding:40px 20px;">번호 패턴이 감지된 스타일이 없습니다.</p>';
+        } else {
+            const totalIssues = sequences.reduce((s, seq) => s + seq.issues.length, 0);
+            if (totalIssues > 0) {
+                html += `<div class="sf-issue-banner sf-issue-error">${totalIssues}개 문제 발견</div>`;
+            } else {
+                html += `<div class="sf-issue-banner sf-issue-ok">모든 번호 순서 정상</div>`;
+            }
+
+            for (const seq of sequences) {
+                const { entry, sorted, issues } = seq;
+                const hasIssues = issues.length > 0;
+                const issueIndices = new Set(issues.map(iss => iss.index));
+
+                html += `<div class="sf-num-section ${hasIssues ? 'sf-has-issues' : ''}">`;
+                html += `<div class="sf-num-header">
+                    <span class="sf-color-swatch">Aa</span>
+                    <strong>${this._esc(entry.fontName)}</strong> ${entry.fontSize}pt
+                    <span class="sf-style-count">${sorted.length}개</span>
+                    ${hasIssues ? `<span class="sf-issue-badge">${issues.length}개 문제</span>` : '<span class="sf-ok-badge">OK</span>'}
+                </div>`;
+
+                // 이슈 요약
+                if (hasIssues) {
+                    html += '<div class="sf-issue-list">';
+                    for (const iss of issues) {
+                        const icon = iss.type === 'duplicate' ? '⊜' : iss.type === 'gap' ? '⊘' : '⇅';
+                        html += `<div class="sf-issue-item sf-issue-${iss.type}" data-page="${iss.span.pageNum}">
+                            <span class="sf-issue-icon">${icon}</span>
+                            <span class="sf-issue-msg">${this._esc(iss.message)}</span>
+                            <span class="sf-issue-page">p.${iss.span.pageNum}</span>
+                        </div>`;
+                    }
+                    html += '</div>';
+                }
+
+                // 번호 시퀀스 미리보기 (접이식)
+                html += `<details class="sf-num-details">
+                    <summary>전체 시퀀스 보기 (${sorted.length}개)</summary>
+                    <div class="sf-num-sequence">`;
+                for (let i = 0; i < sorted.length; i++) {
+                    const item = sorted[i];
+                    const isIssue = issueIndices.has(i);
+                    const truncated = item.span.text.length > 50 ? item.span.text.substring(0, 50) + '…' : item.span.text;
+                    html += `<div class="sf-num-item ${isIssue ? 'sf-num-error' : ''}" data-page="${item.span.pageNum}">
+                        <span class="sf-num-value">${item.num}</span>
+                        <span class="sf-num-text">${this._esc(truncated)}</span>
+                        <span class="sf-num-page">p.${item.span.pageNum}</span>
+                    </div>`;
+                }
+                html += '</div></details>';
+                html += '</div>';
+            }
         }
 
         html += '</div>';
         this.modalContent.innerHTML = html;
-        this._bindTabEvents();
+        this._bindHeaderEvents();
 
-        // 페이지 네비게이션
-        this.modalContent.querySelector('.sf-page-prev')?.addEventListener('click', () => this.renderPageDump(pageNum - 1));
-        this.modalContent.querySelector('.sf-page-next')?.addEventListener('click', () => this.renderPageDump(pageNum + 1));
-        const input = this.modalContent.querySelector('.sf-page-input');
-        input?.addEventListener('change', () => {
-            const val = parseInt(input.value);
-            if (val >= 1 && val <= totalPages) this.renderPageDump(val);
+        // 클릭 시 페이지 이동
+        this.modalContent.querySelectorAll('[data-page]').forEach(el => {
+            el.style.cursor = 'pointer';
+            el.addEventListener('click', () => {
+                const pageNum = parseInt(el.dataset.page);
+                if (this.viewer.scrollManager) {
+                    this.viewer.scrollManager.scrollToPage(pageNum);
+                }
+            });
         });
     }
 
@@ -493,9 +615,9 @@ export class PDFStyleFinder {
         if (!this.isAnalyzed) return;
 
         const sorted = [...this.styles.values()].sort((a, b) => b.count - a.count);
-        let text = '폰트\t크기\t색상\t횟수\n';
+        let text = '폰트\t크기\t횟수\n';
         for (const entry of sorted) {
-            text += `${entry.fontName}\t${entry.fontSize}\t${this.colorToHex(entry.color)}\t${entry.count}\n`;
+            text += `${entry.fontName}\t${entry.fontSize}\t${entry.count}\n`;
         }
 
         navigator.clipboard.writeText(text).then(() => {
@@ -526,10 +648,5 @@ export class PDFStyleFinder {
 
     _escAttr(str) {
         return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }
-
-    _contrastColor(color) {
-        const lum = (0.299 * color.r + 0.587 * color.g + 0.114 * color.b) / 255;
-        return lum > 0.5 ? '#000' : '#fff';
     }
 }

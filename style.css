@@ -1239,7 +1239,9 @@ h4 {
     width: 32px;
     height: 24px;
     border-radius: 4px;
-    border: 1px solid rgba(0,0,0,0.1);
+    border: 1px solid #ddd;
+    background: #f0f0f0;
+    color: #555;
     flex-shrink: 0;
     display: flex;
     align-items: center;
@@ -1251,10 +1253,26 @@ h4 {
 .sf-style-info {
     flex: 1;
     display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.sf-style-meta {
+    display: flex;
     flex-wrap: wrap;
     gap: 4px 10px;
     align-items: baseline;
-    min-width: 0;
+}
+
+.sf-style-preview {
+    font-size: 0.78em;
+    color: #888;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+    line-height: 1.4;
 }
 
 .sf-font-name {
@@ -1285,7 +1303,7 @@ h4 {
     border-radius: 10px;
     font-size: 0.8em;
     font-weight: 600;
-    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 /* 매칭 결과 */
@@ -1361,76 +1379,175 @@ h4 {
     padding: 12px;
 }
 
-/* 페이지별 보기 */
-.sf-page-nav {
+/* 번호 검증 */
+.sf-issue-banner {
+    padding: 10px 16px;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 0.9em;
+    margin-bottom: 16px;
+    text-align: center;
+}
+
+.sf-issue-error {
+    background: #fdecea;
+    color: #c0392b;
+}
+
+.sf-issue-ok {
+    background: #eafaf1;
+    color: #27ae60;
+}
+
+.sf-num-section {
+    border: 1px solid #eee;
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 12px;
+}
+
+.sf-num-section.sf-has-issues {
+    border-color: #f5c6cb;
+    background: #fff8f8;
+}
+
+.sf-num-header {
     display: flex;
     align-items: center;
-    justify-content: center;
-    gap: 10px;
-    margin-bottom: 14px;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 0.9em;
 }
 
-.sf-page-nav button {
-    padding: 4px 12px;
-    border: 1px solid #ddd;
+.sf-issue-badge {
+    background: #e74c3c;
+    color: #fff;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.8em;
+    font-weight: 600;
+}
+
+.sf-ok-badge {
+    background: #27ae60;
+    color: #fff;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.8em;
+    font-weight: 600;
+}
+
+.sf-issue-list {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.sf-issue-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
     border-radius: 4px;
-    background: #fff;
-    cursor: pointer;
-}
-
-.sf-page-nav button:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-}
-
-.sf-page-input {
-    width: 50px;
-    text-align: center;
-    border: 1px solid #ddd;
-    border-radius: 4px;
-    padding: 2px 4px;
-}
-
-.sf-dump-table {
-    overflow-x: auto;
-}
-
-.sf-dump-table table {
-    width: 100%;
-    border-collapse: collapse;
     font-size: 0.85em;
 }
 
-.sf-dump-table th {
-    text-align: left;
-    padding: 8px;
-    border-bottom: 2px solid #eee;
-    color: #555;
+.sf-issue-item:hover {
+    filter: brightness(0.96);
+}
+
+.sf-issue-gap {
+    background: #fff3cd;
+    color: #856404;
+}
+
+.sf-issue-duplicate {
+    background: #fdecea;
+    color: #c0392b;
+}
+
+.sf-issue-order {
+    background: #fdecea;
+    color: #c0392b;
+}
+
+.sf-issue-icon {
+    font-size: 1.1em;
+    flex-shrink: 0;
+}
+
+.sf-issue-msg {
+    flex: 1;
     font-weight: 600;
+}
+
+.sf-issue-page {
+    color: inherit;
+    opacity: 0.7;
+    font-size: 0.9em;
     white-space: nowrap;
 }
 
-.sf-dump-table td {
-    padding: 6px 8px;
-    border-bottom: 1px solid #f5f5f5;
-    vertical-align: top;
+.sf-num-details {
+    margin-top: 10px;
 }
 
-.sf-cell-text {
-    max-width: 300px;
+.sf-num-details summary {
+    cursor: pointer;
+    font-size: 0.82em;
+    color: #888;
+    user-select: none;
+}
+
+.sf-num-details summary:hover {
+    color: #555;
+}
+
+.sf-num-sequence {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.sf-num-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border-radius: 3px;
+    font-size: 0.83em;
+}
+
+.sf-num-item:hover {
+    background: #f5f5f5;
+}
+
+.sf-num-error {
+    background: #fdecea !important;
+    font-weight: 600;
+}
+
+.sf-num-value {
+    min-width: 32px;
+    font-weight: 700;
+    color: #2c3e50;
+    text-align: right;
+}
+
+.sf-num-text {
+    flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    color: #555;
 }
 
-.sf-color-dot {
-    display: inline-block;
-    width: 12px;
-    height: 12px;
-    border-radius: 2px;
-    border: 1px solid rgba(0,0,0,0.1);
-    vertical-align: middle;
-    margin-right: 4px;
+.sf-num-page {
+    color: #aaa;
+    font-size: 0.9em;
+    white-space: nowrap;
 }
 
 /* 진행률 바 */

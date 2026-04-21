@@ -3325,6 +3325,9 @@ export class PDFSeparationViewer {
             // 비율: 전체 TrimBox 너비(pt) / 전체 mm
             const ptPerMm = trimW / totalMm;
 
+            const formatSel = document.getElementById('export-separated-format');
+            const exportFormat = formatSel ? formatSel.value : 'jpg'; // 'jpg' | 'pdf'
+
             let currentX = trimX; // 크롭 시작 X 좌표 (PDF 좌표계)
 
             // 분할 파트 정의 (순서대로: 뒷날개 -> 뒷표지 -> 책등 -> 앞표지 -> 앞날개)
@@ -3363,20 +3366,25 @@ export class PDFSeparationViewer {
                 copiedPage.setCropBox(currentX, trimY, partWidthPt, trimH);
                 copiedPage.setMediaBox(currentX, trimY, partWidthPt, trimH); // MediaBox도 맞춰줌 (뷰어 호환성)
 
-                // PDF → JPG 변환
                 const pdfBytes = await newPdf.save();
-                const partPdf = await pdfjsLib.getDocument({ data: pdfBytes }).promise;
-                const partPage = await partPdf.getPage(1);
-                const jpgScale = 600 / 72;
-                const partViewport = partPage.getViewport({ scale: jpgScale });
-                const partCanvas = document.createElement('canvas');
-                partCanvas.width = Math.floor(partViewport.width);
-                partCanvas.height = Math.floor(partViewport.height);
-                const partCtx = partCanvas.getContext('2d');
-                await partPage.render({ canvasContext: partCtx, viewport: partViewport }).promise;
-                const jpgBlob = await new Promise(resolve => partCanvas.toBlob(resolve, 'image/jpeg', 0.95));
-                zip.file(`${part.name}.jpg`, jpgBlob);
-                partPdf.destroy();
+
+                if (exportFormat === 'pdf') {
+                    zip.file(`${part.name}.pdf`, pdfBytes);
+                } else {
+                    // PDF → JPG 변환
+                    const partPdf = await pdfjsLib.getDocument({ data: pdfBytes }).promise;
+                    const partPage = await partPdf.getPage(1);
+                    const jpgScale = 600 / 72;
+                    const partViewport = partPage.getViewport({ scale: jpgScale });
+                    const partCanvas = document.createElement('canvas');
+                    partCanvas.width = Math.floor(partViewport.width);
+                    partCanvas.height = Math.floor(partViewport.height);
+                    const partCtx = partCanvas.getContext('2d');
+                    await partPage.render({ canvasContext: partCtx, viewport: partViewport }).promise;
+                    const jpgBlob = await new Promise(resolve => partCanvas.toBlob(resolve, 'image/jpeg', 0.95));
+                    zip.file(`${part.name}.jpg`, jpgBlob);
+                    partPdf.destroy();
+                }
 
                 // 다음 위치로 이동
                 currentX += partWidthPt;
