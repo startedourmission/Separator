@@ -220,8 +220,15 @@
             <div class="viewer-controls">
                 <h3>이미지 내보내기 (TrimBox)</h3>
                 <div style="margin-bottom: 15px;">
+                    <div style="font-weight: 600; margin-bottom: 6px;">재단선 없는 펼침면 내려받기</div>
+                    <select id="export-spread-mode" style="width: 100%; margin-bottom: 6px; padding: 6px;">
+                        <option value="current">현재 페이지 자르기</option>
+                        <option value="all">전체 페이지 자르기</option>
+                        <option value="range">쪽수 지정으로 자르기</option>
+                    </select>
+                    <input type="text" id="export-spread-range" placeholder="예: 1-3,5,7-9" style="width: 100%; margin-bottom: 6px; padding: 6px; display: none;">
                     <button id="export-spread" class="tool-btn" style="width: 100%; margin-bottom: 8px;">
-                        재단선 없는 펼침면 내려받기
+                        내려받기
                     </button>
                     <p class="help-text">설정된 재단 크기(TrimBox)만큼 원본 PDF를 잘라내어 저장합니다.</p>
                 </div>
