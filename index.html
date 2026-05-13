@@ -399,7 +399,7 @@
                 const needsKoreanFont = texts.some(t => containsNonLatin(t));
                 let koreanFontBytes = null;
                 if (needsKoreanFont) {
-                    koreanFontBytes = await fetch('fonts/NotoSansKR-Regular.otf').then(r => r.arrayBuffer());
+                    koreanFontBytes = await fetch('https://cdn.jsdelivr.net/npm/@expo-google-fonts/noto-sans-kr@0.4.3/400Regular/NotoSansKR_400Regular.ttf').then(r => r.arrayBuffer());
                 }
 
                 // ZIP 생성 필요 여부 확인 (2개 이상일 때)
