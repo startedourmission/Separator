@@ -1937,7 +1937,11 @@ export class PDFSeparationViewer {
         let candidates = [];
         if (rawCandidates.length > 0) {
             let group = [rawCandidates[0]];
+            // 트림마크는 0.25~0.5pt 두께라 캔버스에서 폭 10px을 넘지 않음.
+            // 검은 배경 영역이 통째로 한 그룹으로 묶여 가짜 무게중심을 만드는 것을 차단.
+            const maxGroupSpan = 10;
             const processGroup = (g) => {
+                if (g[g.length - 1].x - g[0].x > maxGroupSpan) return;
                 const totalWeight = g.reduce((s, c) => s + (255 - c.minB) + c.count, 0);
                 const avgX = totalWeight > 0
                     ? g.reduce((s, c) => s + c.x * ((255 - c.minB) + c.count), 0) / totalWeight
@@ -1955,12 +1959,36 @@ export class PDFSeparationViewer {
             processGroup(group);
         }
 
+        // TrimBox 바깥(±2pt 초과)에 있는 후보 제거. 트림마크는 TrimBox 모서리/내부에만 그려짐.
+        if (metadata && metadata.trimBox) {
+            const pxToPt = metadata.mediaBox.width / width;
+            const trimLeftPx = (metadata.trimBox.x - 2) / pxToPt;
+            const trimRightPx = (metadata.trimBox.x + metadata.trimBox.width + 2) / pxToPt;
+            candidates = candidates.filter(c => c.x >= trimLeftPx && c.x <= trimRightPx);
+        }
+
         this.allCandidates = candidates;
 
+        // 이미지 후보 부족 시 벡터 폴백: PDF 안의 짧은 세로선 중 페이지 모서리에 위치한 것을 클러스터링.
+        // 배경에 트림마크가 시각적으로 묻혀 있어도 벡터 path는 정확히 남아 있어서 잡힘.
         if (candidates.length < 4) {
-            alert(`재단선을 충분히 찾지 못했습니다. (후보: ${candidates.length}개)\n매우 얇은 헤어라인도 감지하도록 알고리즘이 개선되었으나, 파일 상단에 재단선이 보이지 않습니다.`);
-            this.hideLoading();
-            return;
+            try {
+                const vectorMarks = await this._findTrimMarksFromVector(pageNum, metadata, canvas.width);
+                if (vectorMarks && vectorMarks.length >= 4) {
+                    candidates = vectorMarks;
+                    this.allCandidates = candidates;
+                    console.log(`벡터 폴백으로 ${vectorMarks.length}개 재단선 후보 추출`);
+                } else {
+                    alert(`재단선을 찾지 못했습니다.`);
+                    this.hideLoading();
+                    return;
+                }
+            } catch (e) {
+                console.warn('벡터 폴백 실패:', e);
+                alert(`재단선을 찾지 못했습니다.`);
+                this.hideLoading();
+                return;
+            }
         }
 
         // 6점 선별
@@ -2072,7 +2100,9 @@ export class PDFSeparationViewer {
                 const dy = Math.abs(seg.y1 - seg.y0);
                 // 수직선: x 변화 작고 y 변화 있으면 무조건 수집
                 if (dx < 1 && dy >= 2) {
-                    verticalLines.push({ x: (seg.x0 + seg.x1) / 2, length: dy });
+                    const yMin = Math.min(seg.y0, seg.y1);
+                    const yMax = Math.max(seg.y0, seg.y1);
+                    verticalLines.push({ x: (seg.x0 + seg.x1) / 2, length: dy, yMin, yMax });
                 }
             }
             pendingLines = [];
@@ -2133,6 +2163,56 @@ export class PDFSeparationViewer {
         page.cleanup();
         pdf.destroy();
         return verticalLines;
+    }
+
+    // 벡터 라인 → 트림마크 후보 (이미지 감지가 실패했을 때 폴백).
+    // 페이지 상/하단 모서리 영역에 있는 짧은 세로선을 x로 클러스터링하여 추출.
+    async _findTrimMarksFromVector(pageNum, metadata, canvasWidth) {
+        const lines = await this._extractVectorVerticalLines(pageNum, metadata);
+        if (!lines || lines.length === 0) return null;
+
+        const pageH = metadata.mediaBox.height;
+        const trimY = metadata.trimBox.y;
+        const trimLeft = metadata.trimBox.x;
+        const trimRight = metadata.trimBox.x + metadata.trimBox.width;
+        // TrimBox 바깥(여백)에만 있는 짧은 세로선. trimY가 곧 모서리 마진 두께.
+        // x도 TrimBox 안쪽 ±2pt 범위로 제한 (트림마크는 TrimBox 모서리/내부에만 그려짐)
+        const cornerMargin = Math.max(trimY - 1, 5);
+        const cornerLines = lines.filter(l =>
+            l.length >= 3 && l.length <= 15 &&
+            l.x >= trimLeft - 2 && l.x <= trimRight + 2 &&
+            (l.yMin < cornerMargin || l.yMax > pageH - cornerMargin)
+        );
+        if (cornerLines.length === 0) return null;
+
+        // x 좌표로 클러스터링 (±2pt 이내면 같은 마크)
+        cornerLines.sort((a, b) => a.x - b.x);
+        const clusters = [];
+        for (const l of cornerLines) {
+            const last = clusters[clusters.length - 1];
+            if (last && l.x - last.xLast < 2) {
+                last.members.push(l);
+                last.xLast = l.x;
+                last.xSum += l.x;
+            } else {
+                clusters.push({ xLast: l.x, xSum: l.x, members: [l] });
+            }
+        }
+
+        // 멤버 3개 이상인 클러스터만 트림마크 후보 (단일 그래픽 세로선 제외)
+        const strong = clusters
+            .filter(c => c.members.length >= 3)
+            .map(c => ({ x: c.xSum / c.members.length, count: c.members.length }));
+        if (strong.length < 4) return null;
+
+        // pt → 캔버스 px 변환
+        const ptToPx = canvasWidth / metadata.mediaBox.width;
+        return strong.map(c => ({
+            x: c.x * ptToPx,
+            topY: 0,
+            count: c.count,
+            minB: 0
+        }));
     }
 
     renderCropMarkers() {
