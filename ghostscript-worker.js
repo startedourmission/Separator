@@ -1,14 +1,35 @@
 // Ghostscript WebWorker
 import Module from './gs.mjs';
 
-let gsModule = null;
+// gs.wasm(16MB)을 매 호출마다 fetch+컴파일하면 페이지당 수백 ms~수 초를 낭비하므로
+// 워커당 1회만 컴파일해서 캐시하고, 이후에는 인스턴스화만 수행
+let compiledWasm = null;
+
+async function getCompiledWasm() {
+    if (!compiledWasm) {
+        const url = new URL('gs.wasm', self.location.href).href;
+        compiledWasm = await WebAssembly.compileStreaming(fetch(url));
+    }
+    return compiledWasm;
+}
 
 function createModuleConfig(overrides = {}) {
-    return Object.assign({
+    const config = Object.assign({
         locateFile: (path) => new URL(path, self.location.href).href,
         print: () => { },
         printErr: () => { }
     }, overrides);
+
+    // 컴파일 캐시가 있으면 fetch/컴파일 없이 인스턴스화만
+    if (compiledWasm) {
+        config.instantiateWasm = (imports, receiveInstance) => {
+            WebAssembly.instantiate(compiledWasm, imports)
+                .then((instance) => receiveInstance(instance));
+            return {};
+        };
+    }
+
+    return config;
 }
 
 function interceptConsole(handler) {
@@ -37,10 +58,53 @@ function interceptConsole(handler) {
 }
 
 async function initGhostscript() {
-    if (!gsModule) {
-        gsModule = await Module(createModuleConfig({ noExitRuntime: true }));
+    // 인스턴스는 요청마다 새로 만들므로 초기화 시점에는 wasm 컴파일만 해서 캐시
+    await getCompiledWasm();
+}
+
+// tiffsep 플레이트 파일명에서 색상명 추출 (%XX 인코딩/EUC-KR 대응)
+function decodePlateColorName(rawName) {
+    let colorName = rawName;
+
+    // %XX URL 인코딩 패턴이 포함되면 바이트로 변환 후 EUC-KR 디코딩
+    if (/%[0-9A-Fa-f]{2}/.test(colorName)) {
+        try {
+            const bytes = [];
+            let i = 0;
+            while (i < colorName.length) {
+                if (colorName[i] === '%' && i + 2 < colorName.length) {
+                    bytes.push(parseInt(colorName.substring(i + 1, i + 3), 16));
+                    i += 3;
+                } else {
+                    bytes.push(colorName.charCodeAt(i));
+                    i++;
+                }
+            }
+            const byteArray = new Uint8Array(bytes);
+            try {
+                colorName = new TextDecoder('euc-kr', { fatal: true }).decode(byteArray);
+            } catch {
+                try {
+                    colorName = new TextDecoder('utf-8', { fatal: true }).decode(byteArray);
+                } catch {
+                    // 실패 시 원본 유지
+                }
+            }
+        } catch (e) {
+            // 디코딩 실패 시 원본 유지
+        }
     }
-    return gsModule;
+    // 비ASCII 문자가 직접 포함된 경우 (URL 인코딩 없이)
+    else if (/[^\x00-\x7F]/.test(colorName)) {
+        try {
+            const bytes = new Uint8Array([...colorName].map(c => c.charCodeAt(0)));
+            colorName = new TextDecoder('euc-kr', { fatal: true }).decode(bytes);
+        } catch {
+            // 디코딩 실패 시 원본 유지
+        }
+    }
+
+    return colorName;
 }
 
 async function getPDFPageSize(pdfData, pageNum = 1) {
@@ -349,48 +413,7 @@ self.addEventListener('message', async function (e) {
                     // 패턴 1: plate1(ColorName).tif 또는 plate(ColorName).tif (%d+%s 혼합 패턴)
                     let match = file.match(/plate\d*\((.+?)\)\.tif/);
                     if (match) {
-                        colorName = match[1];
-                        // %XX URL 인코딩 패턴이 포함되면 바이트로 변환 후 EUC-KR 디코딩
-                        if (/%[0-9A-Fa-f]{2}/.test(colorName)) {
-                            try {
-                                const bytes = [];
-                                let i = 0;
-                                while (i < colorName.length) {
-                                    if (colorName[i] === '%' && i + 2 < colorName.length) {
-                                        bytes.push(parseInt(colorName.substring(i + 1, i + 3), 16));
-                                        i += 3;
-                                    } else {
-                                        bytes.push(colorName.charCodeAt(i));
-                                        i++;
-                                    }
-                                }
-                                const byteArray = new Uint8Array(bytes);
-                                // EUC-KR 디코딩 시도
-                                try {
-                                    const decoded = new TextDecoder('euc-kr', { fatal: true }).decode(byteArray);
-                                    colorName = decoded;
-                                } catch {
-                                    // UTF-8 시도
-                                    try {
-                                        colorName = new TextDecoder('utf-8', { fatal: true }).decode(byteArray);
-                                    } catch {
-                                        // 실패 시 원본 유지
-                                    }
-                                }
-                            } catch (e) {
-                                // 디코딩 실패 시 원본 유지
-                            }
-                        }
-                        // 비ASCII 문자가 직접 포함된 경우 (URL 인코딩 없이)
-                        else if (/[^\x00-\x7F]/.test(colorName)) {
-                            try {
-                                const bytes = new Uint8Array([...colorName].map(c => c.charCodeAt(0)));
-                                const decoded = new TextDecoder('euc-kr', { fatal: true }).decode(bytes);
-                                colorName = decoded;
-                            } catch {
-                                // 디코딩 실패 시 원본 유지
-                            }
-                        }
+                        colorName = decodePlateColorName(match[1]);
                     }
 
                     // 패턴 2: plateCyan.tif 등 (%s 패턴 결과)
@@ -595,6 +618,213 @@ self.addEventListener('message', async function (e) {
                 width: options.width || 800,
                 height: options.height || 600
             });
+        } else if (type === 'renderPagesChunk') {
+            // 페이지 범위를 GS 1회 실행으로 렌더링 (tiff32nc CMYK).
+            // 페이지마다 모듈 초기화 + PDF 파싱을 반복하지 않으므로 훨씬 빠름.
+            const { pdfData, firstPage, lastPage, dpi } = data;
+            try {
+                const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
+                moduleInstance.FS.writeFile("input.pdf", new Uint8Array(pdfData));
+
+                const args = [
+                    '-dNOPAUSE',
+                    '-dBATCH',
+                    '-dSAFER',
+                    '-sDEVICE=tiff32nc',
+                    `-r${dpi || 72}`,
+                    `-dFirstPage=${firstPage}`,
+                    `-dLastPage=${lastPage}`,
+                    '-sOutputFile=scan_%d.tif',
+                    'input.pdf'
+                ];
+
+                try {
+                    moduleInstance.callMain(args);
+                } catch (error) {
+                    if (error?.name !== 'ExitStatus' || error.status !== 0) {
+                        throw error;
+                    }
+                }
+
+                // 출력 파일 번호는 1부터 시작 (scan_1.tif = firstPage)
+                for (let p = firstPage; p <= lastPage; p++) {
+                    const fname = `scan_${p - firstPage + 1}.tif`;
+                    let tiffData = null;
+                    try {
+                        tiffData = moduleInstance.FS.readFile(fname, { encoding: "binary" });
+                        moduleInstance.FS.unlink(fname);
+                    } catch (e) {
+                        // 해당 페이지 출력 없음
+                    }
+
+                    if (tiffData) {
+                        self.postMessage({
+                            type: 'chunkPageResult',
+                            requestId: requestId,
+                            success: true,
+                            pageNum: p,
+                            format: 'tiff',
+                            data: tiffData
+                        }, [tiffData.buffer]);
+                    } else {
+                        self.postMessage({
+                            type: 'chunkPageResult',
+                            requestId: requestId,
+                            success: false,
+                            pageNum: p,
+                            message: '페이지 렌더 결과 없음'
+                        });
+                    }
+                }
+
+                self.postMessage({ type: 'chunkDone', requestId: requestId, success: true });
+            } catch (error) {
+                console.error('renderPagesChunk 실패:', error);
+                self.postMessage({
+                    type: 'chunkDone',
+                    requestId: requestId,
+                    success: false,
+                    message: error.message
+                });
+            }
+        } else if (type === 'probeSpotColors') {
+            // 초저해상도 tiffsep으로 문서 전체를 훑어 실제 생성되는 분판 플레이트 이름을 수집.
+            // PDF 바이너리 정규식 검색과 달리 압축 스트림 문서에서도 정확하고,
+            // 이후 tiffsep 스캔의 플레이트 파일명과 이름이 반드시 일치함.
+            try {
+                const { pdfData } = data;
+                const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
+                moduleInstance.FS.writeFile("input.pdf", new Uint8Array(pdfData));
+
+                const args = [
+                    '-dNOPAUSE',
+                    '-dBATCH',
+                    '-dNOSAFER',
+                    '-sDEVICE=tiffsep',
+                    '-r4',
+                    '-dMaxSpots=10',
+                    '-sOutputFile=probe%d.tif',
+                    'input.pdf'
+                ];
+
+                try {
+                    moduleInstance.callMain(args);
+                } catch (error) {
+                    if (error?.name !== 'ExitStatus' || error.status !== 0) {
+                        throw error;
+                    }
+                }
+
+                const files = moduleInstance.FS.readdir('/');
+                const spotSet = new Set();
+                for (const file of files) {
+                    const match = file.match(/^probe\d+\((.+)\)\.tif$/);
+                    if (!match) continue;
+                    const colorName = decodePlateColorName(match[1]);
+                    if (!['cyan', 'magenta', 'yellow', 'black'].includes(colorName.toLowerCase())) {
+                        spotSet.add(colorName);
+                    }
+                    try { moduleInstance.FS.unlink(file); } catch (e) { }
+                }
+
+                self.postMessage({
+                    type: 'probeSpotColors',
+                    requestId: requestId,
+                    success: true,
+                    spotColors: Array.from(spotSet)
+                });
+            } catch (error) {
+                console.error('별색 프로브 실패:', error);
+                self.postMessage({
+                    type: 'probeSpotColors',
+                    requestId: requestId,
+                    success: false,
+                    message: error.message
+                });
+            }
+        } else if (type === 'processTiffsepChunk') {
+            // 페이지 범위를 tiffsep으로 1회 실행 — 별색 분판 교정용.
+            // plateN(색상명).tif 형식으로 페이지별 분판 파일이 생성됨 (N = 범위 내 순번).
+            const { pdfData, firstPage, lastPage, dpi } = data;
+            try {
+                const tiffsepDpi = Math.min(dpi || 72, 300);
+                const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
+                moduleInstance.FS.writeFile("input.pdf", new Uint8Array(pdfData));
+
+                const args = [
+                    '-dNOPAUSE',
+                    '-dBATCH',
+                    '-dNOSAFER',
+                    '-sDEVICE=tiffsep',
+                    `-r${tiffsepDpi}`,
+                    `-dFirstPage=${firstPage}`,
+                    `-dLastPage=${lastPage}`,
+                    '-dMaxSpots=10',
+                    '-sOutputFile=plate%d.tif',
+                    'input.pdf'
+                ];
+
+                try {
+                    moduleInstance.callMain(args);
+                } catch (error) {
+                    if (error?.name !== 'ExitStatus' || error.status !== 0) {
+                        throw error;
+                    }
+                }
+
+                const files = moduleInstance.FS.readdir('/');
+
+                for (let p = firstPage; p <= lastPage; p++) {
+                    const seq = p - firstPage + 1;
+                    const pattern = new RegExp(`^plate${seq}\\((.+)\\)\\.tif$`);
+
+                    const channels = {};
+                    const spotColors = [];
+                    const transfers = [];
+
+                    for (const file of files) {
+                        const match = file.match(pattern);
+                        if (!match) continue;
+
+                        const colorName = decodePlateColorName(match[1]);
+                        try {
+                            const tiffData = moduleInstance.FS.readFile(file, { encoding: "binary" });
+                            channels[colorName] = tiffData;
+                            transfers.push(tiffData.buffer);
+                            moduleInstance.FS.unlink(file);
+                        } catch (e) {
+                            continue;
+                        }
+
+                        if (!['cyan', 'magenta', 'yellow', 'black'].includes(colorName.toLowerCase())) {
+                            spotColors.push(colorName);
+                        }
+                    }
+
+                    // composite 파일은 사용하지 않으므로 바로 삭제
+                    try { moduleInstance.FS.unlink(`plate${seq}.tif`); } catch (e) { }
+
+                    self.postMessage({
+                        type: 'tiffsepChunkPage',
+                        requestId: requestId,
+                        success: Object.keys(channels).length > 0,
+                        pageNum: p,
+                        channels: channels,
+                        spotColors: spotColors,
+                        dpi: tiffsepDpi
+                    }, transfers);
+                }
+
+                self.postMessage({ type: 'chunkDone', requestId: requestId, success: true });
+            } catch (error) {
+                console.error('processTiffsepChunk 실패:', error);
+                self.postMessage({
+                    type: 'chunkDone',
+                    requestId: requestId,
+                    success: false,
+                    message: error.message
+                });
+            }
         }
     } catch (error) {
         console.error('Worker error:', error);

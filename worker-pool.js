@@ -77,6 +77,14 @@ class WorkerPool {
 
         const pending = this.pendingRequests.get(requestId);
         if (pending) {
+            // 청크 스트리밍 중간 결과: 요청을 끝내지 않고 페이지 콜백만 호출
+            if (type === 'chunkPageResult' || type === 'tiffsepChunkPage') {
+                if (pending.onProgress) {
+                    pending.onProgress({ type, success, ...data });
+                }
+                return;
+            }
+
             this.pendingRequests.delete(requestId);
 
             // Worker를 다시 사용 가능하게 설정
@@ -168,14 +176,14 @@ class WorkerPool {
     }
 
     executeTask(workerId, worker, task) {
-        const { type, data, resolve, reject } = task;
+        const { type, data, resolve, reject, onProgress } = task;
         const reqId = ++this.requestId;
 
         const workerInfo = this.activeWorkers.get(workerId);
         workerInfo.busy = true;
         workerInfo.currentRequestId = reqId;
 
-        this.pendingRequests.set(reqId, { resolve, reject });
+        this.pendingRequests.set(reqId, { resolve, reject, onProgress });
 
         worker.postMessage({
             type,
@@ -219,6 +227,46 @@ class WorkerPool {
         });
 
         return Promise.all(promises);
+    }
+
+    // 페이지 범위를 한 번의 GS 실행으로 렌더링 (tiff32nc). 페이지 결과는 onPageResult로 스트리밍.
+    renderPagesChunk(firstPage, lastPage, dpi, onPageResult) {
+        return new Promise((resolve, reject) => {
+            const task = {
+                type: 'renderPagesChunk',
+                data: { firstPage, lastPage, dpi },
+                resolve,
+                reject,
+                onProgress: onPageResult
+            };
+
+            const available = this.getAvailableWorker();
+            if (available) {
+                this.executeTask(available.workerId, available.worker, task);
+            } else {
+                this.taskQueue.push(task);
+            }
+        });
+    }
+
+    // 페이지 범위를 한 번의 tiffsep 실행으로 분판 렌더링. 페이지 결과는 onPageResult로 스트리밍.
+    processTiffsepChunk(firstPage, lastPage, dpi, onPageResult) {
+        return new Promise((resolve, reject) => {
+            const task = {
+                type: 'processTiffsepChunk',
+                data: { firstPage, lastPage, dpi },
+                resolve,
+                reject,
+                onProgress: onPageResult
+            };
+
+            const available = this.getAvailableWorker();
+            if (available) {
+                this.executeTask(available.workerId, available.worker, task);
+            } else {
+                this.taskQueue.push(task);
+            }
+        });
     }
 
     // 배치 처리 (메모리 관리를 위해 청크 단위로 처리)

@@ -421,6 +421,16 @@ export class PDFSeparationViewer {
                         }
                         this.pendingRequests.delete(requestId);
                     }
+                } else if (type === 'probeSpotColors') {
+                    const pending = this.pendingRequests.get(requestId);
+                    if (pending) {
+                        if (success) {
+                            pending.resolve({ spotColors: spotColors || [] });
+                        } else {
+                            pending.reject(new Error(message || '별색 프로브 실패'));
+                        }
+                        this.pendingRequests.delete(requestId);
+                    }
                 } else if (type === 'listDevices') {
                     const pending = this.pendingRequests.get(requestId);
                     if (pending) {
@@ -637,6 +647,24 @@ export class PDFSeparationViewer {
                                 pageNum: pageNum || 1,
                                 dpi: dpi || 72
                             }
+                        });
+                    });
+                },
+
+                probeSpotColors: async (pdfData) => {
+                    const dataToUse = pdfData || this.currentPDFData;
+                    if (!dataToUse) {
+                        throw new Error('PDF 데이터가 없습니다');
+                    }
+
+                    return new Promise((resolve, reject) => {
+                        const reqId = ++this.requestId;
+                        this.pendingRequests.set(reqId, { resolve, reject });
+
+                        this.worker.postMessage({
+                            type: 'probeSpotColors',
+                            requestId: reqId,
+                            data: { pdfData: dataToUse }
                         });
                     });
                 }
@@ -1054,115 +1082,103 @@ export class PDFSeparationViewer {
     }
 
     async scanAllPagesInBackground() {
-        // 병렬 처리를 위해 WorkerPool 사용
-        const startTime = performance.now();
-
-        // 예상 시간 계산 (병렬 처리로 인해 더 빠름)
-        const estimatedTimePerPage = 2;
-        const parallelFactor = Math.min(this.workerPoolSize, this.totalPages);
-        const estimatedTotalSeconds = Math.ceil((this.totalPages * estimatedTimePerPage) / parallelFactor);
-        const estimatedMinutes = Math.ceil(estimatedTotalSeconds / 60);
-        const estimatedTimeText = `약 ${estimatedMinutes}분 소요 (${this.workerPoolSize}개 병렬 처리)`;
+        // 별색 문서는 처음부터 tiffsep으로 스캔 (별색이 분리된 깨끗한 CMYK + 별색 채널을 한 번에 수집).
+        // 예전처럼 tiff32nc로 먼저 스캔한 뒤 tiffsep으로 재교정하면 렌더링이 2배로 들고,
+        // 수집 완료 후에도 수치가 계속 바뀌는 것처럼 보이는 문제가 있었음.
+        const hasSpots = this.spotColors && this.spotColors.length > 0;
+        const scanDpi = 72;      // 비율 계산용이므로 저해상도로 충분
+        const chunkSize = 8;     // GS 1회 실행당 페이지 수 (모듈 초기화/PDF 파싱 비용 분산)
 
         // WorkerPool에 PDF 데이터 설정
         if (this.workerPool && this.currentPDFData) {
             this.workerPool.setPDFData(this.currentPDFData);
         }
 
-        const scanWidth = 200;  // 작은 크기로 빠르게
-        const scanHeight = 280; // A4 비율 대략
+        const titleEl = document.getElementById('scan-progress-title');
+        if (titleEl) {
+            titleEl.textContent = hasSpots ? '분판 데이터 수집 (별색 포함)' : 'CMYK 데이터 수집';
+        }
 
-        // 페이지 번호 배열 생성
-        const pageNumbers = Array.from({ length: this.totalPages }, (_, i) => i + 1);
-
-        // 완료된 페이지 카운터
         let completedPages = 0;
+        this.updateScanProgress(0, this.totalPages);
 
-        const scanDpi = 72; // 백그라운드 스캔 해상도 (비율 계산용)
-
-        // 옵션 생성 함수
-        const optionsGenerator = (pageNum) => ({
-            width: scanWidth,
-            height: scanHeight,
-            pdfWidth: scanWidth,
-            pdfHeight: scanHeight,
-            pageNum: pageNum,
-            useCMYK: true,
-            dpi: scanDpi,
-            separations: []
-        });
-
-        // 페이지 완료 콜백 (TIFF 변환 및 UI 업데이트)
-        const onPageComplete = async (result) => {
+        // 페이지 하나 처리 완료 시 진행률/비율 갱신
+        const onAnyPageDone = () => {
             completedPages++;
-
-            if (result.success && result.result) {
-                try {
-                    const { format, data, width, height } = result.result;
-
-                    if (format === 'tiff' && data) {
-                        // TIFF를 CMYK로 변환
-                        const imageData = await this.convertTIFFToCMYK(data, width, height);
-
-                        if (imageData && imageData.type === 'cmyk') {
-                            this.accumulateChannelData(imageData, result.pageNum, scanDpi);
-                        }
-                    }
-                } catch (error) {
-                    console.error(`페이지 ${result.pageNum} 변환 실패:`, error);
+            if (completedPages % 2 === 0 || completedPages >= this.totalPages) {
+                this.updateChannelRatios(this.calculateTotalChannelRatios());
+                if (hasSpots) {
+                    const spotRatios = this.calculateSpotColorRatios();
+                    if (spotRatios) this.updateSpotColorRatios(spotRatios);
                 }
-            } else {
-                console.error(`페이지 ${result.pageNum} 스캔 실패:`, result.error);
-            }
-
-            // UI 업데이트 (throttle: 5페이지마다 또는 마지막 페이지)
-            if (completedPages % 5 === 0 || completedPages === this.totalPages) {
-                const ratios = this.calculateTotalChannelRatios();
-                this.updateChannelRatios(ratios);
-                this.updateScanProgress(completedPages, this.totalPages, estimatedTimeText);
+                this.updateScanProgress(Math.min(completedPages, this.totalPages), this.totalPages);
             }
         };
 
         try {
-            // WorkerPool이 있으면 병렬 처리, 없으면 순차 처리
             if (this.workerPool) {
+                // 청크 단위 병렬 스캔: 페이지 결과는 워커에서 스트리밍으로 도착
+                const pagePromises = [];
+                const chunkPromises = [];
 
-                // 배치 크기를 Worker 수의 2배로 설정 (메모리와 성능 균형)
-                const batchSize = this.workerPoolSize * 2;
+                for (let first = 1; first <= this.totalPages; first += chunkSize) {
+                    const last = Math.min(first + chunkSize - 1, this.totalPages);
 
-                const results = await this.workerPool.renderPagesInBatches(
-                    pageNumbers,
-                    optionsGenerator,
-                    batchSize,
-                    onPageComplete
-                );
+                    const onPage = (page) => {
+                        const p = (hasSpots
+                            ? this.ingestTiffsepPageData(page)
+                            : this.ingestScanPageData(page))
+                            .catch(err => console.error(`페이지 ${page.pageNum} 스캔 처리 실패:`, err))
+                            .finally(onAnyPageDone);
+                        pagePromises.push(p);
+                    };
 
-                const endTime = performance.now();
-                const elapsedSeconds = ((endTime - startTime) / 1000).toFixed(1);
+                    const chunkPromise = hasSpots
+                        ? this.workerPool.processTiffsepChunk(first, last, scanDpi, onPage)
+                        : this.workerPool.renderPagesChunk(first, last, scanDpi, onPage);
 
+                    chunkPromises.push(chunkPromise.catch(err =>
+                        console.error(`청크 스캔 실패 (${first}-${last}쪽):`, err)
+                    ));
+                }
+
+                await Promise.all(chunkPromises);
+                await Promise.all(pagePromises);
             } else {
-                // Fallback: 기존 순차 처리
-                for (const pageNum of pageNumbers) {
-                    const options = optionsGenerator(pageNum);
+                // Fallback: 단일 워커 순차 처리
+                for (let pageNum = 1; pageNum <= this.totalPages; pageNum++) {
                     try {
-                        const result = await this.ghostscript.renderPage(pageNum, options);
-                        await onPageComplete({ pageNum, result: { format: 'tiff', data: result?.data, width: options.width, height: options.height }, success: true });
+                        if (hasSpots) {
+                            const result = await this.ghostscript.processTiffsep(this.currentPDFData, pageNum, scanDpi);
+                            await this.ingestTiffsepPageData({
+                                success: true,
+                                pageNum,
+                                channels: result.channels,
+                                dpi: result.dpi || scanDpi
+                            });
+                        } else {
+                            const imageData = await this.ghostscript.renderPage(pageNum, {
+                                useCMYK: true, dpi: scanDpi, pageNum,
+                                width: 800, height: 600, separations: []
+                            });
+                            if (imageData && imageData.type === 'cmyk') {
+                                this.accumulateChannelData(imageData, pageNum, scanDpi);
+                            }
+                        }
                     } catch (error) {
-                        await onPageComplete({ pageNum, error, success: false });
+                        console.error(`페이지 ${pageNum} 스캔 실패:`, error);
                     }
+                    onAnyPageDone();
                 }
             }
 
             // 최종 UI 업데이트
-            const ratios = this.calculateTotalChannelRatios();
-            this.updateChannelRatios(ratios);
-            this.updateScanProgress(this.totalPages, this.totalPages, '완료!');
-
-            // 별색이 있으면 tiffsep으로 깨끗한 CMYK 데이터 수집
-            if (this.spotColors && this.spotColors.length > 0) {
-                this.scanAllPagesWithTiffsep();
+            this.updateChannelRatios(this.calculateTotalChannelRatios());
+            if (hasSpots) {
+                const spotRatios = this.calculateSpotColorRatios();
+                if (spotRatios) this.updateSpotColorRatios(spotRatios);
             }
-
+            this.updateScanProgress(this.totalPages, this.totalPages);
         } catch (error) {
             console.error('병렬 스캔 중 오류:', error);
         }
@@ -1171,90 +1187,86 @@ export class PDFSeparationViewer {
         setTimeout(() => this.hideScanProgress(), 3000);
     }
 
-    /**
-     * 별색이 있을 때 모든 페이지를 tiffsep으로 재스캔하여
-     * 깨끗한 CMYK 데이터(별색 제외)로 교체
-     */
-    async scanAllPagesWithTiffsep() {
-        const lowDpi = 72; // 비율 계산용이므로 저해상도로 충분
-        let correctedPages = 0;
-
-        for (let i = 1; i <= this.totalPages; i++) {
-            // 이미 tiffsep으로 교체된 페이지는 건너뜀
-            // (단, 메타데이터 준비 전에 교체되어 재단면 카운트가 빠진 페이지는 다시 처리)
-            const pd = this.pageChannelData[i];
-            if (pd && pd.fromTiffsep && (pd.trim || !this.hasTrimMargin(i))) {
-                correctedPages++;
-                continue;
-            }
-
-            try {
-                const result = await this.ghostscript.processTiffsep(
-                    this.currentPDFData, i, lowDpi
-                );
-
-                if (result && result.channels) {
-                    const { channels, width, height } = result;
-                    const cyanParsed = await this.parseSpotColorTIFF(channels['Cyan'], 'Cyan');
-                    const magentaParsed = await this.parseSpotColorTIFF(channels['Magenta'], 'Magenta');
-                    const yellowParsed = await this.parseSpotColorTIFF(channels['Yellow'], 'Yellow');
-                    const blackParsed = await this.parseSpotColorTIFF(channels['Black'], 'Black');
-
-                    const cleanCmyk = {
-                        type: 'cmyk',
-                        width: width || cyanParsed.width,
-                        height: height || cyanParsed.height,
-                        channels: {
-                            cyan: cyanParsed.data,
-                            magenta: magentaParsed.data,
-                            yellow: yellowParsed.data,
-                            black: blackParsed.data
-                        }
-                    };
-
-                    // 워커가 실제 사용한 DPI (없으면 요청값으로 폴백)
-                    const usedDpi = result.dpi || lowDpi;
-                    this.replacePageChannelData(cleanCmyk, i, usedDpi);
-
-                    // 별색 데이터도 수집
-                    const spotColorData = {};
-                    for (const colorName of this.spotColors) {
-                        if (channels[colorName]) {
-                            const parsed = await this.parseSpotColorTIFF(channels[colorName], colorName);
-                            spotColorData[colorName] = parsed.data;
-                        }
-                    }
-                    this.accumulateSpotColorData(spotColorData, i, cleanCmyk.width, cleanCmyk.height, usedDpi);
-
-                    correctedPages++;
-
-                    // 5페이지마다 또는 마지막 페이지에서 UI 업데이트
-                    if (correctedPages % 5 === 0 || i === this.totalPages) {
-                        const cmykRatios = this.calculateTotalChannelRatios();
-                        if (cmykRatios) this.updateChannelRatios(cmykRatios);
-                        const spotRatios = this.calculateSpotColorRatios();
-                        if (spotRatios) this.updateSpotColorRatios(spotRatios);
-                    }
-                }
-            } catch (error) {
-                console.warn(`tiffsep 교정 스캔 실패 (페이지 ${i}):`, error.message);
-            }
+    // 스캔 청크의 페이지 결과(tiff32nc TIFF)를 페이지별 잉크량 데이터로 반영
+    async ingestScanPageData(page) {
+        if (!page.success || !page.data) {
+            if (!page.success) console.error(`페이지 ${page.pageNum} 스캔 실패:`, page.message);
+            return;
         }
 
-        // 최종 업데이트
-        const cmykRatios = this.calculateTotalChannelRatios();
-        if (cmykRatios) this.updateChannelRatios(cmykRatios);
-        const spotRatios = this.calculateSpotColorRatios();
-        if (spotRatios) this.updateSpotColorRatios(spotRatios);
+        const imageData = await this.convertTIFFToCMYK(page.data);
+        if (imageData && imageData.type === 'cmyk') {
+            this.accumulateChannelData(imageData, page.pageNum, 72);
+        }
+    }
+
+    // tiffsep 청크의 페이지 결과(분판 TIFF들)를 페이지별 잉크량 데이터로 반영
+    async ingestTiffsepPageData(page) {
+        if (!page.success || !page.channels) {
+            if (!page.success) console.error(`페이지 ${page.pageNum} 분판 스캔 실패:`, page.message);
+            return;
+        }
+
+        const pageNum = page.pageNum;
+
+        // 열람 렌더(고해상도 tiffsep)로 이미 측정된 페이지는 유지 — 값이 다시 바뀌지 않도록
+        const existing = this.pageChannelData[pageNum];
+        if (existing && existing.fromTiffsep && (existing.trim || !this.hasTrimMargin(pageNum))) {
+            return;
+        }
+
+        const dpi = page.dpi || 72;
+        const channels = page.channels;
+
+        const cyanParsed = await this.parseSpotColorTIFF(channels['Cyan'], 'Cyan');
+        const magentaParsed = await this.parseSpotColorTIFF(channels['Magenta'], 'Magenta');
+        const yellowParsed = await this.parseSpotColorTIFF(channels['Yellow'], 'Yellow');
+        const blackParsed = await this.parseSpotColorTIFF(channels['Black'], 'Black');
+
+        const cleanCmyk = {
+            type: 'cmyk',
+            width: cyanParsed.width,
+            height: cyanParsed.height,
+            channels: {
+                cyan: cyanParsed.data,
+                magenta: magentaParsed.data,
+                yellow: yellowParsed.data,
+                black: blackParsed.data
+            }
+        };
+
+        this.replacePageChannelData(cleanCmyk, pageNum, dpi);
+
+        // 별색 채널 수집
+        const spotColorData = {};
+        for (const colorName of this.spotColors) {
+            if (channels[colorName]) {
+                const parsed = await this.parseSpotColorTIFF(channels[colorName], colorName);
+                spotColorData[colorName] = parsed.data;
+            }
+        }
+        this.accumulateSpotColorData(spotColorData, pageNum, cleanCmyk.width, cleanCmyk.height, dpi);
     }
 
 
     async loadSpotColors() {
+        // 1차: tiffsep 프로브 (실제 생성되는 플레이트 이름 — 압축 스트림 PDF에서도 정확하고
+        // 이후 tiffsep 스캔의 채널 이름과 반드시 일치)
+        try {
+            const probe = await this.ghostscript.probeSpotColors(this.currentPDFData);
+            this.spotColors = (probe.spotColors || []).sort();
+            this.spotColorData = {};
+            this.updateSpotColorControls();
+            return;
+        } catch (error) {
+            console.warn('별색 프로브 실패, 정규식 검색으로 대체:', error.message);
+        }
+
+        // 2차 (폴백): PDF 바이너리에서 /Separation 정규식 검색
         try {
 
             const spotColors = new Set();
 
-            // PDF 데이터에서 /Separation 검색 (제미나이 방식)
             const data = this.currentPDFData;
             const len = data.length;
 
@@ -1750,24 +1762,26 @@ export class PDFSeparationViewer {
                     }
                     tiffsepSuccessful = true;
 
-                    // tiffsep의 CMYK는 별색이 분리된 깨끗한 데이터.
-                    // 기존 tiff32nc 스캔 데이터(별색이 CMYK에 섞여있음)를 교체.
-                    // 워커는 tiffsep DPI를 300으로 캡하므로 실제 사용된 DPI를 기록해야 정규화가 맞음.
-                    const usedDpi = result.dpi || Math.min(this.renderDPI || 72, 300);
-                    this.replacePageChannelData(imageData, pageNum, usedDpi);
+                    // 아직 백그라운드 스캔이 측정하지 못한 페이지라면 이 렌더 결과로 잉크량을 채움.
+                    // 이미 측정된 페이지는 다시 계산하지 않음 — 열람할 때마다 수치가 바뀌는 것을 방지.
+                    const measured = this.pageChannelData[pageNum];
+                    const alreadyMeasured = measured && measured.fromTiffsep &&
+                        (measured.trim || !this.hasTrimMargin(pageNum));
 
-                    // 별색 비율 누적 및 UI 업데이트
-                    const tiffsepWidth = imageData.width;
-                    const tiffsepHeight = imageData.height;
-                    this.accumulateSpotColorData(spotColorData, pageNum, tiffsepWidth, tiffsepHeight, usedDpi);
-                    const spotRatios = this.calculateSpotColorRatios();
-                    if (spotRatios) {
-                        this.updateSpotColorRatios(spotRatios);
-                    }
-                    // tiffsep CMYK 교체 후 비율 재계산
-                    const cmykRatios = this.calculateTotalChannelRatios();
-                    if (cmykRatios) {
-                        this.updateChannelRatios(cmykRatios);
+                    if (!alreadyMeasured) {
+                        // 워커는 tiffsep DPI를 300으로 캡하므로 실제 사용된 DPI를 기록해야 정규화가 맞음
+                        const usedDpi = result.dpi || Math.min(this.renderDPI || 72, 300);
+                        this.replacePageChannelData(imageData, pageNum, usedDpi);
+                        this.accumulateSpotColorData(spotColorData, pageNum, imageData.width, imageData.height, usedDpi);
+
+                        const spotRatios = this.calculateSpotColorRatios();
+                        if (spotRatios) {
+                            this.updateSpotColorRatios(spotRatios);
+                        }
+                        const cmykRatios = this.calculateTotalChannelRatios();
+                        if (cmykRatios) {
+                            this.updateChannelRatios(cmykRatios);
+                        }
                     }
                 } else {
                 }
@@ -2597,19 +2611,24 @@ export class PDFSeparationViewer {
         return (this.excludeTrimArea && pd && pd.trim) ? pd.trim : pd;
     }
 
-    // CMYK 채널에서 잉크 픽셀 수 카운트 (전체 영역 + 재단면 내부)
-    countChannelPixels(channels, width, height, pageNum) {
+    /**
+     * CMYK 채널의 잉크량 합산 (전체 영역 + 재단면 내부).
+     * 각 채널 값(0=잉크 없음 ~ 255=100% 잉크)을 전부 더해 저장하고,
+     * 비율은 합계 / (픽셀 수 × 255) × 100 — 즉 페이지 평균 잉크량(%).
+     * (예전의 "2% 이상 찍힌 픽셀 면적률" 방식은 사진이 깔린 페이지에서
+     *  눈에 안 보이는 미량 잉크도 100%로 계산되는 문제가 있었음)
+     */
+    measureChannelInk(channels, width, height, pageNum) {
         const { cyan, magenta, yellow, black } = channels;
         const totalPixels = width * height;
-        const threshold = 5;
 
-        // 로컬 카운터로 캐싱 (property 접근 최소화)
+        // 로컬 누산기로 캐싱 (property 접근 최소화)
         let lc = 0, lm = 0, ly = 0, lk = 0;
         for (let i = 0; i < totalPixels; i++) {
-            if (cyan[i] > threshold) lc++;
-            if (magenta[i] > threshold) lm++;
-            if (yellow[i] > threshold) ly++;
-            if (black[i] > threshold) lk++;
+            lc += cyan[i];
+            lm += magenta[i];
+            ly += yellow[i];
+            lk += black[i];
         }
 
         const counts = {
@@ -2620,7 +2639,7 @@ export class PDFSeparationViewer {
             totalPixels: totalPixels
         };
 
-        // 재단면 내부만 별도 카운트 (재단 여백이 있는 페이지만)
+        // 재단면 내부만 별도 합산 (재단 여백이 있는 페이지만)
         const rect = this.getTrimPixelRect(pageNum, width, height);
         if (rect) {
             let tc = 0, tm = 0, tYellow = 0, tk = 0;
@@ -2628,10 +2647,10 @@ export class PDFSeparationViewer {
                 const off = row * width;
                 for (let col = rect.left; col < rect.right; col++) {
                     const i = off + col;
-                    if (cyan[i] > threshold) tc++;
-                    if (magenta[i] > threshold) tm++;
-                    if (yellow[i] > threshold) tYellow++;
-                    if (black[i] > threshold) tk++;
+                    tc += cyan[i];
+                    tm += magenta[i];
+                    tYellow += yellow[i];
+                    tk += black[i];
                 }
             }
             counts.trim = {
@@ -2658,7 +2677,7 @@ export class PDFSeparationViewer {
             return;
         }
 
-        const counts = this.countChannelPixels(cmykData.channels, cmykData.width, cmykData.height, pageNum);
+        const counts = this.measureChannelInk(cmykData.channels, cmykData.width, cmykData.height, pageNum);
         this.pageChannelData[pageNum] = { ...counts, dpi: dpi };
     }
 
@@ -2670,14 +2689,18 @@ export class PDFSeparationViewer {
         if (!cmykData || cmykData.type !== 'cmyk') return;
 
         // tiffsep CMYK로 새로 카운트하여 페이지 데이터 교체
-        const counts = this.countChannelPixels(cmykData.channels, cmykData.width, cmykData.height, pageNum);
+        const counts = this.measureChannelInk(cmykData.channels, cmykData.width, cmykData.height, pageNum);
         this.pageChannelData[pageNum] = { ...counts, dpi: dpi, fromTiffsep: true };
     }
 
     accumulateSpotColorData(spotColorChannels, pageNum, width, height, dpi = 72) {
         // 페이지별 별색 데이터 기록 (호출당 페이지 전체 데이터이므로 교체 방식)
-        if (!spotColorChannels || Object.keys(spotColorChannels).length === 0) {
+        // 별색이 안 쓰인 페이지도 기록해야 전체 별색 비율의 분모(문서 전체 면적)가 맞음
+        if (!this.spotColors || this.spotColors.length === 0) {
             return;
+        }
+        if (!spotColorChannels) {
+            spotColorChannels = {};
         }
 
         const totalPixels = width * height;
@@ -2691,32 +2714,27 @@ export class PDFSeparationViewer {
             entry.trim = { totalPixels: rect.totalPixels };
         }
 
-        // 각 별색에 대해 잉크가 있는 픽셀 수 카운트 (threshold 이상)
-        const threshold = 5;
+        // 각 별색의 잉크량 합산 (평균 잉크량 계산용)
         for (const colorName of this.spotColors) {
             const channelData = spotColorChannels[colorName];
             if (!channelData) continue;
 
-            let count = 0;
+            let sum = 0;
             for (let i = 0; i < totalPixels; i++) {
-                if (channelData[i] > threshold) {
-                    count++;
-                }
+                sum += channelData[i];
             }
-            entry[colorName] = count;
+            entry[colorName] = sum;
 
-            // 재단면 내부만 별도 카운트
+            // 재단면 내부만 별도 합산
             if (rect) {
-                let trimCount = 0;
+                let trimSum = 0;
                 for (let row = rect.top; row < rect.bottom; row++) {
                     const off = row * width;
                     for (let col = rect.left; col < rect.right; col++) {
-                        if (channelData[off + col] > threshold) {
-                            trimCount++;
-                        }
+                        trimSum += channelData[off + col];
                     }
                 }
-                entry.trim[colorName] = trimCount;
+                entry.trim[colorName] = trimSum;
             }
         }
 
@@ -2749,7 +2767,8 @@ export class PDFSeparationViewer {
             return null;
         }
 
-        const blackRatio = (k / area) * 100;
+        // 평균 잉크량(%): 잉크값 합계 / (면적 x 255)
+        const blackRatio = (k / (area * 255)) * 100;
 
         // 별색이 있고 아직 tiffsep 교체가 시작되지 않은 경우,
         // CMY 비율이 별색 기여분을 포함하고 있으므로 null 반환 (UI에 '분석 중...' 표시)
@@ -2763,9 +2782,9 @@ export class PDFSeparationViewer {
         }
 
         return {
-            cyan: (c / area) * 100,
-            magenta: (m / area) * 100,
-            yellow: (y / area) * 100,
+            cyan: (c / (area * 255)) * 100,
+            magenta: (m / (area * 255)) * 100,
+            yellow: (y / (area * 255)) * 100,
             black: blackRatio
         };
     }
@@ -2796,7 +2815,7 @@ export class PDFSeparationViewer {
 
         const ratios = {};
         for (const colorName of this.spotColors) {
-            ratios[colorName] = ((counts[colorName] || 0) / area) * 100;
+            ratios[colorName] = ((counts[colorName] || 0) / (area * 255)) * 100;
         }
 
         return ratios;
@@ -3237,7 +3256,7 @@ export class PDFSeparationViewer {
         for (const pageNum in this.pageChannelData) {
             const pageData = this.pageChannelData[pageNum];
             const pageCounts = this.selectPageCounts(pageData);
-            let ratio = (pageCounts[channel] / pageCounts.totalPixels) * 100;
+            let ratio = (pageCounts[channel] / (pageCounts.totalPixels * 255)) * 100;
 
             // tiffsep으로 교정되지 않은 페이지(tiff32nc, 별색이 CMY에 섞임)만
             // 별색 기여분을 근사 감산. tiffsep 데이터는 이미 별색이 분리된 깨끗한 CMYK이므로
@@ -3250,7 +3269,7 @@ export class PDFSeparationViewer {
                 for (const colorName of this.spotColors) {
                     const spotUsage = spotPageData[colorName] || 0;
                     if (spotUsage > 0 && spotPageData.totalPixels > 0) {
-                        const spotCoverage = spotUsage / spotPageData.totalPixels;
+                        const spotCoverage = spotUsage / (spotPageData.totalPixels * 255);
                         const rgb = getSpotColorRGB(colorName);
                         const contribution = channel === 'cyan' ? (255 - rgb.r) / 255
                             : channel === 'magenta' ? (255 - rgb.g) / 255
@@ -3307,7 +3326,7 @@ export class PDFSeparationViewer {
             const pageData = this.selectPageCounts(this.pageSpotColorData[pageNum]);
             const usage = pageData[colorName];
             if (usage && usage > 0) {
-                const ratio = (usage / pageData.totalPixels) * 100;
+                const ratio = (usage / (pageData.totalPixels * 255)) * 100;
                 pageList.push({ pageNum: parseInt(pageNum), ratio });
             }
         }
