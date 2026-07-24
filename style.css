@@ -405,6 +405,49 @@ h4 {
     line-height: 1.4;
 }
 
+/* 잉크 혼입 의심 경고 (1도/2도 문서에 다른 잉크 섞임) */
+.ink-anomaly-warning {
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: #fff3cd;
+    border-left: 3px solid #ffc107;
+    border-radius: 4px;
+    font-size: 0.8em;
+    color: #856404;
+    line-height: 1.5;
+}
+
+.ink-anomaly-warning.hidden {
+    display: none;
+}
+
+.ink-anomaly-warning .warning-title {
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+
+.ink-anomaly-warning .stray-ink-row {
+    margin-top: 8px;
+}
+
+.ink-anomaly-warning .stray-ink-name {
+    font-weight: 600;
+}
+
+.ink-anomaly-warning .stray-page-chip {
+    display: inline-block;
+    margin: 2px 2px 0 0;
+    padding: 1px 7px;
+    background: #ffe69c;
+    border-radius: 10px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.ink-anomaly-warning .stray-page-chip:hover {
+    background: #ffd75e;
+}
+
 #spot-controls {
     display: flex;
     flex-direction: column;

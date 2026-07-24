@@ -968,6 +968,7 @@ export class PDFSeparationViewer {
             this.clearPageCache();
             this.pageChannelData = {};
             this.pageSpotColorData = {};
+            this.updateInkAnomalyWarning();
 
             // 메타데이터 설정 (이미지 크기)
             // 72 DPI 기준 포인트 단위로 변환 운운할 필요 없이 픽셀 그대로 사용하거나 A4 핏 등 고려
@@ -1042,6 +1043,7 @@ export class PDFSeparationViewer {
                 this.pageChannelData = {};
                 this.pageSpotColorData = {};
                 this.updateChannelRatios(null);
+                this.updateInkAnomalyWarning();
 
                 // 2단계: 초기화 (66%)
                 this.showLoading('초기화 중...', '66%');
@@ -1179,12 +1181,145 @@ export class PDFSeparationViewer {
                 if (spotRatios) this.updateSpotColorRatios(spotRatios);
             }
             this.updateScanProgress(this.totalPages, this.totalPages);
+
+            // 수집이 끝난 데이터로 잉크 혼입 여부 판정
+            this.updateInkAnomalyWarning();
         } catch (error) {
             console.error('병렬 스캔 중 오류:', error);
         }
 
         // 완료 후 3초 뒤에 진행률 바 숨김
         setTimeout(() => this.hideScanProgress(), 3000);
+    }
+
+    /**
+     * 잉크 혼입 감지: 문서의 주력 잉크 구성을 추정하고, 거기서 벗어나 섞인 잉크를 찾음.
+     * 예) 거의 모든 페이지가 K(+별색 하나)인데 일부 페이지에 C/M/Y가 미량 검출되면
+     *     RGB 검정 텍스트, 미변환 컬러 이미지 등이 섞였을 가능성이 높음.
+     * 판정은 항상 재단면(TrimBox) 내부 기준 — 재단선 마크는 제외.
+     * 주력 잉크가 1~2개(1도/2도 구성)로 보일 때만 경고.
+     */
+    analyzeInkAnomalies() {
+        const USED_MIN = 0.05;   // 페이지에서 "검출됨"으로 보는 최소 평균 잉크량(%)
+
+        const pageNums = Object.keys(this.pageChannelData);
+        if (pageNums.length === 0) return null;
+
+        const channelLabels = {
+            cyan: 'C (Cyan)',
+            magenta: 'M (Magenta)',
+            yellow: 'Y (Yellow)',
+            black: 'K (Black)'
+        };
+
+        // 잉크별 페이지 사용량 수집 (재단면 내부 카운트 우선)
+        const inks = [];
+
+        const collect = (key, label, isSpot, dataMap) => {
+            const pages = [];
+            let sumRatio = 0;
+            let count = 0;
+            let maxRatio = 0;
+
+            for (const pageNum of pageNums) {
+                const entry = dataMap[pageNum];
+                if (!entry) continue;
+                const counts = entry.trim || entry;   // 재단선 영역 제외 (재단 여백이 있으면)
+                if (!counts.totalPixels) continue;
+
+                const ratio = ((counts[key] || 0) / (counts.totalPixels * 255)) * 100;
+                count++;
+                sumRatio += ratio;
+                if (ratio > maxRatio) maxRatio = ratio;
+                if (ratio >= USED_MIN) {
+                    pages.push({ pageNum: parseInt(pageNum), ratio });
+                }
+            }
+
+            if (count === 0) return;
+            inks.push({
+                key,
+                label,
+                isSpot,
+                pages,
+                docAvg: sumRatio / count,
+                pageShare: pages.length / count,
+                maxRatio
+            });
+        };
+
+        for (const ch of ['cyan', 'magenta', 'yellow', 'black']) {
+            collect(ch, channelLabels[ch], false, this.pageChannelData);
+        }
+        for (const spotName of this.spotColors || []) {
+            collect(spotName, spotName, true, this.pageSpotColorData);
+        }
+
+        // 주력/혼입 분류: 문서 전반에 실사용되면 주력, 일부 페이지에만 나타나면 혼입 의심
+        const mains = [];
+        const strays = [];
+        for (const ink of inks) {
+            if (ink.pages.length === 0) continue;  // 아예 사용되지 않은 잉크
+            const isMain = ink.isSpot
+                ? ((ink.pageShare >= 0.3 && ink.docAvg >= 0.2) || ink.docAvg >= 1.0)
+                : ((ink.pageShare >= 0.4 && ink.docAvg >= 0.2) || ink.docAvg >= 2.0);
+            (isMain ? mains : strays).push(ink);
+        }
+
+        // 주력 잉크가 1~2개일 때만 경고 (3도 이상 문서는 혼색이 정상)
+        if (mains.length === 0 || mains.length > 2 || strays.length === 0) {
+            return null;
+        }
+
+        for (const ink of strays) {
+            ink.pages.sort((a, b) => b.ratio - a.ratio);
+        }
+
+        return { mains, strays };
+    }
+
+    updateInkAnomalyWarning() {
+        const container = document.getElementById('ink-anomaly-warning');
+        if (!container) return;
+
+        const result = this.analyzeInkAnomalies();
+        if (!result) {
+            container.classList.add('hidden');
+            container.innerHTML = '';
+            return;
+        }
+
+        const esc = (s) => String(s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+        const mainNames = result.mains.map(i => esc(i.label)).join(' + ');
+        const degree = `${result.mains.length}도`;
+
+        const MAX_CHIPS = 10;
+        const rows = result.strays.map(ink => {
+            const chips = ink.pages.slice(0, MAX_CHIPS).map(p =>
+                `<span class="stray-page-chip" data-page="${p.pageNum}">${p.pageNum}쪽 ${p.ratio.toFixed(2)}%</span>`
+            ).join(' ');
+            const more = ink.pages.length > MAX_CHIPS
+                ? ` <span>외 ${ink.pages.length - MAX_CHIPS}쪽</span>` : '';
+            return `<div class="stray-ink-row">` +
+                `<span class="stray-ink-name">${esc(ink.label)}</span> — ${ink.pages.length}쪽에서 검출<br>` +
+                chips + more + `</div>`;
+        }).join('');
+
+        container.innerHTML =
+            `<div class="warning-title">⚠️ 잉크 혼입 의심</div>` +
+            `<div>주력 잉크가 <b>${mainNames}</b> (${degree} 구성)로 보이는데, ` +
+            `아래 잉크가 일부 페이지에 섞여 있습니다. (재단선 영역 제외 기준)</div>` +
+            rows;
+
+        // 페이지 칩 클릭 시 해당 페이지로 이동
+        container.querySelectorAll('.stray-page-chip').forEach(el => {
+            el.addEventListener('click', () => this.goToPage(parseInt(el.dataset.page)));
+        });
+
+        container.classList.remove('hidden');
     }
 
     // 스캔 청크의 페이지 결과(tiff32nc TIFF)를 페이지별 잉크량 데이터로 반영
