@@ -18,17 +18,14 @@ export class PDFSeparationViewer {
         this.totalPages = 1;
         this.zoomLevel = 1.0;
 
-        // 전체 페이지 CMYK 채널 누적 데이터
-        this.totalChannelCounts = {
-            cyan: 0,
-            magenta: 0,
-            yellow: 0,
-            black: 0
-        };
-        this.totalPixelCount = 0;
-
         // 페이지별 CMYK 채널 사용량 저장
+        // { pageNum: { cyan, magenta, yellow, black, totalPixels, dpi, fromTiffsep?, trim? } }
+        // trim: TrimBox(재단면) 내부만 센 카운트 { cyan, magenta, yellow, black, totalPixels }
+        // 전체 비율은 이 데이터에서 매번 재계산 (누적 카운터 방식은 페이지 재스캔/문서 교체 시 오차 누적)
         this.pageChannelData = {};
+
+        // 잉크량 계산에서 재단선(TrimBox 바깥) 영역 제외 여부
+        this.excludeTrimArea = false;
 
         // 병렬 처리용 WorkerPool 설정
         this.workerPool = null;
@@ -96,6 +93,7 @@ export class PDFSeparationViewer {
             yellow: document.getElementById('yellow-ratio'),
             black: document.getElementById('black-ratio')
         };
+        this.excludeTrimCheckbox = document.getElementById('exclude-trim-area');
         this.tacValueElement = document.getElementById('tac-value');
         this.cursorCoordsElement = document.getElementById('cursor-coords');
 
@@ -271,6 +269,15 @@ export class PDFSeparationViewer {
             this.showChannelPageList('black');
         });
 
+        // 재단선 영역 제외 토글 — 저장된 카운트에서 즉시 재계산 (재스캔 불필요)
+        if (this.excludeTrimCheckbox) {
+            this.excludeTrimCheckbox.addEventListener('change', (e) => {
+                this.excludeTrimArea = e.target.checked;
+                this.updateChannelRatios(this.calculateTotalChannelRatios());
+                this.updateSpotColorRatios(this.calculateSpotColorRatios());
+            });
+        }
+
         // 모달 닫기 버튼
         const closeModalBtn = document.getElementById('close-modal');
         if (closeModalBtn) {
@@ -391,7 +398,7 @@ export class PDFSeparationViewer {
 
             // Worker 메시지 핸들러를 한 번만 설정
             this.worker.onmessage = (e) => {
-                const { type, requestId, success, data, width, height, message, pageSize, pageCount, supported, files, devices, rawOutput, fileSize, format, channels, spotColors } = e.data;
+                const { type, requestId, success, data, width, height, message, pageSize, pageCount, supported, files, devices, rawOutput, fileSize, format, channels, spotColors, dpi } = e.data;
 
                 if (type === 'init') {
                     const pending = this.pendingRequests.get('init');
@@ -408,7 +415,7 @@ export class PDFSeparationViewer {
                     const pending = this.pendingRequests.get(requestId);
                     if (pending) {
                         if (success) {
-                            pending.resolve({ channels, spotColors, width, height });
+                            pending.resolve({ channels, spotColors, width, height, dpi });
                         } else {
                             pending.reject(new Error(message || 'tiffsep 처리 실패'));
                         }
@@ -931,8 +938,8 @@ export class PDFSeparationViewer {
 
             // 페이지 캐시 클리어
             this.clearPageCache();
-            this.totalChannelCounts = { cyan: 0, magenta: 0, yellow: 0, black: 0 };
-            this.totalPixelCount = 0;
+            this.pageChannelData = {};
+            this.pageSpotColorData = {};
 
             // 메타데이터 설정 (이미지 크기)
             // 72 DPI 기준 포인트 단위로 변환 운운할 필요 없이 픽셀 그대로 사용하거나 A4 핏 등 고려
@@ -1002,9 +1009,11 @@ export class PDFSeparationViewer {
                 // 페이지 캐시 클리어
                 this.clearPageCache();
 
-                // 전체 페이지 CMYK 데이터 수집 초기화
-                this.totalChannelCounts = { cyan: 0, magenta: 0, yellow: 0, black: 0 };
-                this.totalPixelCount = 0;
+                // 전체 페이지 CMYK/별색 데이터 수집 초기화
+                // (이전 문서의 페이지별 데이터가 남아있으면 새 문서 비율에 섞여 큰 오차 발생)
+                this.pageChannelData = {};
+                this.pageSpotColorData = {};
+                this.updateChannelRatios(null);
 
                 // 2단계: 초기화 (66%)
                 this.showLoading('초기화 중...', '66%');
@@ -1028,11 +1037,10 @@ export class PDFSeparationViewer {
                 // 렌더링 완료 후 로딩 숨김
                 this.hideLoading();
 
-                // 백그라운드에서 모든 페이지 스캔 (비동기)
-                this.scanAllPagesInBackground();
-
-                // 메타데이터 추출 (비동기)
-                this.extractPDFMetadata();
+                // 메타데이터(TrimBox) 추출 후 백그라운드 스캔 시작
+                // (재단선 영역 제외 계산에 페이지별 TrimBox가 필요하므로 스캔 전에 확보)
+                this.extractPDFMetadata()
+                    .finally(() => this.scanAllPagesInBackground());
 
 
             } else {
@@ -1070,6 +1078,8 @@ export class PDFSeparationViewer {
         // 완료된 페이지 카운터
         let completedPages = 0;
 
+        const scanDpi = 72; // 백그라운드 스캔 해상도 (비율 계산용)
+
         // 옵션 생성 함수
         const optionsGenerator = (pageNum) => ({
             width: scanWidth,
@@ -1078,6 +1088,7 @@ export class PDFSeparationViewer {
             pdfHeight: scanHeight,
             pageNum: pageNum,
             useCMYK: true,
+            dpi: scanDpi,
             separations: []
         });
 
@@ -1094,7 +1105,7 @@ export class PDFSeparationViewer {
                         const imageData = await this.convertTIFFToCMYK(data, width, height);
 
                         if (imageData && imageData.type === 'cmyk') {
-                            this.accumulateChannelData(imageData, result.pageNum);
+                            this.accumulateChannelData(imageData, result.pageNum, scanDpi);
                         }
                     }
                 } catch (error) {
@@ -1170,7 +1181,9 @@ export class PDFSeparationViewer {
 
         for (let i = 1; i <= this.totalPages; i++) {
             // 이미 tiffsep으로 교체된 페이지는 건너뜀
-            if (this.pageChannelData[i] && this.pageChannelData[i].fromTiffsep) {
+            // (단, 메타데이터 준비 전에 교체되어 재단면 카운트가 빠진 페이지는 다시 처리)
+            const pd = this.pageChannelData[i];
+            if (pd && pd.fromTiffsep && (pd.trim || !this.hasTrimMargin(i))) {
                 correctedPages++;
                 continue;
             }
@@ -1199,7 +1212,9 @@ export class PDFSeparationViewer {
                         }
                     };
 
-                    this.replacePageChannelData(cleanCmyk, i);
+                    // 워커가 실제 사용한 DPI (없으면 요청값으로 폴백)
+                    const usedDpi = result.dpi || lowDpi;
+                    this.replacePageChannelData(cleanCmyk, i, usedDpi);
 
                     // 별색 데이터도 수집
                     const spotColorData = {};
@@ -1209,7 +1224,7 @@ export class PDFSeparationViewer {
                             spotColorData[colorName] = parsed.data;
                         }
                     }
-                    this.accumulateSpotColorData(spotColorData, i, cleanCmyk.width, cleanCmyk.height);
+                    this.accumulateSpotColorData(spotColorData, i, cleanCmyk.width, cleanCmyk.height, usedDpi);
 
                     correctedPages++;
 
@@ -1737,12 +1752,14 @@ export class PDFSeparationViewer {
 
                     // tiffsep의 CMYK는 별색이 분리된 깨끗한 데이터.
                     // 기존 tiff32nc 스캔 데이터(별색이 CMYK에 섞여있음)를 교체.
-                    this.replacePageChannelData(imageData, pageNum);
+                    // 워커는 tiffsep DPI를 300으로 캡하므로 실제 사용된 DPI를 기록해야 정규화가 맞음.
+                    const usedDpi = result.dpi || Math.min(this.renderDPI || 72, 300);
+                    this.replacePageChannelData(imageData, pageNum, usedDpi);
 
                     // 별색 비율 누적 및 UI 업데이트
                     const tiffsepWidth = imageData.width;
                     const tiffsepHeight = imageData.height;
-                    this.accumulateSpotColorData(spotColorData, pageNum, tiffsepWidth, tiffsepHeight);
+                    this.accumulateSpotColorData(spotColorData, pageNum, tiffsepWidth, tiffsepHeight, usedDpi);
                     const spotRatios = this.calculateSpotColorRatios();
                     if (spotRatios) {
                         this.updateSpotColorRatios(spotRatios);
@@ -2540,201 +2557,246 @@ export class PDFSeparationViewer {
         this.ctx.putImageData(filteredData, 0, 0);
     }
 
-    accumulateChannelData(cmykData, pageNum) {
-        // 페이지별 CMYK 데이터를 누적
-        if (!cmykData || cmykData.type !== 'cmyk') {
-            return;
-        }
+    // 페이지에 재단 여백(TrimBox ≠ MediaBox)이 있는지 여부
+    hasTrimMargin(pageNum) {
+        const meta = this.pageMetadata.get(Number(pageNum));
+        if (!meta || !meta.trimBox || !meta.mediaBox) return false;
+        if (!meta.mediaBox.width || !meta.mediaBox.height) return false;
 
-        const { width, height, channels } = cmykData;
+        // 1pt 미만 차이면 재단 여백이 없는 것으로 간주
+        return Math.abs(meta.trimBox.width - meta.mediaBox.width) >= 1 ||
+            Math.abs(meta.trimBox.height - meta.mediaBox.height) >= 1;
+    }
+
+    /**
+     * TrimBox(재단면)를 렌더 픽셀 좌표 사각형으로 변환.
+     * 메타데이터가 없거나 TrimBox가 MediaBox와 사실상 같으면(재단 여백 없음) null.
+     */
+    getTrimPixelRect(pageNum, width, height) {
+        if (!this.hasTrimMargin(pageNum)) return null;
+
+        const { mediaBox, trimBox } = this.pageMetadata.get(Number(pageNum));
+
+        // 렌더 결과가 MediaBox 전체이므로 실제 래스터 크기 기준으로 스케일 계산
+        const scaleX = width / mediaBox.width;
+        const scaleY = height / mediaBox.height;
+
+        // PDF 좌표(원점 좌하단, y 위쪽) → 이미지 좌표(원점 좌상단, y 아래쪽)
+        const left = Math.max(0, Math.round((trimBox.x - mediaBox.x) * scaleX));
+        const right = Math.min(width, Math.round((trimBox.x - mediaBox.x + trimBox.width) * scaleX));
+        const top = Math.max(0, Math.round((mediaBox.y + mediaBox.height - trimBox.y - trimBox.height) * scaleY));
+        const bottom = Math.min(height, Math.round((mediaBox.y + mediaBox.height - trimBox.y) * scaleY));
+
+        if (right <= left || bottom <= top) return null;
+
+        return { left, top, right, bottom, totalPixels: (right - left) * (bottom - top) };
+    }
+
+    // 재단선 제외 체크박스 상태에 따라 전체/재단면 내부 카운트 선택
+    selectPageCounts(pd) {
+        return (this.excludeTrimArea && pd && pd.trim) ? pd.trim : pd;
+    }
+
+    // CMYK 채널에서 잉크 픽셀 수 카운트 (전체 영역 + 재단면 내부)
+    countChannelPixels(channels, width, height, pageNum) {
         const { cyan, magenta, yellow, black } = channels;
         const totalPixels = width * height;
-
-        // 페이지별 카운트 초기화
-        if (!this.pageChannelData[pageNum]) {
-            this.pageChannelData[pageNum] = {
-                cyan: 0,
-                magenta: 0,
-                yellow: 0,
-                black: 0,
-                totalPixels: totalPixels
-            };
-        }
+        const threshold = 5;
 
         // 로컬 카운터로 캐싱 (property 접근 최소화)
         let lc = 0, lm = 0, ly = 0, lk = 0;
-        const threshold = 5;
         for (let i = 0; i < totalPixels; i++) {
             if (cyan[i] > threshold) lc++;
             if (magenta[i] > threshold) lm++;
             if (yellow[i] > threshold) ly++;
             if (black[i] > threshold) lk++;
         }
-        const pd = this.pageChannelData[pageNum];
-        pd.cyan += lc; pd.magenta += lm; pd.yellow += ly; pd.black += lk;
-        this.totalChannelCounts.cyan += lc;
-        this.totalChannelCounts.magenta += lm;
-        this.totalChannelCounts.yellow += ly;
-        this.totalChannelCounts.black += lk;
-        this.totalPixelCount += totalPixels;
+
+        const counts = {
+            cyan: lc,
+            magenta: lm,
+            yellow: ly,
+            black: lk,
+            totalPixels: totalPixels
+        };
+
+        // 재단면 내부만 별도 카운트 (재단 여백이 있는 페이지만)
+        const rect = this.getTrimPixelRect(pageNum, width, height);
+        if (rect) {
+            let tc = 0, tm = 0, tYellow = 0, tk = 0;
+            for (let row = rect.top; row < rect.bottom; row++) {
+                const off = row * width;
+                for (let col = rect.left; col < rect.right; col++) {
+                    const i = off + col;
+                    if (cyan[i] > threshold) tc++;
+                    if (magenta[i] > threshold) tm++;
+                    if (yellow[i] > threshold) tYellow++;
+                    if (black[i] > threshold) tk++;
+                }
+            }
+            counts.trim = {
+                cyan: tc,
+                magenta: tm,
+                yellow: tYellow,
+                black: tk,
+                totalPixels: rect.totalPixels
+            };
+        }
+
+        return counts;
+    }
+
+    accumulateChannelData(cmykData, pageNum, dpi = 72) {
+        // 페이지별 CMYK 사용 픽셀 수 기록 (호출당 페이지 전체 데이터이므로 교체 방식)
+        if (!cmykData || cmykData.type !== 'cmyk') {
+            return;
+        }
+
+        // tiffsep으로 이미 교정된 페이지는 tiff32nc(별색 섞임) 데이터로 되돌리지 않음
+        const existing = this.pageChannelData[pageNum];
+        if (existing && existing.fromTiffsep) {
+            return;
+        }
+
+        const counts = this.countChannelPixels(cmykData.channels, cmykData.width, cmykData.height, pageNum);
+        this.pageChannelData[pageNum] = { ...counts, dpi: dpi };
     }
 
     /**
      * tiffsep의 깨끗한 CMYK 데이터로 해당 페이지의 기존 tiff32nc 데이터를 교체.
      * tiffsep CMYK에는 별색이 포함되어 있지 않으므로 정확한 프로세스 컬러 비율을 얻을 수 있음.
      */
-    replacePageChannelData(cmykData, pageNum) {
+    replacePageChannelData(cmykData, pageNum, dpi = 72) {
         if (!cmykData || cmykData.type !== 'cmyk') return;
 
-        const { width, height, channels } = cmykData;
-        const { cyan, magenta, yellow, black } = channels;
-        const totalPixels = width * height;
-
-        // 기존 데이터가 있으면 총합에서 빼기
-        const old = this.pageChannelData[pageNum];
-        if (old) {
-            this.totalChannelCounts.cyan -= old.cyan;
-            this.totalChannelCounts.magenta -= old.magenta;
-            this.totalChannelCounts.yellow -= old.yellow;
-            this.totalChannelCounts.black -= old.black;
-            this.totalPixelCount -= old.totalPixels;
-        }
-
-        // tiffsep CMYK로 새로 카운트
-        let lc = 0, lm = 0, ly = 0, lk = 0;
-        const threshold = 5;
-        for (let i = 0; i < totalPixels; i++) {
-            if (cyan[i] > threshold) lc++;
-            if (magenta[i] > threshold) lm++;
-            if (yellow[i] > threshold) ly++;
-            if (black[i] > threshold) lk++;
-        }
-
-        // 페이지 데이터 교체
-        this.pageChannelData[pageNum] = {
-            cyan: lc,
-            magenta: lm,
-            yellow: ly,
-            black: lk,
-            totalPixels: totalPixels,
-            fromTiffsep: true
-        };
-
-        // 총합에 새 데이터 더하기
-        this.totalChannelCounts.cyan += lc;
-        this.totalChannelCounts.magenta += lm;
-        this.totalChannelCounts.yellow += ly;
-        this.totalChannelCounts.black += lk;
-        this.totalPixelCount += totalPixels;
+        // tiffsep CMYK로 새로 카운트하여 페이지 데이터 교체
+        const counts = this.countChannelPixels(cmykData.channels, cmykData.width, cmykData.height, pageNum);
+        this.pageChannelData[pageNum] = { ...counts, dpi: dpi, fromTiffsep: true };
     }
 
-    accumulateSpotColorData(spotColorChannels, pageNum, width, height) {
-        // 페이지별 별색 데이터를 누적
+    accumulateSpotColorData(spotColorChannels, pageNum, width, height, dpi = 72) {
+        // 페이지별 별색 데이터 기록 (호출당 페이지 전체 데이터이므로 교체 방식)
         if (!spotColorChannels || Object.keys(spotColorChannels).length === 0) {
             return;
         }
 
         const totalPixels = width * height;
+        const rect = this.getTrimPixelRect(pageNum, width, height);
 
-        // 별색 전용 픽셀 카운트 추적
-        if (!this.totalSpotPixelCount) {
-            this.totalSpotPixelCount = 0;
-        }
-
-        // 이미 이 페이지의 별색 데이터가 있으면 기존 데이터를 총합에서 빼기 (중복 방지)
-        const existing = this.pageSpotColorData[pageNum];
-        if (existing) {
-            this.totalSpotPixelCount -= (existing.totalPixels || 0);
-            for (const colorName of this.spotColors) {
-                if (existing[colorName] && this.totalChannelCounts[colorName]) {
-                    this.totalChannelCounts[colorName] -= existing[colorName];
-                }
-            }
-        }
-
-        this.totalSpotPixelCount += totalPixels;
-
-        // 페이지별 별색 데이터 초기화 (교체)
-        this.pageSpotColorData[pageNum] = {
-            totalPixels: totalPixels
+        const entry = {
+            totalPixels: totalPixels,
+            dpi: dpi
         };
+        if (rect) {
+            entry.trim = { totalPixels: rect.totalPixels };
+        }
 
-        // 각 별색에 대해 잉크량 합산
+        // 각 별색에 대해 잉크가 있는 픽셀 수 카운트 (threshold 이상)
+        const threshold = 5;
         for (const colorName of this.spotColors) {
             const channelData = spotColorChannels[colorName];
             if (!channelData) continue;
 
-            this.pageSpotColorData[pageNum][colorName] = 0;
-
-            // 전체 문서 별색 카운트 초기화
-            if (!this.totalChannelCounts[colorName]) {
-                this.totalChannelCounts[colorName] = 0;
-            }
-
-            // 잉크가 있는 픽셀 수 카운트 (threshold 이상)
-            const threshold = 5;
+            let count = 0;
             for (let i = 0; i < totalPixels; i++) {
                 if (channelData[i] > threshold) {
-                    this.totalChannelCounts[colorName]++;
-                    this.pageSpotColorData[pageNum][colorName]++;
+                    count++;
                 }
+            }
+            entry[colorName] = count;
+
+            // 재단면 내부만 별도 카운트
+            if (rect) {
+                let trimCount = 0;
+                for (let row = rect.top; row < rect.bottom; row++) {
+                    const off = row * width;
+                    for (let col = rect.left; col < rect.right; col++) {
+                        if (channelData[off + col] > threshold) {
+                            trimCount++;
+                        }
+                    }
+                }
+                entry.trim[colorName] = trimCount;
             }
         }
 
+        this.pageSpotColorData[pageNum] = entry;
     }
 
 
 
     calculateTotalChannelRatios() {
-        // 전체 페이지의 누적된 데이터로부터 비율 계산
-        if (this.totalPixelCount === 0) {
+        // 페이지별 데이터로부터 전체 비율 계산.
+        // 페이지마다 렌더 해상도가 다를 수 있으므로(백그라운드 스캔 72dpi, 열람 페이지 최대 300dpi)
+        // 72dpi 기준 면적으로 정규화해 합산 — 고해상도 페이지가 과대 가중되는 것을 방지.
+        let area = 0, c = 0, m = 0, y = 0, k = 0;
+        let hasAnyTiffsep = false;
+
+        for (const pageNum in this.pageChannelData) {
+            const pd = this.pageChannelData[pageNum];
+            if (!pd || !pd.totalPixels) continue;
+            const counts = this.selectPageCounts(pd);
+            const w = Math.pow(72 / (pd.dpi || 72), 2);
+            area += counts.totalPixels * w;
+            c += counts.cyan * w;
+            m += counts.magenta * w;
+            y += counts.yellow * w;
+            k += counts.black * w;
+            if (pd.fromTiffsep) hasAnyTiffsep = true;
+        }
+
+        if (area === 0) {
             return null;
         }
 
-        let cyanRatio = (this.totalChannelCounts.cyan / this.totalPixelCount) * 100;
-        let magentaRatio = (this.totalChannelCounts.magenta / this.totalPixelCount) * 100;
-        let yellowRatio = (this.totalChannelCounts.yellow / this.totalPixelCount) * 100;
-        let blackRatio = (this.totalChannelCounts.black / this.totalPixelCount) * 100;
+        const blackRatio = (k / area) * 100;
 
         // 별색이 있고 아직 tiffsep 교체가 시작되지 않은 경우,
-        // CMYK 비율이 별색 기여분을 포함하고 있으므로 null 반환 (UI에 '-' 표시)
-        if (this.spotColors && this.spotColors.length > 0) {
-            const hasAnyTiffsep = this.pageChannelData && Object.values(this.pageChannelData)
-                .some(pd => pd && pd.fromTiffsep);
-            if (!hasAnyTiffsep) {
-                return {
-                    cyan: null,
-                    magenta: null,
-                    yellow: null,
-                    black: blackRatio
-                };
-            }
-            // tiffsep 교체된 페이지가 있으면 그 데이터는 이미 깨끗한 CMYK.
-            // 아직 교체 안 된 페이지는 tiff32nc(별색 포함)이므로 비율이 다소 높을 수 있음.
-            // 하지만 기존 RGB→CMY 감산보다는 훨씬 정확함.
+        // CMY 비율이 별색 기여분을 포함하고 있으므로 null 반환 (UI에 '분석 중...' 표시)
+        if (this.spotColors && this.spotColors.length > 0 && !hasAnyTiffsep) {
+            return {
+                cyan: null,
+                magenta: null,
+                yellow: null,
+                black: blackRatio
+            };
         }
 
         return {
-            cyan: cyanRatio,
-            magenta: magentaRatio,
-            yellow: yellowRatio,
+            cyan: (c / area) * 100,
+            magenta: (m / area) * 100,
+            yellow: (y / area) * 100,
             black: blackRatio
         };
     }
 
     calculateSpotColorRatios() {
-        // 전체 페이지의 누적 데이터로 별색 비율 계산
-        const denominator = this.totalSpotPixelCount || this.totalPixelCount;
-        if (denominator === 0 || !this.spotColors || this.spotColors.length === 0) {
+        // 페이지별 별색 데이터로부터 전체 비율 계산 (72dpi 기준 면적 정규화)
+        if (!this.spotColors || this.spotColors.length === 0) {
+            return null;
+        }
+
+        let area = 0;
+        const counts = {};
+
+        for (const pageNum in this.pageSpotColorData) {
+            const pd = this.pageSpotColorData[pageNum];
+            if (!pd || !pd.totalPixels) continue;
+            const pc = this.selectPageCounts(pd);
+            const w = Math.pow(72 / (pd.dpi || 72), 2);
+            area += pc.totalPixels * w;
+            for (const colorName of this.spotColors) {
+                counts[colorName] = (counts[colorName] || 0) + (pc[colorName] || 0) * w;
+            }
+        }
+
+        if (area === 0) {
             return null;
         }
 
         const ratios = {};
-
-        // 각 별색의 잉크 커버리지를 백분율로 계산
         for (const colorName of this.spotColors) {
-            const count = this.totalChannelCounts[colorName] || 0;
-            ratios[colorName] = (count / denominator) * 100;
+            ratios[colorName] = ((counts[colorName] || 0) / area) * 100;
         }
 
         return ratios;
@@ -3174,13 +3236,17 @@ export class PDFSeparationViewer {
         const pageList = [];
         for (const pageNum in this.pageChannelData) {
             const pageData = this.pageChannelData[pageNum];
-            let ratio = (pageData[channel] / pageData.totalPixels) * 100;
+            const pageCounts = this.selectPageCounts(pageData);
+            let ratio = (pageCounts[channel] / pageCounts.totalPixels) * 100;
 
-            // 별색이 있으면 CMY에서 별색 기여분 감산
-            if (['cyan', 'magenta', 'yellow'].includes(channel) &&
+            // tiffsep으로 교정되지 않은 페이지(tiff32nc, 별색이 CMY에 섞임)만
+            // 별색 기여분을 근사 감산. tiffsep 데이터는 이미 별색이 분리된 깨끗한 CMYK이므로
+            // 감산하면 오히려 이중 차감으로 큰 오차가 생김.
+            if (!pageData.fromTiffsep &&
+                ['cyan', 'magenta', 'yellow'].includes(channel) &&
                 this.spotColors && this.spotColors.length > 0 &&
                 this.pageSpotColorData[pageNum]) {
-                const spotPageData = this.pageSpotColorData[pageNum];
+                const spotPageData = this.selectPageCounts(this.pageSpotColorData[pageNum]);
                 for (const colorName of this.spotColors) {
                     const spotUsage = spotPageData[colorName] || 0;
                     if (spotUsage > 0 && spotPageData.totalPixels > 0) {
@@ -3195,12 +3261,13 @@ export class PDFSeparationViewer {
             }
 
             if (ratio > 0.1) {
-                pageList.push({ pageNum: parseInt(pageNum), usage: pageData[channel], ratio });
+                pageList.push({ pageNum: parseInt(pageNum), ratio });
             }
         }
 
-        // 사용량 많은 순으로 정렬
-        pageList.sort((a, b) => b.usage - a.usage);
+        // 사용 비율 높은 순으로 정렬
+        // (원시 픽셀 수는 페이지별 렌더 해상도가 달라 비교 불가 — 비율 기준으로 정렬)
+        pageList.sort((a, b) => b.ratio - a.ratio);
 
         // 모달에 표시
         const modal = document.getElementById('page-list-modal');
@@ -3237,16 +3304,16 @@ export class PDFSeparationViewer {
         // 페이지별 사용량 수집 및 정렬
         const pageList = [];
         for (const pageNum in this.pageSpotColorData) {
-            const pageData = this.pageSpotColorData[pageNum];
+            const pageData = this.selectPageCounts(this.pageSpotColorData[pageNum]);
             const usage = pageData[colorName];
             if (usage && usage > 0) {
                 const ratio = (usage / pageData.totalPixels) * 100;
-                pageList.push({ pageNum: parseInt(pageNum), usage, ratio });
+                pageList.push({ pageNum: parseInt(pageNum), ratio });
             }
         }
 
-        // 사용량 많은 순으로 정렬
-        pageList.sort((a, b) => b.usage - a.usage);
+        // 사용 비율 높은 순으로 정렬
+        pageList.sort((a, b) => b.ratio - a.ratio);
 
         // 모달에 표시
         const modal = document.getElementById('page-list-modal');

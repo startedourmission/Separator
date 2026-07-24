@@ -426,7 +426,8 @@ self.addEventListener('message', async function (e) {
                     requestId: requestId,
                     success: true,
                     channels: channels,
-                    spotColors: spotColors
+                    spotColors: spotColors,
+                    dpi: tiffsepDpi
                 });
             } catch (error) {
                 console.error('❌ tiffsep 처리 실패:', error);
