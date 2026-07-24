@@ -19,6 +19,8 @@ export class VirtualScrollManager {
         this.maxConcurrentRenders = 2;
         this.activeRenders = 0;
         this.displayMode = 'single'; // 'single' | 'two-page'
+        this.deferredComposites = new Set(); // 분판 변경 시 화면 밖 페이지의 지연 재합성 큐
+        this._deferredScheduled = false;
     }
 
     // 초기화
@@ -151,6 +153,8 @@ export class VirtualScrollManager {
 
                 if (entry.isIntersecting) {
                     this.queuePageRender(pageNum);
+                    // 분판 변경이 지연돼 있던 페이지가 다시 보이면 즉시 재합성
+                    this.flushDeferredComposite(pageNum);
                 } else {
                     this.handlePageHidden(pageNum);
                 }
@@ -283,7 +287,7 @@ export class VirtualScrollManager {
         const dstWidth = canvas.width;
         const dstHeight = canvas.height;
 
-        // 임시 캔버스 재사용 (크기 변경 시에만 재생성)
+        // 임시 캔버스/버퍼 재사용 (크기 변경 시에만 재생성 — 페이지당 수십 MB 할당 방지)
         if (!this._tempCanvas || this._tempW !== srcWidth || this._tempH !== srcHeight) {
             this._tempCanvas = document.createElement('canvas');
             this._tempCanvas.width = srcWidth;
@@ -291,10 +295,14 @@ export class VirtualScrollManager {
             this._tempCtx = this._tempCanvas.getContext('2d');
             this._tempW = srcWidth;
             this._tempH = srcHeight;
+            this._tempImageData = null;
         }
         const tempCanvas = this._tempCanvas;
         const tempCtx = this._tempCtx;
-        const tempImageData = tempCtx.createImageData(srcWidth, srcHeight);
+        if (!this._tempImageData) {
+            this._tempImageData = tempCtx.createImageData(srcWidth, srcHeight);
+        }
+        const tempImageData = this._tempImageData;
 
         const { cyan, magenta, yellow, black } = imageData.channels;
         const pixels = tempImageData.data;
@@ -382,12 +390,15 @@ export class VirtualScrollManager {
             }
         }
 
-        tempCtx.putImageData(tempImageData, 0, 0);
-
-        // 스케일링하여 최종 캔버스에 그리기
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(tempCanvas, 0, 0, dstWidth, dstHeight);
+        // 크기가 같으면 임시 캔버스를 거치지 않고 바로 출력 (전체 픽셀 복사 1회 절약)
+        if (dstWidth === srcWidth && dstHeight === srcHeight) {
+            ctx.putImageData(tempImageData, 0, 0);
+        } else {
+            tempCtx.putImageData(tempImageData, 0, 0);
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(tempCanvas, 0, 0, dstWidth, dstHeight);
+        }
     }
 
     // 페이지 언마운트
@@ -508,11 +519,67 @@ export class VirtualScrollManager {
                     el.wrapper.classList.add('loading');
                     this.queuePageRender(pageNum);
                 } else if (el.canvas && el.pageData) {
-                    // 단순 분판 변경 시 (기존 로직)
-                    this.renderToCanvas(el.canvas, el.pageData);
+                    // 분판 변경: 화면에 보이는 페이지만 즉시 재합성.
+                    // 버퍼에만 있는 페이지까지 동기로 돌리면 페이지당 수백만 픽셀 연산이
+                    // 겹쳐 토글이 수 초씩 걸리므로, 화면 밖 페이지는 유휴 시간에 처리.
+                    if (this.isWrapperInViewport(el.wrapper)) {
+                        this.renderToCanvas(el.canvas, el.pageData);
+                        this.deferredComposites.delete(pageNum);
+                    } else {
+                        this.deferredComposites.add(pageNum);
+                        this.scheduleDeferredComposites();
+                    }
                 }
             }
         });
+    }
+
+    // 래퍼가 뷰포트(여유 100px 포함) 안에 보이는지
+    isWrapperInViewport(wrapper) {
+        const vp = this.viewport.getBoundingClientRect();
+        const r = wrapper.getBoundingClientRect();
+        return r.bottom > vp.top - 100 && r.top < vp.bottom + 100;
+    }
+
+    // 화면 밖 페이지의 분판 재합성을 유휴 시간에 하나씩 처리
+    scheduleDeferredComposites() {
+        if (this._deferredScheduled) return;
+        this._deferredScheduled = true;
+
+        const runOne = () => {
+            this._deferredScheduled = false;
+            const next = this.deferredComposites.values().next();
+            if (next.done) return;
+
+            const pageNum = next.value;
+            this.deferredComposites.delete(pageNum);
+
+            const el = this.pageElements.get(pageNum);
+            if (el && el.status === 'rendered' && el.canvas && el.pageData) {
+                this.renderToCanvas(el.canvas, el.pageData);
+            }
+
+            if (this.deferredComposites.size > 0) {
+                this.scheduleDeferredComposites();
+            }
+        };
+
+        if (typeof requestIdleCallback === 'function') {
+            requestIdleCallback(runOne, { timeout: 2000 });
+        } else {
+            setTimeout(runOne, 50);
+        }
+    }
+
+    // 지연돼 있던 페이지가 다시 보이게 되면 즉시 재합성 (낡은 분판 상태 노출 방지)
+    flushDeferredComposite(pageNum) {
+        if (!this.deferredComposites.has(pageNum)) return;
+        this.deferredComposites.delete(pageNum);
+
+        const el = this.pageElements.get(pageNum);
+        if (el && el.status === 'rendered' && el.canvas && el.pageData) {
+            this.renderToCanvas(el.canvas, el.pageData);
+        }
     }
 
     // 디바운스 유틸리티

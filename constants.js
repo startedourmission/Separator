@@ -84,6 +84,24 @@ for (const [key, value] of Object.entries(PANTONE_RGB_MAP)) {
 const _lookupCache = new Map();
 const _warnedColors = new Set();
 const _defaultGray = { r: 128, g: 128, b: 128 };
+const _registeredColors = new Map();
+
+/**
+ * 문서 데이터에서 추정한 별색 RGB 등록.
+ * 팬톤 테이블에 없는 임의 스와치 이름("변경색상" 등)도 실제 색으로 표시하기 위함.
+ */
+export function registerSpotColorRGB(colorName, rgb) {
+    _registeredColors.set(colorName, rgb);
+    _lookupCache.set(colorName, rgb);
+}
+
+// 실제 매핑(테이블 또는 문서 추정값)이 있는지 — 회색 폴백 여부 판단용
+export function hasSpotColorRGB(colorName) {
+    if (_registeredColors.has(colorName)) return true;
+    if (PANTONE_RGB_MAP[colorName]) return true;
+    const normalized = colorName.toUpperCase().replace(/\s+/g, ' ').trim();
+    return _normalizedMap.has(normalized) || _strippedMap.has(_stripSuffix(normalized));
+}
 
 // 팬톤 색상의 RGB 근사값 조회
 export function getSpotColorRGB(colorName) {

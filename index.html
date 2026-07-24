@@ -79,25 +79,25 @@
                     <div class="control-row">
                         <input type="checkbox" id="cyan" checked>
                         <label for="cyan" class="color-label cyan">C (Cyan)</label>
-                        <span class="channel-ratio" id="cyan-ratio" title="문서 전체 평균 잉크량 — 클릭하면 페이지별 목록">-</span>
+                        <span class="channel-ratio" id="cyan-ratio" title="이 채널이 사용된 페이지 수 — 클릭하면 페이지별 목록">-</span>
                     </div>
                     <div class="control-row">
                         <input type="checkbox" id="magenta" checked>
                         <label for="magenta" class="color-label magenta">M (Magenta)</label>
-                        <span class="channel-ratio" id="magenta-ratio" title="문서 전체 평균 잉크량 — 클릭하면 페이지별 목록">-</span>
+                        <span class="channel-ratio" id="magenta-ratio" title="이 채널이 사용된 페이지 수 — 클릭하면 페이지별 목록">-</span>
                     </div>
                     <div class="control-row">
                         <input type="checkbox" id="yellow" checked>
                         <label for="yellow" class="color-label yellow">Y (Yellow)</label>
-                        <span class="channel-ratio" id="yellow-ratio" title="문서 전체 평균 잉크량 — 클릭하면 페이지별 목록">-</span>
+                        <span class="channel-ratio" id="yellow-ratio" title="이 채널이 사용된 페이지 수 — 클릭하면 페이지별 목록">-</span>
                     </div>
                     <div class="control-row">
                         <input type="checkbox" id="black" checked>
                         <label for="black" class="color-label black">K (Black)</label>
-                        <span class="channel-ratio" id="black-ratio" title="문서 전체 평균 잉크량 — 클릭하면 페이지별 목록">-</span>
+                        <span class="channel-ratio" id="black-ratio" title="이 채널이 사용된 페이지 수 — 클릭하면 페이지별 목록">-</span>
                     </div>
                     <div class="control-row">
-                        <input type="checkbox" id="exclude-trim-area">
+                        <input type="checkbox" id="exclude-trim-area" checked>
                         <label for="exclude-trim-area" title="TrimBox(재단면) 바깥의 재단 여백과 재단선을 잉크량 계산에서 제외합니다. TrimBox 정보가 없는 페이지는 전체 영역으로 계산됩니다.">재단선 영역 제외하고 계산</label>
                     </div>
                 </div>
@@ -117,9 +117,6 @@
                     </div>
                     <div class="progress-text" id="scan-progress-text">0/0 페이지 (0%)</div>
                 </div>
-
-                <!-- 잉크 혼입 의심 경고 (1도/2도 문서에 다른 잉크가 섞인 경우) -->
-                <div id="ink-anomaly-warning" class="ink-anomaly-warning hidden"></div>
             </div>
 
             <div class="info-panel">

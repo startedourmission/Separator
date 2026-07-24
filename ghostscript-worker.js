@@ -436,6 +436,16 @@ self.addEventListener('message', async function (e) {
                     }
                 }
 
+                // 합성판(CMYK composite) — 별색의 화면 표시색 추정에 사용
+                let composite = null;
+                if (compositeFiles.length > 0) {
+                    try {
+                        composite = moduleInstance.FS.readFile(compositeFiles[0], { encoding: "binary" });
+                    } catch (e) {
+                        // 합성판 없으면 생략
+                    }
+                }
+
                 // 정리 (파일 삭제)
                 try {
                     moduleInstance.FS.unlink("input.pdf");
@@ -450,6 +460,7 @@ self.addEventListener('message', async function (e) {
                     success: true,
                     channels: channels,
                     spotColors: spotColors,
+                    composite: composite,
                     dpi: tiffsepDpi
                 });
             } catch (error) {
@@ -717,12 +728,17 @@ self.addEventListener('message', async function (e) {
 
                 const files = moduleInstance.FS.readdir('/');
                 const spotSet = new Set();
+                const spotPages = {};  // 별색별 첫 등장 페이지 (표시색 추정 샘플용)
                 for (const file of files) {
-                    const match = file.match(/^probe\d+\((.+)\)\.tif$/);
+                    const match = file.match(/^probe(\d+)\((.+)\)\.tif$/);
                     if (!match) continue;
-                    const colorName = decodePlateColorName(match[1]);
+                    const pageNum = parseInt(match[1]);
+                    const colorName = decodePlateColorName(match[2]);
                     if (!['cyan', 'magenta', 'yellow', 'black'].includes(colorName.toLowerCase())) {
                         spotSet.add(colorName);
+                        if (!spotPages[colorName] || pageNum < spotPages[colorName]) {
+                            spotPages[colorName] = pageNum;
+                        }
                     }
                     try { moduleInstance.FS.unlink(file); } catch (e) { }
                 }
@@ -731,7 +747,8 @@ self.addEventListener('message', async function (e) {
                     type: 'probeSpotColors',
                     requestId: requestId,
                     success: true,
-                    spotColors: Array.from(spotSet)
+                    spotColors: Array.from(spotSet),
+                    spotPages: spotPages
                 });
             } catch (error) {
                 console.error('별색 프로브 실패:', error);
