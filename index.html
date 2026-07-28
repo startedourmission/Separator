@@ -169,6 +169,15 @@
                             id="total-pages">1</span></span>
                     <button id="next-page" disabled>다음 ▶</button>
                 </div>
+                <div style="margin-top: 10px; padding: 7px; background: #f8f9fa; border-radius: 4px;">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <label for="page-number-offset"
+                            style="font-size: 0.85em; color: #555; white-space: nowrap;">첫 페이지 =</label>
+                        <input type="number" id="page-number-offset" value="1" min="1" step="1"
+                            style="width: 70px; padding: 4px;">
+                        <span style="font-size: 0.85em; color: #555;">쪽</span>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -236,6 +245,25 @@
                         내려받기
                     </button>
                     <p class="help-text">설정된 재단 크기(TrimBox)만큼 원본 PDF를 잘라내어 저장합니다.</p>
+                </div>
+
+                <div style="border-top: 1px solid #eee; padding-top: 15px; margin-bottom: 15px;">
+                    <div style="font-weight: 600; margin-bottom: 6px;">내지 PNG 일괄 내려받기</div>
+                    <input type="text" id="export-png-range" placeholder="예: 001, 002, 003 또는 1-10 (비우면 전체)" style="width: 100%; margin-bottom: 6px; padding: 6px;">
+                    <select id="export-png-dpi" style="width: 100%; margin-bottom: 6px; padding: 6px;">
+                        <option value="150">150 DPI (가벼움)</option>
+                        <option value="300" selected>300 DPI (권장)</option>
+                        <option value="600">600 DPI (인쇄용)</option>
+                    </select>
+                    <label
+                        style="display: flex; align-items: center; gap: 6px; margin-bottom: 8px; font-size: 0.85em; cursor: pointer;">
+                        <input type="checkbox" id="export-png-use-offset" style="width: auto;">
+                        <span id="export-png-offset-label">파일 기준 쪽번호로 입력</span>
+                    </label>
+                    <button id="export-png-zip" class="tool-btn" style="width: 100%; margin-bottom: 8px;">
+                        ZIP으로 내려받기
+                    </button>
+                    <p class="help-text">지정한 쪽을 각각 PNG로 변환해 ZIP으로 저장합니다. 재단선(TrimBox) 정보가 있으면 재단선을 제외한 영역만 잘라냅니다.</p>
                 </div>
 
                 <div style="border-top: 1px solid #eee; padding-top: 15px;">

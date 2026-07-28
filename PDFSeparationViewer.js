@@ -17,6 +17,9 @@ export class PDFSeparationViewer {
         this.currentPage = 1;
         this.totalPages = 1;
         this.zoomLevel = 1.0;
+        // 파일의 첫 페이지에 해당하는 실제 쪽번호.
+        // 내부 계산은 항상 물리 페이지(1부터)를 쓰고, 이 값은 표시·입력 변환에만 사용한다.
+        this.pageNumberOffset = 1;
 
         // 페이지별 CMYK 채널 사용량 저장
         // { pageNum: { cyan, magenta, yellow, black, totalPixels, dpi, fromTiffsep?, trim? } }
@@ -234,9 +237,9 @@ export class PDFSeparationViewer {
         this.prevPageBtn.addEventListener('click', () => this.goToPreviousPage());
         this.nextPageBtn.addEventListener('click', () => this.goToNextPage());
 
-        // 페이지 번호 직접 입력
+        // 페이지 번호 직접 입력 (입력값은 파일 기준 쪽번호)
         this.currentPageInput.addEventListener('change', (e) => {
-            const pageNum = parseInt(e.target.value);
+            const pageNum = this.toPhysicalPage(parseInt(e.target.value));
             this.goToPage(pageNum);
         });
         this.currentPageInput.addEventListener('keydown', (e) => {
@@ -244,12 +247,19 @@ export class PDFSeparationViewer {
             if (e.key === 'Enter') {
                 e.preventDefault(); // 폼 제출 방지
                 e.stopPropagation(); // 이벤트 전파 차단
-                const pageNum = parseInt(e.target.value);
+                const pageNum = this.toPhysicalPage(parseInt(e.target.value));
 
                 this.goToPage(pageNum);
                 e.target.blur(); // Enter 후 포커스 해제
             }
         });
+
+        // 파일 기준 쪽번호 오프셋
+        const pageOffsetInput = document.getElementById('page-number-offset');
+        if (pageOffsetInput) {
+            pageOffsetInput.addEventListener('change', (e) => this.setPageNumberOffset(e.target.value));
+            pageOffsetInput.addEventListener('input', (e) => this.setPageNumberOffset(e.target.value));
+        }
 
         // 채널 비율 클릭 이벤트 (이벤트 전파 차단하여 체크박스 해제 방지)
         this.channelRatioElements.cyan.addEventListener('click', (e) => {
@@ -382,6 +392,11 @@ export class PDFSeparationViewer {
         const exportABTestBtn = document.getElementById('export-ab-test');
         if (exportABTestBtn) {
             exportABTestBtn.addEventListener('click', () => this.exportABTestCovers());
+        }
+
+        const exportPngZipBtn = document.getElementById('export-png-zip');
+        if (exportPngZipBtn) {
+            exportPngZipBtn.addEventListener('click', () => this.exportPagesAsPngZip());
         }
 
         // Drag and Drop & Clipboard
@@ -962,6 +977,7 @@ export class PDFSeparationViewer {
             this.currentPDF = data; // 이미지 데이터 저장 (PDF 변수 재사용)
             this.totalPages = 1;
             this.currentPage = 1;
+            this.resetPageNumberOffset();
             this.imgObject = img; // 원본 이미지 객체 보관
 
             // 페이지 캐시 클리어
@@ -1032,6 +1048,7 @@ export class PDFSeparationViewer {
                 this.currentPDF = data;
                 this.totalPages = result.pages;
                 this.currentPage = 1;
+                this.resetPageNumberOffset();
 
 
                 // 페이지 캐시 클리어
@@ -2407,11 +2424,63 @@ export class PDFSeparationViewer {
         // 대신 스크롤 등으로 페이지가 넘어가면 clear됨
     }
 
+    /**
+     * 물리 페이지(1부터) -> 파일 기준 표시 쪽번호
+     */
+    toDisplayPage(physicalPage) {
+        return physicalPage + this.pageNumberOffset - 1;
+    }
+
+    /**
+     * 파일 기준 쪽번호 -> 물리 페이지(1부터)
+     */
+    toPhysicalPage(displayPage) {
+        return displayPage - this.pageNumberOffset + 1;
+    }
+
+    /**
+     * 새 파일을 열면 쪽번호 기준을 기본값으로 되돌린다
+     */
+    resetPageNumberOffset() {
+        this.pageNumberOffset = 1;
+        const input = document.getElementById('page-number-offset');
+        if (input) input.value = 1;
+        this.updatePageOffsetHints();
+    }
+
+    /**
+     * 쪽번호 오프셋 변경 (네비게이터 입력)
+     */
+    setPageNumberOffset(value) {
+        const parsed = parseInt(value, 10);
+        // 쪽번호 입력 파서가 양수만 받으므로 1 미만은 허용하지 않는다
+        // (0 이하로 두면 표시는 되는데 범위 입력창에 타이핑할 수 없는 쪽이 생긴다)
+        this.pageNumberOffset = (isNaN(parsed) || parsed < 1) ? 1 : parsed;
+        this.updatePageControls();
+        this.updatePageOffsetHints();
+    }
+
+    /**
+     * 오프셋이 적용된 범위를 안내 문구로 표시
+     */
+    updatePageOffsetHints() {
+        const first = this.toDisplayPage(1);
+        const last = this.toDisplayPage(this.totalPages);
+        const isDefault = this.pageNumberOffset === 1;
+
+        const exportLabel = document.getElementById('export-png-offset-label');
+        if (exportLabel) {
+            exportLabel.textContent = isDefault
+                ? '파일 기준 쪽번호로 입력'
+                : `파일 기준 쪽번호로 입력 (${first}~${last})`;
+        }
+    }
+
     goToPage(pageNum) {
         // 유효성 검증
         if (isNaN(pageNum) || pageNum < 1 || pageNum > this.totalPages) {
-            // 현재 페이지로 되돌리기
-            this.currentPageInput.value = this.currentPage;
+            // 현재 페이지로 되돌리기 (표시는 파일 기준 쪽번호)
+            this.currentPageInput.value = this.toDisplayPage(this.currentPage);
             return;
         }
 
@@ -2436,9 +2505,11 @@ export class PDFSeparationViewer {
     }
 
     updatePageControls() {
-        this.currentPageInput.value = this.currentPage;
-        this.currentPageInput.max = this.totalPages;
-        this.totalPagesSpan.textContent = this.totalPages;
+        // 입력창·총쪽수는 파일 기준 쪽번호로 표시 (내부 currentPage는 물리 페이지 유지)
+        this.currentPageInput.value = this.toDisplayPage(this.currentPage);
+        this.currentPageInput.min = this.toDisplayPage(1);
+        this.currentPageInput.max = this.toDisplayPage(this.totalPages);
+        this.totalPagesSpan.textContent = this.toDisplayPage(this.totalPages);
         this.prevPageBtn.disabled = this.currentPage <= 1;
         this.nextPageBtn.disabled = this.currentPage >= this.totalPages;
     }
@@ -4122,6 +4193,158 @@ export class PDFSeparationViewer {
             console.error('AB 테스트 표지 추출 실패:', error);
             alert('AB 테스트 표지 추출 중 오류가 발생했습니다: ' + error.message);
             this.hideLoading();
+        }
+    }
+
+    /**
+     * 지정한 쪽들을 각각 PNG로 변환해 ZIP으로 내려받습니다.
+     * TrimBox가 있는 페이지는 재단선을 제외한 영역만 크롭합니다.
+     */
+    async exportPagesAsPngZip() {
+        if (!this.currentPDFData) {
+            alert('PDF 파일이 로드되지 않았습니다.');
+            return;
+        }
+
+        if (!window.pdfjsLib) {
+            alert('PDF.js 라이브러리가 로드되지 않았습니다.');
+            return;
+        }
+
+        if (!window.JSZip && typeof JSZip === 'undefined') {
+            alert('JSZip 라이브러리가 로드되지 않았습니다.');
+            return;
+        }
+
+        const rangeInp = document.getElementById('export-png-range');
+        const dpiSel = document.getElementById('export-png-dpi');
+        const offsetChk = document.getElementById('export-png-use-offset');
+        const rangeStr = rangeInp ? rangeInp.value.trim() : '';
+        const exportDPI = dpiSel ? parseInt(dpiSel.value, 10) : 300;
+        const useOffset = offsetChk ? offsetChk.checked : false;
+
+        // 비워두면 전체 페이지
+        let targetPages;
+        try {
+            if (!rangeStr) {
+                targetPages = Array.from({ length: this.totalPages }, (_, i) => i + 1);
+            } else if (useOffset) {
+                // 입력값이 파일 기준 쪽번호 -> 물리 페이지로 변환해서 파싱
+                const minDisplay = this.toDisplayPage(1);
+                const maxDisplay = this.toDisplayPage(this.totalPages);
+                const displayPages = this.parsePageRange(rangeStr, Number.MAX_SAFE_INTEGER);
+                const outOfRange = displayPages.filter(p => p < minDisplay || p > maxDisplay);
+                targetPages = displayPages
+                    .filter(p => p >= minDisplay && p <= maxDisplay)
+                    .map(p => this.toPhysicalPage(p));
+
+                if (outOfRange.length > 0 && targetPages.length === 0) {
+                    alert(`입력한 쪽번호가 범위를 벗어났습니다. 파일 기준 ${minDisplay}~${maxDisplay}쪽 중에서 지정해주세요.`);
+                    return;
+                }
+                if (outOfRange.length > 0) {
+                    const shown = outOfRange.slice(0, 10).join(', ');
+                    const more = outOfRange.length > 10 ? ` 외 ${outOfRange.length - 10}개` : '';
+                    alert(`범위를 벗어난 쪽은 제외했습니다: ${shown}${more}\n(파일 기준 ${minDisplay}~${maxDisplay}쪽)`);
+                }
+            } else {
+                targetPages = this.parsePageRange(rangeStr, this.totalPages);
+            }
+        } catch (e) {
+            alert(e.message);
+            return;
+        }
+
+        if (targetPages.length === 0) {
+            alert('유효한 쪽 번호가 없습니다.');
+            return;
+        }
+
+        this.showLoading('PNG 변환 준비 중...');
+
+        let pdf = null;
+        try {
+            const ZipLib = window.JSZip || JSZip;
+            const zip = new ZipLib();
+            const scaleFactor = exportDPI / 72;
+
+            pdf = await pdfjsLib.getDocument({ data: this.currentPDFData }).promise;
+
+            let trimmedCount = 0;
+            for (let i = 0; i < targetPages.length; i++) {
+                const pageNum = targetPages[i];
+                this.showLoading(`PNG 변환 중... (${i + 1}/${targetPages.length})`);
+
+                const page = await pdf.getPage(pageNum);
+                const viewport = page.getViewport({ scale: scaleFactor });
+
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.floor(viewport.width);
+                canvas.height = Math.floor(viewport.height);
+                const ctx = canvas.getContext('2d');
+
+                // 투명 PNG로 나오지 않도록 흰 배경을 먼저 깔아준다
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+
+                // TrimBox가 있으면 재단선 제외 영역만 크롭
+                const metadata = this.pageMetadata.get(pageNum);
+                let outCanvas = canvas;
+
+                if (metadata && metadata.trimBox && metadata.mediaBox) {
+                    const mediaBox = metadata.mediaBox;
+                    const trimBox = metadata.trimBox;
+
+                    const scaleX = canvas.width / mediaBox.width;
+                    const scaleY = canvas.height / mediaBox.height;
+
+                    const cropX = (trimBox.x - mediaBox.x) * scaleX;
+                    // PDF 좌표계(Bottom-Up) -> Canvas 좌표계(Top-Down) 변환
+                    const cropY = (mediaBox.height - (trimBox.y - mediaBox.y + trimBox.height)) * scaleY;
+                    const cropW = trimBox.width * scaleX;
+                    const cropH = trimBox.height * scaleY;
+
+                    if (cropW >= 1 && cropH >= 1) {
+                        const cropCanvas = document.createElement('canvas');
+                        cropCanvas.width = Math.floor(cropW);
+                        cropCanvas.height = Math.floor(cropH);
+                        const cropCtx = cropCanvas.getContext('2d');
+                        cropCtx.drawImage(
+                            canvas,
+                            cropX, cropY, cropW, cropH,
+                            0, 0, cropCanvas.width, cropCanvas.height
+                        );
+                        outCanvas = cropCanvas;
+                        trimmedCount++;
+                    }
+                }
+
+                // 파일명도 사용자가 지정한 기준(파일 쪽번호/물리 페이지)에 맞춘다
+                const labelNum = useOffset ? this.toDisplayPage(pageNum) : pageNum;
+                const blob = await new Promise(resolve => outCanvas.toBlob(resolve, 'image/png'));
+                zip.file(`page_${String(labelNum).padStart(3, '0')}.png`, blob);
+
+                page.cleanup();
+            }
+
+            this.showLoading('ZIP 압축 중...');
+            const content = await zip.generateAsync({ type: 'blob' });
+            this.downloadBlob(content, `pages_png_${exportDPI}dpi.zip`);
+
+            this.hideLoading();
+
+            const untrimmed = targetPages.length - trimmedCount;
+            if (untrimmed > 0) {
+                alert(`${targetPages.length}쪽 중 ${untrimmed}쪽은 TrimBox 정보가 없어 재단선을 제외하지 않고 전체 영역으로 저장했습니다.`);
+            }
+        } catch (error) {
+            console.error('PNG ZIP 내보내기 실패:', error);
+            alert('PNG 변환 중 오류가 발생했습니다: ' + error.message);
+            this.hideLoading();
+        } finally {
+            if (pdf) pdf.destroy();
         }
     }
 
