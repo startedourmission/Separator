@@ -130,6 +130,7 @@ export class PDFSeparationViewer {
 
         // Task 5.2: 별색 잉크량 정보 컨테이너
         this.spotInkInfoContainer = document.getElementById('spot-ink-info');
+        this.channelInkInfoContainer = document.getElementById('channel-ink-info');
 
         // 페이지 정보 요소 (New)
         this.mediaBoxDimElement = document.getElementById('mediabox-dim');
@@ -3316,6 +3317,9 @@ export class PDFSeparationViewer {
                 const tac = this.calculateTAC(inkValues);
                 this.tacValueElement.textContent = tac.toFixed(1);
 
+                // 채널별 잉크 비율 UI 업데이트
+                this.updateChannelInkInfo(inkValues);
+
                 // Task 5.2: 별색 잉크량 UI 업데이트
                 this.updateSpotColorInkInfo(spotColorInkValues);
             }
@@ -3326,6 +3330,48 @@ export class PDFSeparationViewer {
 
     calculateTAC(inkValues) {
         return inkValues.cyan + inkValues.magenta + inkValues.yellow + inkValues.black;
+    }
+
+    /**
+     * 마우스 위치의 채널별 잉크 비율 표시.
+     * TAC는 합계만 보여주므로 어느 판에서 잉크가 오는지 알 수 없어, 채널별로 나눠 보여준다.
+     * 스와치 색은 화면 렌더와 같은 Japan Color 변환을 써서 실제 표시색과 일치시킨다.
+     */
+    updateChannelInkInfo(inkValues) {
+        if (!this.channelInkInfoContainer) return;
+
+        if (!inkValues) {
+            this.channelInkInfoContainer.innerHTML = '';
+            this.channelInkInfoContainer.style.display = 'none';
+            return;
+        }
+
+        const channels = [
+            { key: 'cyan', label: 'C', cmyk: [255, 0, 0, 0] },
+            { key: 'magenta', label: 'M', cmyk: [0, 255, 0, 0] },
+            { key: 'yellow', label: 'Y', cmyk: [0, 0, 255, 0] },
+            { key: 'black', label: 'K', cmyk: [0, 0, 0, 255] }
+        ];
+
+        const html = channels.map(({ key, label, cmyk }) => {
+            const pct = inkValues[key] || 0;
+            const rgb = cmykToRGB255(...cmyk);
+            const color = `rgb(${Math.round(rgb.r)},${Math.round(rgb.g)},${Math.round(rgb.b)})`;
+
+            return `
+                <div class="channel-ink-item">
+                    <span class="channel-ink-swatch" style="background:${color}"></span>
+                    <span class="channel-ink-label">${label}</span>
+                    <span class="channel-ink-bar">
+                        <span class="channel-ink-bar-fill" style="width:${pct.toFixed(1)}%;background:${color}"></span>
+                    </span>
+                    <span class="channel-ink-value">${pct.toFixed(1)}%</span>
+                </div>
+            `;
+        }).join('');
+
+        this.channelInkInfoContainer.style.display = 'block';
+        this.channelInkInfoContainer.innerHTML = html;
     }
 
     // Task 5.2: 별색 잉크량 UI 업데이트
@@ -3346,18 +3392,24 @@ export class PDFSeparationViewer {
         // 별색 잉크량 표시
         this.spotInkInfoContainer.style.display = 'block';
 
-        // 각 별색별로 잉크량 표시
+        // 각 별색별로 잉크량 표시 (CMYK 패널과 같은 형태 — 스와치 + 막대 + 수치)
         const spotColorHTML = this.spotColors.map(colorName => {
             const inkValue = spotColorInkValues[colorName];
-            if (inkValue !== undefined) {
-                return `
-                    <div class="spot-ink-item">
-                        <span class="spot-ink-label">${colorName}:</span>
-                        <span class="spot-ink-value">${inkValue.toFixed(1)}%</span>
-                    </div>
-                `;
-            }
-            return '';
+            if (inkValue === undefined) return '';
+
+            const rgb = getSpotColorRGB(colorName);
+            const color = `rgb(${rgb.r},${rgb.g},${rgb.b})`;
+
+            return `
+                <div class="channel-ink-item">
+                    <span class="channel-ink-swatch" style="background:${color}"></span>
+                    <span class="spot-ink-label" title="${colorName}">${colorName}</span>
+                    <span class="channel-ink-bar">
+                        <span class="channel-ink-bar-fill" style="width:${inkValue.toFixed(1)}%;background:${color}"></span>
+                    </span>
+                    <span class="channel-ink-value">${inkValue.toFixed(1)}%</span>
+                </div>
+            `;
         }).filter(html => html !== '').join('');
 
         // 실시간 업데이트
@@ -3367,6 +3419,9 @@ export class PDFSeparationViewer {
     clearMouseInfo() {
         this.cursorCoordsElement.textContent = '-';
         this.tacValueElement.textContent = '-';
+
+        // 채널별 잉크 비율도 초기화 (커서가 벗어나면 이전 값이 남지 않도록)
+        this.updateChannelInkInfo(null);
 
         // Task 5.2: 별색 잉크량 정보도 초기화
         if (this.spotInkInfoContainer) {
@@ -3460,6 +3515,7 @@ export class PDFSeparationViewer {
             if (inkValues) {
                 const tac = this.calculateTAC(inkValues);
                 this.tacValueElement.textContent = tac.toFixed(1);
+                this.updateChannelInkInfo(inkValues);
                 this.updateSpotColorInkInfo(spotColorInkValues);
             }
         } catch (error) {

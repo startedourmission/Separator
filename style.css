@@ -470,16 +470,84 @@ h4 {
 .spot-ink-label {
     font-weight: 600;
     color: #2c3e50;
-    flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    /* 별색 이름은 길 수 있어 폭을 제한 — 넘치면 말줄임(전체 이름은 title로) */
+    max-width: 90px;
 }
 
 .spot-ink-value {
     font-weight: 700;
     color: #3498db;
     margin-left: 8px;
+}
+
+/* 마우스 위치의 채널별 잉크 비율 — 별색 패널과 같은 형태로 맞춤 */
+.channel-ink-info {
+    margin-top: 8px;
+    padding: 8px;
+    background: #f7f9fa;
+    border-radius: 4px;
+    border-left: 3px solid #95a5a6;
+}
+
+.channel-ink-info:empty {
+    display: none;
+}
+
+.channel-ink-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+    font-size: 0.85em;
+}
+
+.channel-ink-item:not(:last-child) {
+    border-bottom: 1px solid #ecf0f1;
+}
+
+/* 채널을 실제 잉크색 점으로 구분 — 라벨을 읽지 않아도 어느 판인지 보이게 */
+.channel-ink-swatch {
+    display: block;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+.channel-ink-label {
+    font-weight: 600;
+    color: #2c3e50;
+    min-width: 12px;
+}
+
+/* 비율 막대 — 숫자만 보는 것보다 잉크량 분포가 한눈에 들어온다 */
+.channel-ink-bar {
+    flex: 1;
+    height: 5px;
+    background: #e4e8ea;
+    border-radius: 3px;
+    overflow: hidden;
+    /* span이라 기본값이 inline — 그대로면 height/width가 먹지 않는다 */
+    display: block;
+}
+
+.channel-ink-bar-fill {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+}
+
+.channel-ink-value {
+    font-weight: 700;
+    color: #2c3e50;
+    margin-left: 2px;
+    min-width: 42px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
 }
 
 .viewer-controls {
