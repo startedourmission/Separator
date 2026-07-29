@@ -2,6 +2,7 @@ import { WorkerPool } from './worker-pool.js';
 import { VirtualScrollManager } from './VirtualScrollManager.js';
 import { getSpotColorRGB, hasSpotColorRGB, registerSpotColorRGB } from './constants.js';
 import { renderBookMockup } from './BookMockupGenerator.js';
+import { cmykToRGB255, getColorTables, warmUpColorProfile } from './color-profile.js';
 
 export class PDFSeparationViewer {
     constructor() {
@@ -9,6 +10,9 @@ export class PDFSeparationViewer {
         // 기존 호환성을 위해 더미 캔버스 생성
         this.canvas = document.createElement('canvas');
         this.ctx = this.canvas.getContext('2d');
+
+        // Japan Color 룩업 테이블을 미리 만들어 첫 렌더가 끊기지 않게 한다 (약 100ms)
+        warmUpColorProfile();
         this.currentPDF = null;
         this.currentFileType = 'pdf'; // 'pdf' | 'image'
         this.ghostscript = null;
@@ -1488,10 +1492,12 @@ export class PDFSeparationViewer {
                 const avg = sample(true) || sample(false);
                 if (!avg) continue;
 
+                // 화면 표시색이므로 렌더링과 동일하게 Japan Color 기준으로 변환
+                const est = cmykToRGB255(avg.c, avg.m, avg.y, avg.k);
                 const rgb = {
-                    r: Math.round(255 * (1 - avg.c / 255) * (1 - avg.k / 255)),
-                    g: Math.round(255 * (1 - avg.m / 255) * (1 - avg.k / 255)),
-                    b: Math.round(255 * (1 - avg.y / 255) * (1 - avg.k / 255))
+                    r: Math.round(est.r),
+                    g: Math.round(est.g),
+                    b: Math.round(est.b)
                 };
                 registerSpotColorRGB(colorName, rgb);
 
@@ -2550,25 +2556,33 @@ export class PDFSeparationViewer {
         const pixelCount = width * height;
         const rgbData = new Uint8ClampedArray(pixelCount * 4);
 
+        // 채널 포함 여부를 루프 밖에서 한 번만 판정 (픽셀마다 includes() 호출 방지)
+        const useC = separations.includes('cyan');
+        const useM = separations.includes('magenta');
+        const useY = separations.includes('yellow');
+        const useK = separations.includes('black');
+
+        // Japan Color 2001 Coated 기준 CMYK → sRGB (아크로뱃 소프트프루프와 유사).
+        // 픽셀당 함수 호출이 전체 비용의 절반 이상이라 테이블을 받아 루프에 인라인한다.
+        const { cmy, kCurve, idxC, idxCT, idxM, idxY, STRIDE_C } = getColorTables();
+
         for (let i = 0; i < pixelCount; i++) {
             // CMYK 값 (0-255, 255 = 100% 잉크)
-            const c = separations.includes('cyan') ? cyan[i] : 0;
-            const m = separations.includes('magenta') ? magenta[i] : 0;
-            const y = separations.includes('yellow') ? yellow[i] : 0;
-            const k = separations.includes('black') ? black[i] : 0;
+            const c = useC ? cyan[i] : 0;
+            const m = useM ? magenta[i] : 0;
+            const y = useY ? yellow[i] : 0;
+            const k = useK ? black[i] : 0;
 
-            // CMYK → RGB 변환
-            // CMYK는 0-255 범위이고, 255 = 100% 잉크
-            // RGB로 변환 시: R = 255 * (1 - C/255) * (1 - K/255)
-            const cNorm = c / 255;
-            const mNorm = m / 255;
-            const yNorm = y / 255;
-            const kNorm = k / 255;
+            const lo = idxC[c] + idxM[m] + idxY[y];
+            const hi = lo + STRIDE_C;
+            const ct = idxCT[c];
+            const ko = k * 3;
+            const o = i * 4;
 
-            rgbData[i * 4 + 0] = Math.round(255 * (1 - cNorm) * (1 - kNorm)); // R
-            rgbData[i * 4 + 1] = Math.round(255 * (1 - mNorm) * (1 - kNorm)); // G
-            rgbData[i * 4 + 2] = Math.round(255 * (1 - yNorm) * (1 - kNorm)); // B
-            rgbData[i * 4 + 3] = 255; // Alpha
+            rgbData[o] = (cmy[lo] + (cmy[hi] - cmy[lo]) * ct) * kCurve[ko];
+            rgbData[o + 1] = (cmy[lo + 1] + (cmy[hi + 1] - cmy[lo + 1]) * ct) * kCurve[ko + 1];
+            rgbData[o + 2] = (cmy[lo + 2] + (cmy[hi + 2] - cmy[lo + 2]) * ct) * kCurve[ko + 2];
+            rgbData[o + 3] = 255; // Alpha
         }
 
         // ImageData 생성
@@ -2613,33 +2627,42 @@ export class PDFSeparationViewer {
         const pixelCount = width * height;
         const rgbData = new Uint8ClampedArray(pixelCount * 4);
 
+        // 채널 포함 여부와 별색 RGB를 루프 밖에서 미리 확정
+        const useC = separations.includes('cyan');
+        const useM = separations.includes('magenta');
+        const useY = separations.includes('yellow');
+        const useK = separations.includes('black');
+
+        const spotLayers = selectedSpotColors
+            .map(name => ({ data: this.spotColorData[name], rgb: getSpotColorRGB(name) }))
+            .filter(layer => layer.data);
+
+        // 렌더 루프에 인라인 (renderCMYKWithSeparation과 동일한 이유)
+        const { cmy, kCurve, idxC, idxCT, idxM, idxY, STRIDE_C } = getColorTables();
+
         for (let i = 0; i < pixelCount; i++) {
-            // 1. CMYK → RGB 변환 (선택된 채널만)
-            const c = separations.includes('cyan') ? cyan[i] : 0;
-            const m = separations.includes('magenta') ? magenta[i] : 0;
-            const y = separations.includes('yellow') ? yellow[i] : 0;
-            const k = separations.includes('black') ? black[i] : 0;
+            // 1. Japan Color 기준 CMYK → sRGB (선택된 채널만)
+            const c = useC ? cyan[i] : 0;
+            const m = useM ? magenta[i] : 0;
+            const y = useY ? yellow[i] : 0;
+            const k = useK ? black[i] : 0;
 
-            const cNorm = c / 255;
-            const mNorm = m / 255;
-            const yNorm = y / 255;
-            const kNorm = k / 255;
+            const lo = idxC[c] + idxM[m] + idxY[y];
+            const hi = lo + STRIDE_C;
+            const ct = idxCT[c];
+            const ko = k * 3;
 
-            let r = 255 * (1 - cNorm) * (1 - kNorm);
-            let g = 255 * (1 - mNorm) * (1 - kNorm);
-            let b = 255 * (1 - yNorm) * (1 - kNorm);
+            let r = (cmy[lo] + (cmy[hi] - cmy[lo]) * ct) * kCurve[ko];
+            let g = (cmy[lo + 1] + (cmy[hi + 1] - cmy[lo + 1]) * ct) * kCurve[ko + 1];
+            let b = (cmy[lo + 2] + (cmy[hi + 2] - cmy[lo + 2]) * ct) * kCurve[ko + 2];
 
             // 2. 각 별색 적용 (곱셈 블렌딩으로 오버프린트 효과 시뮬레이션)
-            for (const colorName of selectedSpotColors) {
-                const spotData = this.spotColorData[colorName];
-                if (!spotData) continue;
-
-                // 별색의 그레이스케일 강도 (0-255)
-                const intensity = spotData[i] / 255;  // 0-1 범위로 정규화
+            for (let s = 0; s < spotLayers.length; s++) {
+                // 별색의 그레이스케일 강도 (0-255) → 0-1 정규화
+                const intensity = spotLayers[s].data[i] / 255;
 
                 if (intensity > 0) {
-                    // 별색의 RGB 근사값 가져오기
-                    const spotRGB = getSpotColorRGB(colorName);
+                    const spotRGB = spotLayers[s].rgb;
 
                     // 곱셈 블렌딩: 별색이 있는 부분은 해당 색상으로 어둡게
                     // intensity가 1이면 완전히 별색, 0이면 영향 없음
@@ -2649,9 +2672,9 @@ export class PDFSeparationViewer {
                 }
             }
 
-            rgbData[i * 4 + 0] = Math.round(Math.max(0, Math.min(255, r))); // R
-            rgbData[i * 4 + 1] = Math.round(Math.max(0, Math.min(255, g))); // G
-            rgbData[i * 4 + 2] = Math.round(Math.max(0, Math.min(255, b))); // B
+            rgbData[i * 4 + 0] = r; // R (Uint8ClampedArray가 반올림·클램프 처리)
+            rgbData[i * 4 + 1] = g; // G
+            rgbData[i * 4 + 2] = b; // B
             rgbData[i * 4 + 3] = 255; // Alpha
         }
 
@@ -2692,7 +2715,23 @@ export class PDFSeparationViewer {
             this.originalImageData.height
         );
 
-        // CMYK 분판 필터 적용
+        // 채널 포함 여부를 루프 밖에서 한 번만 판정
+        const useC = separations.includes('cyan');
+        const useM = separations.includes('magenta');
+        const useY = separations.includes('yellow');
+        const useK = separations.includes('black');
+
+        // 모든 채널이 켜져 있으면 원본 그대로 (불필요한 왕복 변환 생략)
+        if (useC && useM && useY && useK) {
+            this.ctx.putImageData(filteredData, 0, 0);
+            return;
+        }
+
+        // 이 경로는 CMYK 원본이 없는 RGB 렌더 결과에만 쓰인다(예: 별색 없는 RGB 미리보기).
+        // 여기서 쓰는 RGB→CMYK는 실제 분판이 아니라 단순 GCR 추정이므로,
+        // 되돌리는 변환도 같은 순수 반전을 써야 왕복이 항등이 된다.
+        // Japan Color 프로파일은 진짜 CMYK 잉크 데이터가 있는 경로
+        // (renderCMYKWithSeparation / renderWithSpotColors)에만 적용한다.
         for (let i = 0; i < filteredData.data.length; i += 4) {
             const r = filteredData.data[i];
             const g = filteredData.data[i + 1];
@@ -2705,19 +2744,15 @@ export class PDFSeparationViewer {
             const y = k >= 1 ? 0 : (1 - b / 255 - k) / (1 - k);
 
             // 선택되지 않은 채널 제거
-            let filteredC = separations.includes('cyan') ? c : 0;
-            let filteredM = separations.includes('magenta') ? m : 0;
-            let filteredY = separations.includes('yellow') ? y : 0;
-            let filteredK = separations.includes('black') ? k : 0;
+            const filteredC = useC ? c : 0;
+            const filteredM = useM ? m : 0;
+            const filteredY = useY ? y : 0;
+            const filteredK = useK ? k : 0;
 
             // CMYK를 다시 RGB로 변환
-            const newR = 255 * (1 - filteredC) * (1 - filteredK);
-            const newG = 255 * (1 - filteredM) * (1 - filteredK);
-            const newB = 255 * (1 - filteredY) * (1 - filteredK);
-
-            filteredData.data[i] = newR;
-            filteredData.data[i + 1] = newG;
-            filteredData.data[i + 2] = newB;
+            filteredData.data[i] = 255 * (1 - filteredC) * (1 - filteredK);
+            filteredData.data[i + 1] = 255 * (1 - filteredM) * (1 - filteredK);
+            filteredData.data[i + 2] = 255 * (1 - filteredY) * (1 - filteredK);
         }
 
         // 필터링된 이미지 표시 (캔버스 전체)

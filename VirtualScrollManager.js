@@ -1,4 +1,5 @@
 import { getSpotColorRGB } from './constants.js';
+import { getColorTables } from './color-profile.js';
 
 // Virtual Scroll Manager - 스크롤 기반 PDF 뷰어
 export class VirtualScrollManager {
@@ -335,32 +336,40 @@ export class VirtualScrollManager {
         const totalPixels = srcWidth * srcHeight;
         const hasActiveSpots = hasSpotData && activeSpots.length > 0;
 
+        // Japan Color 변환 테이블 — 픽셀당 함수 호출을 피하려고 루프에 인라인한다
+        const { cmy, kCurve, idxC, idxCT, idxM, idxY, STRIDE_C } = getColorTables();
+
         for (let i = 0; i < totalPixels; i++) {
             let c = showC ? cyan[i] : 0;
             let m = showM ? magenta[i] : 0;
             let y = showY ? yellow[i] : 0;
             let k = showK ? black[i] : 0;
 
-            if (hasActiveSpots) {
-                // 한 번의 순회로 CMY 감산 + RGB 블렌딩 준비
-                const kFactor = 1 - k / 255;
-                let r, g, b;
+            const idx = i * 4;
 
+            if (hasActiveSpots) {
                 // CMY에서 별색 기여분 제거
                 for (let s = 0; s < activeSpots.length; s++) {
                     const spot = activeSpots[s];
                     const sv = spot.data[i];
                     if (sv > 0) {
-                        const sk = sv / 255;
                         c = c - spot.cContrib * sv > 0 ? c - spot.cContrib * sv : 0;
                         m = m - spot.mContrib * sv > 0 ? m - spot.mContrib * sv : 0;
                         y = y - spot.yContrib * sv > 0 ? y - spot.yContrib * sv : 0;
                     }
                 }
 
-                r = 255 * (1 - c / 255) * kFactor;
-                g = 255 * (1 - m / 255) * kFactor;
-                b = 255 * (1 - y / 255) * kFactor;
+                // Japan Color 2001 Coated 기준 변환 (메인 뷰와 동일).
+                // 별색 감산 결과는 소수라 정수로 내림 — 인덱스 표는 0-255 정수만 받는다.
+                const ci = c | 0, mi = m | 0, yi = y | 0;
+                const lo = idxC[ci] + idxM[mi] + idxY[yi];
+                const hi = lo + STRIDE_C;
+                const ct = idxCT[ci];
+                const ko = k * 3;
+
+                let r = (cmy[lo] + (cmy[hi] - cmy[lo]) * ct) * kCurve[ko];
+                let g = (cmy[lo + 1] + (cmy[hi + 1] - cmy[lo + 1]) * ct) * kCurve[ko + 1];
+                let b = (cmy[lo + 2] + (cmy[hi + 2] - cmy[lo + 2]) * ct) * kCurve[ko + 2];
 
                 // 별색 RGB 블렌딩 (같은 순회 데이터 재사용)
                 for (let s = 0; s < activeSpots.length; s++) {
@@ -375,17 +384,19 @@ export class VirtualScrollManager {
                     }
                 }
 
-                const idx = i * 4;
                 pixels[idx] = r > 255 ? 255 : r < 0 ? 0 : r;
                 pixels[idx + 1] = g > 255 ? 255 : g < 0 ? 0 : g;
                 pixels[idx + 2] = b > 255 ? 255 : b < 0 ? 0 : b;
                 pixels[idx + 3] = 255;
             } else {
-                const kFactor = 1 - k / 255;
-                const idx = i * 4;
-                pixels[idx] = 255 * (1 - c / 255) * kFactor;
-                pixels[idx + 1] = 255 * (1 - m / 255) * kFactor;
-                pixels[idx + 2] = 255 * (1 - y / 255) * kFactor;
+                const lo = idxC[c] + idxM[m] + idxY[y];
+                const hi = lo + STRIDE_C;
+                const ct = idxCT[c];
+                const ko = k * 3;
+
+                pixels[idx] = (cmy[lo] + (cmy[hi] - cmy[lo]) * ct) * kCurve[ko];
+                pixels[idx + 1] = (cmy[lo + 1] + (cmy[hi + 1] - cmy[lo + 1]) * ct) * kCurve[ko + 1];
+                pixels[idx + 2] = (cmy[lo + 2] + (cmy[hi + 2] - cmy[lo + 2]) * ct) * kCurve[ko + 2];
                 pixels[idx + 3] = 255;
             }
         }
