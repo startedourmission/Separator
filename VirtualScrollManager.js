@@ -459,15 +459,31 @@ export class VirtualScrollManager {
         }
     }
 
+    // 페이지 번호 → 세로 행 번호 (0부터).
+    // 두 페이지 모드는 2단 그리드에 표지(1쪽)가 한 행을 단독 차지:
+    //   0행=[1], 1행=[2,3], 2행=[4,5], ... → n쪽(n≥2)은 floor(n/2)행
+    pageToRow(pageNum) {
+        if (this.displayMode === 'two-page') {
+            return pageNum <= 1 ? 0 : Math.floor(pageNum / 2);
+        }
+        return pageNum - 1;
+    }
+
     // 현재 보이는 페이지 계산
     getCurrentVisiblePage() {
         const scrollTop = this.viewport.scrollTop;
         const viewportHeight = this.viewport.clientHeight;
         const pageFullHeight = this.pageHeight + this.pageGap;
 
-        // 화면 중앙에 있는 페이지
+        // 화면 중앙에 있는 행
         const centerY = scrollTop + viewportHeight / 2;
-        const pageNum = Math.floor(centerY / pageFullHeight) + 1;
+        const row = Math.floor(centerY / pageFullHeight);
+
+        // 두 페이지 모드: 행 번호를 그 행의 왼쪽 페이지로 환산
+        // (한 페이지 모드 계산을 그대로 쓰면 쪽수가 2배 속도로 어긋난다)
+        const pageNum = this.displayMode === 'two-page'
+            ? (row <= 0 ? 1 : row * 2)
+            : row + 1;
 
         return Math.max(1, Math.min(this.totalPages, pageNum));
     }
@@ -492,7 +508,8 @@ export class VirtualScrollManager {
         if (!pageEl) return;
 
         const pageFullHeight = this.pageHeight + this.pageGap;
-        const targetY = (pageNum - 1) * pageFullHeight;
+        // 두 페이지 모드는 행 기준으로 위치 계산 (한 페이지 모드 수식이면 2배 아래로 감)
+        const targetY = this.pageToRow(pageNum) * pageFullHeight;
 
         // 먼 페이지는 즉시 점프 — 수백 페이지를 스무스 스크롤로 지나가면
         // 중간 페이지들이 IntersectionObserver에 걸려 렌더 큐만 오염시키고 도착도 늦다
