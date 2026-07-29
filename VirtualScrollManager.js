@@ -17,7 +17,8 @@ export class VirtualScrollManager {
         this.pageAspectRatio = 1 / 1.414; // A4 기본값
         this.renderQueue = new Set(); // 렌더링 대기 큐
         this.isRendering = false;
-        this.maxConcurrentRenders = 2;
+        // 워커 풀 크기에 맞춰 동시 렌더 수 결정 (풀 워커 수만큼 병렬 GS 렌더 가능)
+        this.maxConcurrentRenders = viewer.workerPoolSize || 2;
         this.activeRenders = 0;
         this.displayMode = 'single'; // 'single' | 'two-page'
         this.deferredComposites = new Set(); // 분판 변경 시 화면 밖 페이지의 지연 재합성 큐
@@ -68,23 +69,23 @@ export class VirtualScrollManager {
         this.updateZoom(this.viewer.zoomLevel);
     }
 
-    // 첫 페이지들 우선 렌더링
+    // 첫 페이지들 우선 렌더링 (워커 풀로 병렬 실행 — 순차 대기 없이 동시에 시작)
     async priorityRenderFirstPages() {
         const pagesToRender = Math.min(3, this.totalPages);
+        const jobs = [];
         for (let i = 1; i <= pagesToRender; i++) {
             const pageEl = this.pageElements.get(i);
             if (pageEl && pageEl.status === 'placeholder') {
                 // 렌더링 큐 대신 직접 렌더링
                 this.activeRenders++;
-                try {
-                    await this.renderPage(i);
-                } catch (error) {
-                    console.error(`초기 페이지 ${i} 렌더링 실패:`, error);
-                } finally {
-                    this.activeRenders--;
-                }
+                jobs.push(
+                    this.renderPage(i)
+                        .catch(error => console.error(`초기 페이지 ${i} 렌더링 실패:`, error))
+                        .finally(() => { this.activeRenders--; })
+                );
             }
         }
+        await Promise.all(jobs);
     }
 
     // 페이지 크기 재계산
@@ -211,6 +212,19 @@ export class VirtualScrollManager {
             let pageData = this.viewer.pageCache.get(pageNum);
 
             if (!pageData) {
+                // GS 렌더(~1초)를 기다리는 동안 스캔 미리보기가 있으면 즉시 표시 —
+                // 먼 페이지로 점프해도 빈 화면 대신 흐릿한 페이지가 0ms에 뜨고,
+                // 아래에서 선명한 렌더가 끝나면 교체된다. (분판 토글 상태도 반영됨)
+                const preview = this.viewer.pagePreviews && this.viewer.pagePreviews.get(pageNum);
+                if (preview) {
+                    const pvCanvas = document.createElement('canvas');
+                    pvCanvas.className = 'page-canvas';
+                    this.renderToCanvas(pvCanvas, preview);
+                    pageEl.wrapper.innerHTML = '';
+                    pageEl.wrapper.appendChild(pvCanvas);
+                    pageEl.wrapper.classList.remove('loading');
+                }
+
                 // 렌더링 데이터 가져오기
                 pageData = await this.viewer.renderPageData(pageNum);
                 this.viewer.addToCache(pageNum, pageData);
@@ -465,6 +479,10 @@ export class VirtualScrollManager {
             this.viewer.currentPage = newPage;
             this.viewer.updatePageControls();
             this.viewer.updatePageDimensionInfo(); // 페이지 변경 시 치수 정보 업데이트
+
+            // 스크롤이 멎으면 인접 페이지를 미리 렌더해 캐시 —
+            // 다음 스크롤 때 GS 렌더 없이 즉시 표시된다 (워커 풀 유휴 시간 활용)
+            this.viewer.preloadAdjacentPages();
         }
     }
 
@@ -476,9 +494,12 @@ export class VirtualScrollManager {
         const pageFullHeight = this.pageHeight + this.pageGap;
         const targetY = (pageNum - 1) * pageFullHeight;
 
+        // 먼 페이지는 즉시 점프 — 수백 페이지를 스무스 스크롤로 지나가면
+        // 중간 페이지들이 IntersectionObserver에 걸려 렌더 큐만 오염시키고 도착도 늦다
+        const distance = Math.abs(pageNum - this.getCurrentVisiblePage());
         this.viewport.scrollTo({
             top: targetY,
-            behavior: 'smooth'
+            behavior: distance > 5 ? 'auto' : 'smooth'
         });
     }
 

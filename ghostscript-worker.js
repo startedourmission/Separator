@@ -5,6 +5,15 @@ import Module from './gs.mjs';
 // 워커당 1회만 컴파일해서 캐시하고, 이후에는 인스턴스화만 수행
 let compiledWasm = null;
 
+// 현재 문서의 PDF 바이트 — setPDF로 1회 수신해 캐시.
+// 매 작업마다 postMessage로 수 MB를 복제 전송하는 비용을 없앤다.
+// 각 작업은 명시적 pdfData가 오면 그것을 우선 사용(기존 호환).
+let cachedPdfData = null;
+
+function resolvePdfData(explicit) {
+    return explicit || cachedPdfData;
+}
+
 async function getCompiledWasm() {
     if (!compiledWasm) {
         const url = new URL('gs.wasm', self.location.href).href;
@@ -340,11 +349,16 @@ self.addEventListener('message', async function (e) {
         if (type === 'init') {
             await initGhostscript();
             self.postMessage({ type: 'init', success: true });
+        } else if (type === 'setPDF') {
+            // 문서 바이트 캐시 갱신 — 응답 불필요 (postMessage는 워커별 FIFO이므로
+            // 이후 도착하는 작업은 항상 갱신된 캐시를 본다)
+            cachedPdfData = data.pdfData || null;
         } else if (type === 'processTiffsep') {
 
 
             try {
-                const { pdfData, pageNum, dpi, excludeAnnots } = data;
+                const { pageNum, dpi, excludeAnnots } = data;
+                const pdfData = resolvePdfData(data.pdfData);
                 const gsOutput = [];
                 const moduleInstance = await Module(createModuleConfig({
                     noExitRuntime: false,
@@ -465,6 +479,11 @@ self.addEventListener('message', async function (e) {
                     // 파일 정리 실패 무시
                 }
 
+                // 채널 TIFF들은 복제 없이 소유권 이전 (페이지당 수십 MB 복사 방지)
+                const tiffsepTransfers = Object.values(channels)
+                    .map(c => c?.buffer).filter(Boolean);
+                if (composite?.buffer) tiffsepTransfers.push(composite.buffer);
+
                 self.postMessage({
                     type: 'tiffsepResult',
                     requestId: requestId,
@@ -473,7 +492,7 @@ self.addEventListener('message', async function (e) {
                     spotColors: spotColors,
                     composite: composite,
                     dpi: tiffsepDpi
-                });
+                }, tiffsepTransfers);
             } catch (error) {
                 console.error('❌ tiffsep 처리 실패:', error);
                 self.postMessage({
@@ -541,7 +560,8 @@ self.addEventListener('message', async function (e) {
             }
         } else if (type === 'testDevice') {
             try {
-                const { pdfData, device, outputFile } = data;
+                const { device, outputFile } = data;
+                const pdfData = resolvePdfData(data.pdfData);
                 const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
 
                 // PDF 파일 작성
@@ -607,7 +627,7 @@ self.addEventListener('message', async function (e) {
                 });
             }
         } else if (type === 'getPageCount') {
-            const { pdfData } = data;
+            const pdfData = resolvePdfData(data.pdfData);
             const pageCount = await getPDFPageCount(pdfData);
 
             self.postMessage({
@@ -617,8 +637,8 @@ self.addEventListener('message', async function (e) {
                 pageCount: pageCount
             });
         } else if (type === 'getPageSize') {
-            const { pdfData, pageNum } = data;
-            const pageSize = await getPDFPageSize(pdfData, pageNum);
+            const { pageNum } = data;
+            const pageSize = await getPDFPageSize(resolvePdfData(data.pdfData), pageNum);
 
             self.postMessage({
                 type: 'pageSize',
@@ -627,7 +647,8 @@ self.addEventListener('message', async function (e) {
                 pageSize: pageSize
             });
         } else if (type === 'process') {
-            const { pdfData, options, pageNum } = data;
+            const { options, pageNum } = data;
+            const pdfData = resolvePdfData(data.pdfData);
             const targetPage = pageNum || options?.pageNum || 1;
             const result = await processPDF(pdfData, options, targetPage);
 
@@ -639,11 +660,12 @@ self.addEventListener('message', async function (e) {
                 data: result.data,
                 width: options.width || 800,
                 height: options.height || 600
-            });
+            }, result.data?.buffer ? [result.data.buffer] : []);
         } else if (type === 'renderPagesChunk') {
             // 페이지 범위를 GS 1회 실행으로 렌더링 (tiff32nc CMYK).
             // 페이지마다 모듈 초기화 + PDF 파싱을 반복하지 않으므로 훨씬 빠름.
-            const { pdfData, firstPage, lastPage, dpi, excludeAnnots } = data;
+            const { firstPage, lastPage, dpi, excludeAnnots } = data;
+            const pdfData = resolvePdfData(data.pdfData);
             try {
                 const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
                 moduleInstance.FS.writeFile("input.pdf", new Uint8Array(pdfData));
@@ -715,7 +737,9 @@ self.addEventListener('message', async function (e) {
             // PDF 바이너리 정규식 검색과 달리 압축 스트림 문서에서도 정확하고,
             // 이후 tiffsep 스캔의 플레이트 파일명과 이름이 반드시 일치함.
             try {
-                const { pdfData } = data;
+                const pdfData = resolvePdfData(data.pdfData);
+                // firstPage/lastPage가 오면 해당 범위만 프로브 (여러 워커로 분할 병렬화용)
+                const { firstPage, lastPage } = data;
                 const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
                 moduleInstance.FS.writeFile("input.pdf", new Uint8Array(pdfData));
 
@@ -725,10 +749,12 @@ self.addEventListener('message', async function (e) {
                     '-dNOSAFER',
                     '-sDEVICE=tiffsep',
                     '-r4',
-                    '-dMaxSpots=10',
-                    '-sOutputFile=probe%d.tif',
-                    'input.pdf'
+                    '-dMaxSpots=10'
                 ];
+                if (firstPage && lastPage) {
+                    args.push(`-dFirstPage=${firstPage}`, `-dLastPage=${lastPage}`);
+                }
+                args.push('-sOutputFile=probe%d.tif', 'input.pdf');
 
                 try {
                     moduleInstance.callMain(args);
@@ -738,13 +764,16 @@ self.addEventListener('message', async function (e) {
                     }
                 }
 
+                // 범위 프로브 시 %d는 1부터 시작하므로 실제 페이지 번호로 보정
+                const pageOffset = (firstPage && lastPage) ? firstPage - 1 : 0;
+
                 const files = moduleInstance.FS.readdir('/');
                 const spotSet = new Set();
                 const spotPages = {};  // 별색별 첫 등장 페이지 (표시색 추정 샘플용)
                 for (const file of files) {
                     const match = file.match(/^probe(\d+)\((.+)\)\.tif$/);
                     if (!match) continue;
-                    const pageNum = parseInt(match[1]);
+                    const pageNum = parseInt(match[1]) + pageOffset;
                     const colorName = decodePlateColorName(match[2]);
                     if (!['cyan', 'magenta', 'yellow', 'black'].includes(colorName.toLowerCase())) {
                         spotSet.add(colorName);
@@ -774,7 +803,8 @@ self.addEventListener('message', async function (e) {
         } else if (type === 'processTiffsepChunk') {
             // 페이지 범위를 tiffsep으로 1회 실행 — 별색 분판 교정용.
             // plateN(색상명).tif 형식으로 페이지별 분판 파일이 생성됨 (N = 범위 내 순번).
-            const { pdfData, firstPage, lastPage, dpi, excludeAnnots } = data;
+            const { firstPage, lastPage, dpi, excludeAnnots } = data;
+            const pdfData = resolvePdfData(data.pdfData);
             try {
                 const tiffsepDpi = Math.min(dpi || 72, 300);
                 const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));

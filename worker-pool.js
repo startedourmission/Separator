@@ -69,20 +69,58 @@ class WorkerPool {
     }
 
     setPDFData(pdfData) {
+        // 같은 문서면 재전송하지 않음 — 각 워커는 이미 바이트를 캐시하고 있다
+        if (this.pdfData === pdfData) return;
         this.pdfData = pdfData;
+        this.broadcastPDF();
     }
 
-    // 아직 시작되지 않은 대기 작업을 모두 취소.
-    // 이미 워커에서 실행 중인 작업은 중간에 끊을 수 없으므로 그대로 두고,
-    // 큐에만 쌓여 있는 작업을 비워 새 작업이 곧바로 워커를 잡을 수 있게 한다.
-    cancelQueuedTasks() {
-        const dropped = this.taskQueue.length;
-        for (const task of this.taskQueue) {
-            // 대기 중이던 호출부가 영원히 매달리지 않도록 즉시 결과를 돌려준다
-            if (task.resolve) task.resolve({ cancelled: true });
+    // 모든 워커에 문서 바이트를 1회 전송해 캐시시킴.
+    // 이후 작업 메시지는 pdfData를 싣지 않으므로 작업당 수 MB 복제가 사라진다.
+    // (postMessage는 워커별 FIFO — 이후 작업은 항상 갱신된 캐시를 본다)
+    broadcastPDF() {
+        if (!this.pdfData) return;
+        for (const [, info] of this.activeWorkers) {
+            info.worker.postMessage({ type: 'setPDF', data: { pdfData: this.pdfData } });
         }
-        this.taskQueue = [];
+    }
+
+    // 아직 시작되지 않은 대기 중인 "스캔 청크" 작업을 취소.
+    // 이미 워커에서 실행 중인 작업은 중간에 끊을 수 없으므로 그대로 두고,
+    // 큐의 청크 작업만 비워 새 스캔이 곧바로 워커를 잡을 수 있게 한다.
+    // 열람 렌더(process/processTiffsep) 등 다른 작업은 건드리지 않는다 —
+    // 취소하면 화면 페이지가 빈 채로 남는다.
+    cancelQueuedTasks() {
+        const CHUNK_TYPES = new Set(['renderPagesChunk', 'processTiffsepChunk']);
+        const keep = [];
+        let dropped = 0;
+        for (const task of this.taskQueue) {
+            if (CHUNK_TYPES.has(task.type)) {
+                // 대기 중이던 호출부가 영원히 매달리지 않도록 즉시 결과를 돌려준다
+                if (task.resolve) task.resolve({ cancelled: true });
+                dropped++;
+            } else {
+                keep.push(task);
+            }
+        }
+        this.taskQueue = keep;
         return dropped;
+    }
+
+    // 범용 단일 작업 실행. priority가 참이면 대기 큐 맨 앞에 끼어든다 —
+    // 화면에 보이는 페이지 렌더가 백그라운드 스캔 청크들 뒤에 줄서지 않도록.
+    runTask(type, data, { priority = false } = {}) {
+        return new Promise((resolve, reject) => {
+            const task = { type, data, resolve, reject };
+            const available = this.getAvailableWorker();
+            if (available) {
+                this.executeTask(available.workerId, available.worker, task);
+            } else if (priority) {
+                this.taskQueue.unshift(task);
+            } else {
+                this.taskQueue.push(task);
+            }
+        });
     }
 
     handleWorkerMessage(workerId, e) {
@@ -166,6 +204,11 @@ class WorkerPool {
             worker.postMessage({ type: 'init' });
         });
 
+        // 재생성된 워커는 PDF 캐시가 비어 있으므로 다시 전송
+        if (this.pdfData) {
+            worker.postMessage({ type: 'setPDF', data: { pdfData: this.pdfData } });
+        }
+
         console.log(`Worker ${workerId} recreated`);
     }
 
@@ -198,13 +241,12 @@ class WorkerPool {
 
         this.pendingRequests.set(reqId, { resolve, reject, onProgress });
 
+        // pdfData는 setPDFData 시점에 워커별로 캐시돼 있으므로 작업 메시지에 싣지 않는다.
+        // (data에 명시적 pdfData가 있으면 그대로 전달 — 워커가 그것을 우선 사용)
         worker.postMessage({
             type,
             requestId: reqId,
-            data: {
-                ...data,
-                pdfData: this.pdfData
-            }
+            data
         });
     }
 

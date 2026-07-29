@@ -45,6 +45,15 @@ export class PDFSeparationViewer {
         // 스캔 완료 후 진행률 바를 숨기는 타이머 (새 스캔이 시작되면 취소)
         this.scanHideTimer = null;
 
+        // 별색 프로브 진행 상태 — 스캔은 프로브 완료 후에 시작해야 함
+        // (별색 유무에 따라 스캔 방식이 달라지므로)
+        this.spotProbePromise = null;
+
+        // 페이지 미리보기 (백그라운드 스캔의 72dpi 데이터를 축소 보관).
+        // 먼 페이지로 점프했을 때 GS 렌더(~1초)를 기다리는 동안 흐릿한 미리보기를
+        // 즉시 띄우고, 선명한 렌더가 끝나면 교체한다. pageNum -> {imageData, spotColorData}
+        this.pagePreviews = new Map();
+
         // 페이지별 CMYK 채널 사용량 — 현재 활성 변형의 저장소를 가리키는 참조.
         // { pageNum: { cyan, magenta, yellow, black, totalPixels, dpi, fromTiffsep?, trim? } }
         // trim: TrimBox(재단면) 내부만 센 카운트 { cyan, magenta, yellow, black, totalPixels }
@@ -57,7 +66,7 @@ export class PDFSeparationViewer {
 
         // 페이지 캐시 (빠른 페이지 전환용)
         this.pageCache = new Map(); // pageNum -> { imageData, baseWidth, baseHeight, spotColorData }
-        this.pageCacheSize = 5; // 최대 캐시 페이지 수
+        this.pageCacheSize = 5; // 최대 캐시 페이지 수 (updatePageCacheSize가 DPI에 맞게 조정)
         this.preloadingPages = new Set(); // 현재 프리로딩 중인 페이지
 
         // 별색 관련 속성
@@ -79,7 +88,19 @@ export class PDFSeparationViewer {
         this.initializeElements();
         this.bindEvents();
         this.initializeScrollViewer();
+        this.updatePageCacheSize();
         this.loadGhostscript();
+    }
+
+    // 렌더 DPI에 따라 페이지당 메모리가 제곱으로 커지므로 캐시 페이지 수를 예산 기반으로 조정.
+    // (300dpi A4 한 페이지 ≈ CMYK 채널 4개 × 8.7M px ≈ 35MB — 고정 5장은 저DPI에서 너무 작고
+    //  600dpi 이상에서는 오히려 너무 컸다)
+    updatePageCacheSize() {
+        const dpi = this.renderDPI || 300;
+        const pxPerPage = (8.27 * dpi) * (11.69 * dpi); // A4 기준 추정
+        const bytesPerPage = pxPerPage * 4;             // CMYK 4채널
+        const budget = 400e6;                           // 약 400MB
+        this.pageCacheSize = Math.max(3, Math.min(30, Math.floor(budget / bytesPerPage)));
     }
 
     // 스크롤 뷰어 초기화
@@ -376,6 +397,7 @@ export class PDFSeparationViewer {
         if (this.qualitySelect) {
             this.qualitySelect.addEventListener('change', (e) => {
                 this.renderDPI = parseInt(e.target.value);
+                this.updatePageCacheSize(); // DPI에 맞춰 캐시 페이지 수 재계산
 
                 // 설정 변경 시 캐시 비우고 재렌더링
                 this.pageCache.clear();
@@ -579,6 +601,12 @@ export class PDFSeparationViewer {
                     try {
                         this.currentPDFData = new Uint8Array(data);
 
+                        // 워커들에 문서 바이트를 1회만 전송해 캐시 — 이후 작업 메시지는
+                        // pdfData를 싣지 않아 호출당 수 MB 복제가 사라진다
+                        this.worker.postMessage({ type: 'setPDF', data: { pdfData: this.currentPDFData } });
+                        if (this.workerPool) {
+                            this.workerPool.setPDFData(this.currentPDFData);
+                        }
 
                         // 페이지 수 조회
                         const pageCount = await this.ghostscript.getPageCount();
@@ -595,16 +623,27 @@ export class PDFSeparationViewer {
                         throw new Error('PDF가 로딩되지 않았습니다');
                     }
 
+                    // Fast path: pdf-lib으로 페이지 트리에서 즉시 계산.
+                    // gs 경로는 nullpage로 문서 전체를 순회해서 수백 페이지 문서에서 수 초가 걸린다.
+                    try {
+                        const { PDFDocument } = PDFLib;
+                        const doc = await PDFDocument.load(this.currentPDFData);
+                        const count = doc.getPageCount();
+                        if (count > 0) return count;
+                    } catch (e) {
+                        console.warn('pdf-lib 페이지 수 계산 실패, gs로 대체:', e.message);
+                    }
+
+                    // Fallback: 손상됐거나 pdf-lib이 못 읽는 문서는 기존 gs 경로
                     return new Promise((resolve, reject) => {
                         const reqId = ++this.requestId;
                         this.pendingRequests.set(reqId, { resolve, reject });
 
+                        // pdfData는 loadPDF 때 setPDF로 캐시됨 — 재전송 안 함
                         this.worker.postMessage({
                             type: 'getPageCount',
                             requestId: reqId,
-                            data: {
-                                pdfData: this.currentPDFData
-                            }
+                            data: {}
                         });
                     });
                 },
@@ -614,6 +653,21 @@ export class PDFSeparationViewer {
                         throw new Error('PDF가 로딩되지 않았습니다');
                     }
 
+                    // Fast path: 로딩 시 추출한 메타데이터에서 즉시 반환.
+                    // 워커 프로브는 페이지 전체를 렌더해서 크기를 읽으므로 페이지당 ~300ms를 낭비한다.
+                    // gs는 /Rotate 를 적용해 렌더하므로 90/270도 페이지는 가로세로를 맞바꾼다.
+                    const meta = this.pageMetadata.get(pageNum);
+                    if (meta && meta.mediaBox &&
+                        typeof meta.mediaBox.width === 'number' && meta.mediaBox.width > 0 &&
+                        typeof meta.mediaBox.height === 'number' && meta.mediaBox.height > 0) {
+                        const swap = meta.rotate === 90 || meta.rotate === 270;
+                        return {
+                            width: swap ? meta.mediaBox.height : meta.mediaBox.width,
+                            height: swap ? meta.mediaBox.width : meta.mediaBox.height
+                        };
+                    }
+
+                    // Fallback: 메타데이터가 아직 없거나(추출 전) 실패한 경우 기존 워커 프로브
                     return new Promise((resolve, reject) => {
                         const reqId = ++this.requestId;
                         this.pendingRequests.set(reqId, { resolve, reject });
@@ -622,7 +676,6 @@ export class PDFSeparationViewer {
                             type: 'getPageSize',
                             requestId: reqId,
                             data: {
-                                pdfData: this.currentPDFData,
                                 pageNum: pageNum
                             }
                         });
@@ -635,7 +688,32 @@ export class PDFSeparationViewer {
                     }
 
                     const payloadOptions = { ...options, pageNum, excludeAnnots: this.excludeAnnotations };
+                    const taskData = { options: payloadOptions, pageNum };
 
+                    // 워커 풀에 우선순위로 배정 — 풀이 비면 최대 3페이지 동시 렌더.
+                    // (단일 워커에 직렬화되던 것을 병렬화. 스캔 청크보다 항상 먼저 실행)
+                    if (this.workerPool) {
+                        try {
+                            const result = await this.workerPool.runTask('process', taskData, { priority: true });
+                            if (result && !result.cancelled) {
+                                const w = result.width || payloadOptions.width || 800;
+                                const h = result.height || payloadOptions.height || 600;
+                                try {
+                                    return result.format === 'tiff'
+                                        ? await this.convertTIFFToCMYK(result.data, w, h)
+                                        : await this.convertPNGToImageData(result.data, w, h);
+                                } catch (convErr) {
+                                    console.error('이미지 변환 실패:', convErr);
+                                    return this.createDummyImageData(w, h);
+                                }
+                            }
+                        } catch (error) {
+                            console.error('Worker 처리 오류:', error.message);
+                        }
+                        return this.createDummyImageData(payloadOptions.width || 800, payloadOptions.height || 600);
+                    }
+
+                    // Fallback: 풀이 없으면 기존 단일 워커 경로
                     return new Promise((resolve, reject) => {
                         const reqId = ++this.requestId;
                         this.pendingRequests.set(reqId, { resolve, reject, options: payloadOptions });
@@ -644,7 +722,6 @@ export class PDFSeparationViewer {
                             type: 'process',
                             requestId: reqId,
                             data: {
-                                pdfData: this.currentPDFData,
                                 options: payloadOptions,
                                 pageNum
                             }
@@ -692,7 +769,6 @@ export class PDFSeparationViewer {
                             type: 'testDevice',
                             requestId: reqId,
                             data: {
-                                pdfData: this.currentPDFData,
                                 device: device,
                                 outputFile: outputFile
                             }
@@ -706,6 +782,32 @@ export class PDFSeparationViewer {
                         throw new Error('PDF 데이터가 없습니다');
                     }
 
+                    // 현재 문서면 워커 캐시 사용, 다른 바이트가 명시되면 그것을 전달
+                    const explicitPdf = dataToUse !== this.currentPDFData ? dataToUse : undefined;
+                    const taskData = {
+                        pdfData: explicitPdf,
+                        pageNum: pageNum || 1,
+                        dpi: dpi || 72,
+                        excludeAnnots: this.excludeAnnotations
+                    };
+
+                    // 워커 풀에 우선순위로 배정 (별색 문서의 열람 렌더 병렬화)
+                    if (this.workerPool) {
+                        const result = await this.workerPool.runTask('processTiffsep', taskData, { priority: true });
+                        if (result?.cancelled) {
+                            throw new Error('작업이 취소되었습니다');
+                        }
+                        return {
+                            channels: result.channels,
+                            spotColors: result.spotColors,
+                            composite: result.composite,
+                            width: result.width,
+                            height: result.height,
+                            dpi: result.dpi
+                        };
+                    }
+
+                    // Fallback: 풀이 없으면 기존 단일 워커 경로
                     return new Promise((resolve, reject) => {
                         const reqId = ++this.requestId;
                         this.pendingRequests.set(reqId, { resolve, reject });
@@ -713,12 +815,7 @@ export class PDFSeparationViewer {
                         this.worker.postMessage({
                             type: 'processTiffsep',
                             requestId: reqId,
-                            data: {
-                                pdfData: dataToUse,
-                                pageNum: pageNum || 1,
-                                dpi: dpi || 72,
-                                excludeAnnots: this.excludeAnnotations
-                            }
+                            data: taskData
                         });
                     });
                 },
@@ -736,7 +833,7 @@ export class PDFSeparationViewer {
                         this.worker.postMessage({
                             type: 'probeSpotColors',
                             requestId: reqId,
-                            data: { pdfData: dataToUse }
+                            data: { pdfData: dataToUse !== this.currentPDFData ? dataToUse : undefined }
                         });
                     });
                 }
@@ -1116,9 +1213,24 @@ export class PDFSeparationViewer {
                 this.resetScanVariants();
                 this.updateChannelRatios(null);
 
-                // 2단계: 초기화 (66%)
+                // 2단계: 별색 프로브를 백그라운드로 시작 — 완료를 기다리지 않는다.
+                // (문서 전체를 훑는 프로브는 수백 페이지에서 수 초가 걸려 로딩 화면을 붙잡았음)
+                // 별색이 발견되면 그 시점까지 렌더된 페이지를 다시 그려 정확한 분판 채널을 반영한다.
                 this.showLoading('초기화 중...', '66%');
-                await this.loadSpotColors();
+                const probeDoc = this.currentPDFData;
+                this.spotProbePromise = this.loadSpotColors()
+                    .then(() => {
+                        // 프로브 도중 다른 문서로 교체됐으면 이 결과는 무시
+                        if (this.currentPDFData !== probeDoc) return;
+                        if (this.spotColors && this.spotColors.length > 0) {
+                            // 프로브 완료 전에 렌더된 페이지는 별색 채널 없이 그려졌으므로 재렌더
+                            this.clearPageCache();
+                            if (this.scrollManager && this.scrollManager.totalPages > 0) {
+                                this.scrollManager.updateAllVisiblePages(true);
+                            }
+                        }
+                    })
+                    .catch(err => console.warn('별색 감지 실패:', err));
 
                 // 3단계: 스크롤 뷰어 초기화 (100%)
                 this.showLoading('뷰어 초기화 중...', '100%');
@@ -1138,10 +1250,10 @@ export class PDFSeparationViewer {
                 // 렌더링 완료 후 로딩 숨김
                 this.hideLoading();
 
-                // 메타데이터(TrimBox) 추출 후 백그라운드 스캔 시작
-                // (재단선 영역 제외 계산에 페이지별 TrimBox가 필요하므로 스캔 전에 확보)
-                this.extractPDFMetadata()
-                    .finally(() => this.scanAllPagesInBackground());
+                // 메타데이터(TrimBox)와 별색 프로브가 끝나면 백그라운드 스캔 시작
+                // (재단선 제외 계산에 페이지별 TrimBox가, 스캔 방식 결정에 별색 유무가 필요)
+                Promise.allSettled([this.extractPDFMetadata(), this.spotProbePromise])
+                    .then(() => this.scanAllPagesInBackground());
 
 
             } else {
@@ -1155,6 +1267,12 @@ export class PDFSeparationViewer {
     }
 
     async scanAllPagesInBackground() {
+        // 별색 프로브가 아직 진행 중이면 완료를 기다린다 — 별색 유무가 스캔 방식을 결정하므로
+        // 프로브 전에 스캔하면 별색 문서를 CMYK 전용으로 잘못 측정해 캐시할 수 있다.
+        if (this.spotProbePromise) {
+            await this.spotProbePromise.catch(() => { });
+        }
+
         // 별색 문서는 처음부터 tiffsep으로 스캔 (별색이 분리된 깨끗한 CMYK + 별색 채널을 한 번에 수집).
         // 예전처럼 tiff32nc로 먼저 스캔한 뒤 tiffsep으로 재교정하면 렌더링이 2배로 들고,
         // 수집 완료 후에도 수치가 계속 바뀌는 것처럼 보이는 문제가 있었음.
@@ -1215,32 +1333,57 @@ export class PDFSeparationViewer {
 
         try {
             if (this.workerPool) {
-                // 청크 단위 병렬 스캔: 페이지 결과는 워커에서 스트리밍으로 도착
+                // 청크 단위 병렬 스캔: 페이지 결과는 워커에서 스트리밍으로 도착.
+                // 전 청크를 미리 큐에 넣으면 1→N 순서로 고정되어, 사용자가 300~400쪽으로
+                // 점프했을 때 그 근처의 미리보기/잉크 데이터가 한참 뒤에야 생긴다.
+                // 대신 워커가 빌 때마다 "현재 보고 있는 페이지에서 가장 가까운" 청크를 골라
+                // 스캔이 사용자를 따라다니게 한다. (전체 완주는 동일하게 보장)
                 const pagePromises = [];
-                const chunkPromises = [];
 
+                const chunks = [];
                 for (let first = 1; first <= this.totalPages; first += chunkSize) {
-                    const last = Math.min(first + chunkSize - 1, this.totalPages);
-
-                    const onPage = (page) => {
-                        const p = (hasSpots
-                            ? this.ingestTiffsepPageData(page, targetVariant)
-                            : this.ingestScanPageData(page, targetVariant))
-                            .catch(err => console.error(`페이지 ${page.pageNum} 스캔 처리 실패:`, err))
-                            .finally(onAnyPageDone);
-                        pagePromises.push(p);
-                    };
-
-                    const chunkPromise = hasSpots
-                        ? this.workerPool.processTiffsepChunk(first, last, scanDpi, onPage, scanExcludeAnnots)
-                        : this.workerPool.renderPagesChunk(first, last, scanDpi, onPage, scanExcludeAnnots);
-
-                    chunkPromises.push(chunkPromise.catch(err =>
-                        console.error(`청크 스캔 실패 (${first}-${last}쪽):`, err)
-                    ));
+                    chunks.push({ first, last: Math.min(first + chunkSize - 1, this.totalPages) });
                 }
 
-                await Promise.all(chunkPromises);
+                const onPage = (page) => {
+                    const p = (hasSpots
+                        ? this.ingestTiffsepPageData(page, targetVariant)
+                        : this.ingestScanPageData(page, targetVariant))
+                        .catch(err => console.error(`페이지 ${page.pageNum} 스캔 처리 실패:`, err))
+                        .finally(onAnyPageDone);
+                    pagePromises.push(p);
+                };
+
+                const takeNearestChunk = () => {
+                    const cur = this.currentPage || 1;
+                    let bestIdx = 0, bestDist = Infinity;
+                    for (let i = 0; i < chunks.length; i++) {
+                        const c = chunks[i];
+                        const d = cur < c.first ? c.first - cur : (cur > c.last ? cur - c.last : 0);
+                        if (d < bestDist) { bestDist = d; bestIdx = i; if (d === 0) break; }
+                    }
+                    return chunks.splice(bestIdx, 1)[0];
+                };
+
+                const runner = async () => {
+                    while (chunks.length > 0 && !isStale()) {
+                        const { first, last } = takeNearestChunk();
+                        try {
+                            const res = await (hasSpots
+                                ? this.workerPool.processTiffsepChunk(first, last, scanDpi, onPage, scanExcludeAnnots)
+                                : this.workerPool.renderPagesChunk(first, last, scanDpi, onPage, scanExcludeAnnots));
+                            if (res && res.cancelled) break; // 새 스캔이 시작돼 취소됨
+                        } catch (err) {
+                            console.error(`청크 스캔 실패 (${first}-${last}쪽):`, err);
+                        }
+                    }
+                };
+
+                const runners = [];
+                for (let i = 0; i < this.workerPoolSize; i++) {
+                    runners.push(runner());
+                }
+                await Promise.all(runners);
                 await Promise.all(pagePromises);
             } else {
                 // Fallback: 단일 워커 순차 처리
@@ -1302,6 +1445,54 @@ export class PDFSeparationViewer {
     }
 
 
+    // 스캔 데이터(72dpi)를 축소해 페이지 미리보기로 보관.
+    // 먼 페이지로 점프 시 GS 렌더를 기다리는 동안 즉시 표시하는 용도 —
+    // renderToCanvas가 그대로 그릴 수 있도록 {imageData, spotColorData} 형태로 저장한다.
+    storePagePreview(pageNum, cmykData, spotColorData = null) {
+        if (!cmykData || cmykData.type !== 'cmyk' || !cmykData.width || !cmykData.height) return;
+
+        // 대형 문서는 더 작게 (544p × 144px ≈ 70MB, 800p 초과 시 96px ≈ 절반)
+        const targetW = (this.totalPages || 0) > 800 ? 96 : 144;
+        const scale = Math.min(1, targetW / cmykData.width);
+        const w = Math.max(1, Math.round(cmykData.width * scale));
+        const h = Math.max(1, Math.round(cmykData.height * scale));
+        const srcW = cmykData.width, srcH = cmykData.height;
+
+        const sample = (src) => {
+            if (!src) return null;
+            const out = new Uint8Array(w * h);
+            for (let y = 0; y < h; y++) {
+                const sy = Math.min(srcH - 1, Math.floor(y / scale));
+                const rowOff = sy * srcW;
+                const outOff = y * w;
+                for (let x = 0; x < w; x++) {
+                    out[outOff + x] = src[rowOff + Math.min(srcW - 1, Math.floor(x / scale))];
+                }
+            }
+            return out;
+        };
+
+        const preview = {
+            imageData: {
+                type: 'cmyk', width: w, height: h,
+                channels: {
+                    cyan: sample(cmykData.channels.cyan),
+                    magenta: sample(cmykData.channels.magenta),
+                    yellow: sample(cmykData.channels.yellow),
+                    black: sample(cmykData.channels.black)
+                }
+            },
+            spotColorData: {}
+        };
+        if (spotColorData) {
+            for (const [name, data] of Object.entries(spotColorData)) {
+                const s = sample(data);
+                if (s) preview.spotColorData[name] = s;
+            }
+        }
+        this.pagePreviews.set(pageNum, preview);
+    }
+
     // 스캔 청크의 페이지 결과(tiff32nc TIFF)를 페이지별 잉크량 데이터로 반영
     async ingestScanPageData(page, variant = null) {
         if (!page.success || !page.data) {
@@ -1312,6 +1503,7 @@ export class PDFSeparationViewer {
         const imageData = await this.convertTIFFToCMYK(page.data);
         if (imageData && imageData.type === 'cmyk') {
             this.accumulateChannelData(imageData, page.pageNum, 72, variant);
+            this.storePagePreview(page.pageNum, imageData);
         }
     }
 
@@ -1362,14 +1554,51 @@ export class PDFSeparationViewer {
             }
         }
         this.accumulateSpotColorData(spotColorData, pageNum, cleanCmyk.width, cleanCmyk.height, dpi, variant);
+        this.storePagePreview(pageNum, cleanCmyk, spotColorData);
     }
 
 
+    // 별색 프로브를 워커 풀에 페이지 범위로 분할해 병렬 실행.
+    // 단일 워커로 문서 전체를 훑는 것 대비 워커 수만큼 빨라진다 (544p 기준 ~5s → ~2s).
+    async probeSpotColorsParallel() {
+        // 풀이 없거나 작은 문서는 기존 단일 프로브 (분할 오버헤드가 더 큼)
+        if (!this.workerPool || !this.totalPages || this.totalPages <= 12) {
+            return this.ghostscript.probeSpotColors(this.currentPDFData);
+        }
+
+        // 워커 수보다 잘게 쪼갠다 — 우선순위로 끼어드는 열람 렌더가
+        // 수백 페이지짜리 프로브 하나가 끝나기를 기다리지 않도록 (범위당 최대 ~48쪽)
+        const per = Math.min(48, Math.ceil(this.totalPages / this.workerPoolSize));
+        const jobs = [];
+        for (let first = 1; first <= this.totalPages; first += per) {
+            const last = Math.min(first + per - 1, this.totalPages);
+            jobs.push(this.workerPool.runTask('probeSpotColors', { firstPage: first, lastPage: last }));
+        }
+
+        // 하나라도 실패하면 throw → 호출부의 정규식 폴백 체인으로 (단일 프로브 실패와 동일)
+        const results = await Promise.all(jobs);
+
+        const spotSet = new Set();
+        const spotPages = {};
+        for (const r of results) {
+            if (!r || r.cancelled) throw new Error('별색 프로브가 취소되었습니다');
+            for (const name of (r.spotColors || [])) spotSet.add(name);
+            for (const [name, page] of Object.entries(r.spotPages || {})) {
+                if (!spotPages[name] || page < spotPages[name]) spotPages[name] = page;
+            }
+        }
+        return { spotColors: Array.from(spotSet), spotPages };
+    }
+
     async loadSpotColors() {
+        const docAtStart = this.currentPDFData;
+
         // 1차: tiffsep 프로브 (실제 생성되는 플레이트 이름 — 압축 스트림 PDF에서도 정확하고
         // 이후 tiffsep 스캔의 채널 이름과 반드시 일치)
         try {
-            const probe = await this.ghostscript.probeSpotColors(this.currentPDFData);
+            const probe = await this.probeSpotColorsParallel();
+            // 프로브 도중 다른 문서가 로드됐으면 결과를 버림 (새 문서의 프로브가 따로 돈다)
+            if (this.currentPDFData !== docAtStart) return;
             this.spotColors = (probe.spotColors || []).sort();
             this.spotColorSamplePages = probe.spotPages || {};
             this.spotColorData = {};
@@ -1646,6 +1875,13 @@ export class PDFSeparationViewer {
                 // MediaBox 가져오기
                 const mediaBox = page.getMediaBox();
 
+                // 페이지 회전각 (gs 렌더 크기는 회전이 적용되지만 MediaBox는 아니므로 따로 보관)
+                let rotate = 0;
+                try {
+                    rotate = ((page.getRotation().angle % 360) + 360) % 360;
+                } catch (e) {
+                }
+
                 // TrimBox 가져오기 (없으면 MediaBox 사용)
                 let trimBox = mediaBox;
                 try {
@@ -1689,7 +1925,8 @@ export class PDFSeparationViewer {
                         y: trimBox.y || 0,
                         width: trimBox.width,
                         height: trimBox.height
-                    }
+                    },
+                    rotate: rotate
                 });
             });
 
@@ -1970,6 +2207,12 @@ export class PDFSeparationViewer {
                     const alreadyMeasured = measured && measured.fromTiffsep &&
                         (measured.trim || !this.hasTrimMargin(pageNum));
 
+                    // 스캔이 아직 안 지나간 페이지면 이 고해상도 렌더로 미리보기 생성
+                    // (다음에 다시 방문할 때 캐시가 밀려났어도 즉시 표시 가능)
+                    if (!this.pagePreviews.has(pageNum)) {
+                        this.storePagePreview(pageNum, imageData, spotColorData);
+                    }
+
                     if (!alreadyMeasured) {
                         // 워커는 tiffsep DPI를 300으로 캡하므로 실제 사용된 DPI를 기록해야 정규화가 맞음
                         const usedDpi = result.dpi || Math.min(this.renderDPI || 72, 300);
@@ -2006,6 +2249,11 @@ export class PDFSeparationViewer {
             renderOptions.dpi = this.renderDPI; // DPI 명시적 전달
 
             imageData = await this.ghostscript.renderPage(pageNum, renderOptions);
+
+            // 스캔이 아직 안 지나간 페이지면 이 렌더로 미리보기 생성
+            if (imageData && imageData.type === 'cmyk' && !this.pagePreviews.has(pageNum)) {
+                this.storePagePreview(pageNum, imageData);
+            }
         }
 
         return { imageData, baseWidth, baseHeight, spotColorData };
@@ -2981,6 +3229,9 @@ export class PDFSeparationViewer {
         };
         this.pageChannelData = this.currentVariant().channel;
         this.pageSpotColorData = this.currentVariant().spot;
+        // 미리보기도 문서 단위 데이터 — 함께 초기화
+        // (주석 토글은 switchScanVariant만 타므로 미리보기가 유지되고, 재스캔이 서서히 갱신)
+        if (this.pagePreviews) this.pagePreviews.clear();
     }
 
     // 활성 변형을 현재 주석 설정에 맞게 전환.
