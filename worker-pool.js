@@ -72,6 +72,19 @@ class WorkerPool {
         this.pdfData = pdfData;
     }
 
+    // 아직 시작되지 않은 대기 작업을 모두 취소.
+    // 이미 워커에서 실행 중인 작업은 중간에 끊을 수 없으므로 그대로 두고,
+    // 큐에만 쌓여 있는 작업을 비워 새 작업이 곧바로 워커를 잡을 수 있게 한다.
+    cancelQueuedTasks() {
+        const dropped = this.taskQueue.length;
+        for (const task of this.taskQueue) {
+            // 대기 중이던 호출부가 영원히 매달리지 않도록 즉시 결과를 돌려준다
+            if (task.resolve) task.resolve({ cancelled: true });
+        }
+        this.taskQueue = [];
+        return dropped;
+    }
+
     handleWorkerMessage(workerId, e) {
         const { type, requestId, success, ...data } = e.data;
 
@@ -230,11 +243,11 @@ class WorkerPool {
     }
 
     // 페이지 범위를 한 번의 GS 실행으로 렌더링 (tiff32nc). 페이지 결과는 onPageResult로 스트리밍.
-    renderPagesChunk(firstPage, lastPage, dpi, onPageResult) {
+    renderPagesChunk(firstPage, lastPage, dpi, onPageResult, excludeAnnots = false) {
         return new Promise((resolve, reject) => {
             const task = {
                 type: 'renderPagesChunk',
-                data: { firstPage, lastPage, dpi },
+                data: { firstPage, lastPage, dpi, excludeAnnots },
                 resolve,
                 reject,
                 onProgress: onPageResult
@@ -250,11 +263,11 @@ class WorkerPool {
     }
 
     // 페이지 범위를 한 번의 tiffsep 실행으로 분판 렌더링. 페이지 결과는 onPageResult로 스트리밍.
-    processTiffsepChunk(firstPage, lastPage, dpi, onPageResult) {
+    processTiffsepChunk(firstPage, lastPage, dpi, onPageResult, excludeAnnots = false) {
         return new Promise((resolve, reject) => {
             const task = {
                 type: 'processTiffsepChunk',
-                data: { firstPage, lastPage, dpi },
+                data: { firstPage, lastPage, dpi, excludeAnnots },
                 resolve,
                 reject,
                 onProgress: onPageResult

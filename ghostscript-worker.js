@@ -32,6 +32,14 @@ function createModuleConfig(overrides = {}) {
     return config;
 }
 
+// 주석(Annotation) 제외 렌더링 인자.
+// -dShowAnnots=false 는 PDF 주석/마크업(스티키 노트, 하이라이트, 도장 등)을 렌더링에서 빼고,
+// -dPrinted=false 는 "화면 전용" 주석까지 인쇄 대상으로 끌어올리지 않도록 막는다.
+// 위젯(폼 필드)도 주석이므로 함께 제외된다.
+function annotArgs(excludeAnnots) {
+    return excludeAnnots ? ['-dShowAnnots=false', '-dPrinted=false'] : [];
+}
+
 function interceptConsole(handler) {
     const originalLog = console.log;
     const originalWarn = console.warn;
@@ -277,7 +285,8 @@ function buildTiffCMYKArgs(options, width, height, pageNum = 1) {
         `-r${dpi}`,
         `-dFirstPage=${pageNum}`,
         `-dLastPage=${pageNum}`,
-        '-sOutputFile=output.tif'
+        '-sOutputFile=output.tif',
+        ...annotArgs(options.excludeAnnots)
     ];
 
 
@@ -308,7 +317,8 @@ function buildGhostscriptArgs(options, width, height, pageNum = 1) {
         `-r${dpi}`,
         `-dFirstPage=${pageNum}`,
         `-dLastPage=${pageNum}`,
-        '-sOutputFile=output.png'
+        '-sOutputFile=output.png',
+        ...annotArgs(options.excludeAnnots)
     ];
 
 
@@ -334,7 +344,7 @@ self.addEventListener('message', async function (e) {
 
 
             try {
-                const { pdfData, pageNum, dpi } = data;
+                const { pdfData, pageNum, dpi, excludeAnnots } = data;
                 const gsOutput = [];
                 const moduleInstance = await Module(createModuleConfig({
                     noExitRuntime: false,
@@ -356,6 +366,7 @@ self.addEventListener('message', async function (e) {
                     `-dFirstPage=${pageNum || 1}`,
                     `-dLastPage=${pageNum || 1}`,
                     '-dMaxSpots=10',
+                    ...annotArgs(excludeAnnots),
                     '-sOutputFile=plate%d.tif',
                     'input.pdf'
                 ];
@@ -632,7 +643,7 @@ self.addEventListener('message', async function (e) {
         } else if (type === 'renderPagesChunk') {
             // 페이지 범위를 GS 1회 실행으로 렌더링 (tiff32nc CMYK).
             // 페이지마다 모듈 초기화 + PDF 파싱을 반복하지 않으므로 훨씬 빠름.
-            const { pdfData, firstPage, lastPage, dpi } = data;
+            const { pdfData, firstPage, lastPage, dpi, excludeAnnots } = data;
             try {
                 const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
                 moduleInstance.FS.writeFile("input.pdf", new Uint8Array(pdfData));
@@ -645,6 +656,7 @@ self.addEventListener('message', async function (e) {
                     `-r${dpi || 72}`,
                     `-dFirstPage=${firstPage}`,
                     `-dLastPage=${lastPage}`,
+                    ...annotArgs(excludeAnnots),
                     '-sOutputFile=scan_%d.tif',
                     'input.pdf'
                 ];
@@ -762,7 +774,7 @@ self.addEventListener('message', async function (e) {
         } else if (type === 'processTiffsepChunk') {
             // 페이지 범위를 tiffsep으로 1회 실행 — 별색 분판 교정용.
             // plateN(색상명).tif 형식으로 페이지별 분판 파일이 생성됨 (N = 범위 내 순번).
-            const { pdfData, firstPage, lastPage, dpi } = data;
+            const { pdfData, firstPage, lastPage, dpi, excludeAnnots } = data;
             try {
                 const tiffsepDpi = Math.min(dpi || 72, 300);
                 const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
@@ -777,6 +789,7 @@ self.addEventListener('message', async function (e) {
                     `-dFirstPage=${firstPage}`,
                     `-dLastPage=${lastPage}`,
                     '-dMaxSpots=10',
+                    ...annotArgs(excludeAnnots),
                     '-sOutputFile=plate%d.tif',
                     'input.pdf'
                 ];
