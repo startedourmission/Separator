@@ -224,13 +224,19 @@ export class SelectionManager {
                     // CODE(QR/바코드)는 링크나 ID가 대부분이므로 모든 공백을 제거함
                     const codeText = codeResult.text.replace(/\s+/g, '');
                     const link = this.createHyperlink(codeText);
+                    const warning = codeResult.warning;
+                    // .result-content가 white-space: pre-wrap이므로 템플릿에 줄바꿈을 넣으면 안 됨
+                    const warningStyle = warning && warning.level === 'danger'
+                        ? 'background:#fdecea; color:#c0392b; border:1px solid #e6b0aa;'
+                        : 'background:#fef9e7; color:#b9770e; border:1px solid #f7dc6f;';
+                    const warningHtml = warning ? `<div style="margin-top:8px; padding:6px 8px; border-radius:4px; font-size:0.85em; ${warningStyle}">⚠️ ${warning.text}</div>` : '';
                     resultList.innerHTML += `
                         <div class="result-item" style="margin-bottom: 10px;">
                             <div class="result-header">
                                 <span>스캔한 바코드</span>
                                 <span class="result-type-badge qr">${codeResult.type}</span>
                             </div>
-                            <div class="result-text" style="font-weight:bold; font-size:1.1em; word-break:break-all;">${link ? `<a href="${link}" target="_blank" class="result-link" style="display:inline; margin-top:0; color:#3498db; text-decoration:underline;">${codeText}</a>` : codeText}</div>
+                            <div class="result-text" style="font-weight:bold; font-size:1.1em; word-break:break-all;">${link ? `<a href="${link}" target="_blank" class="result-link" style="display:inline; margin-top:0; color:#3498db; text-decoration:underline;">${codeText}</a>` : codeText}</div>${warningHtml}
                         </div>
                     `;
                 }
@@ -325,7 +331,12 @@ export class SelectionManager {
 
                     if (result) {
                         console.log(`ZXing found (${label}):`, result);
-                        return { type: 'CODE (' + result.getBarcodeFormat() + ')', text: result.getText() };
+                        const format = result.getBarcodeFormat();
+                        return {
+                            type: 'CODE (' + format + ')',
+                            text: result.getText(),
+                            warning: this.getScanWarning(label, format)
+                        };
                     }
                 } catch (err) {
                     // Log failure for each attempt
@@ -380,6 +391,21 @@ export class SelectionManager {
             console.error('ZXing unexpected error:', e);
         }
 
+        return null;
+    }
+
+    // zxing-js는 자체적으로 반전을 시도하지 않으므로, 'Inverted' 단계에서만 성공했다면
+    // 그 코드는 반전 인쇄된 것이다. 마찬가지로 Binarized 단계에서만 성공하면 저대비.
+    getScanWarning(label, format) {
+        const is2D = format === ZXing.BarcodeFormat.QR_CODE || format === ZXing.BarcodeFormat.DATA_MATRIX;
+        if (label === 'Inverted') {
+            return is2D
+                ? { level: 'warn', text: '반전 코드입니다. 스캐너에 따라 인식이 안 될 수 있습니다.' }
+                : { level: 'danger', text: '반전 바코드입니다 (규격 위반). 실제 스캐너에서 인식되지 않을 가능성이 높습니다.' };
+        }
+        if (label.includes('Binarized')) {
+            return { level: 'warn', text: '저대비 코드입니다. 인쇄 품질에 따라 인식이 저하될 수 있습니다.' };
+        }
         return null;
     }
 
