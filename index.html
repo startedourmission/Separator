@@ -308,13 +308,16 @@
         </div>
     </div>
 
-    <!-- 페이지 목록 모달 -->
-    <div id="page-list-modal" class="modal hidden">
-        <div class="modal-content">
-            <h4><span id="modal-channel-name">Cyan</span>을 사용하는 페이지</h4>
-            <div id="page-list"></div>
-            <button id="close-modal">닫기</button>
+    <!-- 페이지 목록 호버 팝업 (모달과 달리 다른 UI 조작을 막지 않음) -->
+    <div id="page-list-popover" class="page-list-popover hidden">
+        <div class="popover-header">
+            <h4><span id="popover-channel-name">Cyan</span> 사용 페이지</h4>
+            <div class="popover-sort">
+                <button id="sort-by-ratio" class="sort-btn active" type="button">사용률순</button>
+                <button id="sort-by-page" class="sort-btn" type="button">페이지순</button>
+            </div>
         </div>
+        <div id="page-list"></div>
     </div>
 
     <!-- 이슈 제보 모달 -->

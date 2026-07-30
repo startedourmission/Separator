@@ -306,23 +306,11 @@ export class PDFSeparationViewer {
             pageOffsetInput.addEventListener('input', (e) => this.setPageNumberOffset(e.target.value));
         }
 
-        // 채널 비율 클릭 이벤트 (이벤트 전파 차단하여 체크박스 해제 방지)
-        this.channelRatioElements.cyan.addEventListener('click', (e) => {
-            e.stopPropagation();
-            this.showChannelPageList('cyan');
-        });
-        this.channelRatioElements.magenta.addEventListener('click', (e) => {
-            e.stopPropagation();
-            this.showChannelPageList('magenta');
-        });
-        this.channelRatioElements.yellow.addEventListener('click', (e) => {
-            e.stopPropagation();
-            this.showChannelPageList('yellow');
-        });
-        this.channelRatioElements.black.addEventListener('click', (e) => {
-            e.stopPropagation();
-            this.showChannelPageList('black');
-        });
+        // 채널 비율 호버/클릭 → 페이지 목록 팝업
+        for (const channel of ['cyan', 'magenta', 'yellow', 'black']) {
+            const el = this.channelRatioElements[channel];
+            this.attachPageListPopover(el, () => this.showChannelPageList(channel, el));
+        }
 
         // 재단선 영역 제외 토글 — 저장된 카운트에서 즉시 재계산 (재스캔 불필요)
         if (this.excludeTrimCheckbox) {
@@ -365,21 +353,8 @@ export class PDFSeparationViewer {
             });
         }
 
-        // 모달 닫기 버튼
-        const closeModalBtn = document.getElementById('close-modal');
-        if (closeModalBtn) {
-            closeModalBtn.addEventListener('click', () => this.closeChannelPageList());
-        }
-
-        // 모달 배경 클릭 시 닫기
-        const modal = document.getElementById('page-list-modal');
-        if (modal) {
-            modal.addEventListener('click', (e) => {
-                if (e.target === modal) {
-                    this.closeChannelPageList();
-                }
-            });
-        }
+        // 페이지 목록 호버 팝업 초기화
+        this.initPageListPopover();
 
         // 표지 계산기 입력 이벤트
         const updateCalcManual = () => {
@@ -1746,11 +1721,8 @@ export class PDFSeparationViewer {
             ratioSpan.id = `${checkbox.id}-ratio`;
             ratioSpan.textContent = '-';
 
-            // 별색 비율 클릭 이벤트 (이벤트 전파 차단하여 체크박스 해제 방지)
-            ratioSpan.addEventListener('click', (e) => {
-                e.stopPropagation();
-                this.showSpotColorPageList(colorName);
-            });
+            // 별색 비율 호버/클릭 → 페이지 목록 팝업
+            this.attachPageListPopover(ratioSpan, () => this.showSpotColorPageList(colorName, ratioSpan));
 
             // 체크박스 참조 저장
             this.spotColorCheckboxes[colorName] = checkbox;
@@ -3443,7 +3415,7 @@ export class PDFSeparationViewer {
             const usedPages = this.getChannelPageList(channel).length;
             if (el) {
                 el.textContent = `${usedPages}쪽`;
-                el.title = `이 채널이 사용된 페이지 수 (문서 평균 잉크량 ${ratio.toFixed(1)}%) — 클릭하면 목록`;
+                el.title = `이 채널이 사용된 페이지 수 (문서 평균 잉크량 ${ratio.toFixed(1)}%)`;
             }
             if (label) {
                 const share = this.totalPages > 0 ? (usedPages / this.totalPages) * 100 : 0;
@@ -3483,7 +3455,7 @@ export class PDFSeparationViewer {
 
             if (ratioElement) {
                 ratioElement.textContent = `${usedPages}쪽`;
-                ratioElement.title = '이 별색이 사용된 페이지 수 — 클릭하면 목록';
+                ratioElement.title = '이 별색이 사용된 페이지 수';
             }
 
             // progress bar: 전체 페이지 대비 사용 페이지 비율로 시각화
@@ -3958,8 +3930,7 @@ export class PDFSeparationViewer {
         return pageList;
     }
 
-    showChannelPageList(channel) {
-        // 해당 채널을 사용하는 페이지 목록 표시
+    showChannelPageList(channel, anchorEl) {
         const channelNames = {
             cyan: 'Cyan (C)',
             magenta: 'Magenta (M)',
@@ -3968,40 +3939,16 @@ export class PDFSeparationViewer {
         };
 
         const pageList = this.getChannelPageList(channel);
-
-        // 모달에 표시
-        const modal = document.getElementById('page-list-modal');
-        const channelNameEl = document.getElementById('modal-channel-name');
-        const pageListEl = document.getElementById('page-list');
-
-        channelNameEl.textContent = channelNames[channel];
-
-        if (pageList.length === 0) {
-            pageListEl.innerHTML = '<p class="no-pages">이 채널을 사용하는 페이지가 없습니다.</p>';
-        } else {
-            pageListEl.innerHTML = pageList.map(item =>
-                `<div class="page-item" data-page="${item.pageNum}">
-                    페이지 ${item.pageNum} <span class="page-ratio">(${this.formatPageRatio(item.ratio)})</span>
-                </div>`
-            ).join('');
-
-            // 페이지 아이템 클릭 이벤트
-            pageListEl.querySelectorAll('.page-item').forEach(el => {
-                el.addEventListener('click', () => {
-                    const pageNum = parseInt(el.dataset.page);
-                    this.goToPage(pageNum);
-                    this.closeChannelPageList();
-                });
-            });
-        }
-
-        modal.classList.remove('hidden');
+        this.showPageListPopover(
+            anchorEl || this.channelRatioElements[channel],
+            channelNames[channel],
+            pageList,
+            '이 채널을 사용하는 페이지가 없습니다.'
+        );
     }
 
-    showSpotColorPageList(colorName) {
-        // 해당 별색을 사용하는 페이지 목록 표시
-
-        // 페이지별 사용량 수집 및 정렬
+    showSpotColorPageList(colorName, anchorEl) {
+        // 해당 별색을 사용하는 페이지별 사용량 수집
         const pageList = [];
         for (const pageNum in this.pageSpotColorData) {
             const entry = this.pageSpotColorData[pageNum];
@@ -4015,43 +3962,150 @@ export class PDFSeparationViewer {
             }
         }
 
-        // 사용 비율 높은 순으로 정렬
-        pageList.sort((a, b) => (b.ratio - a.ratio) || (b.covMm2 - a.covMm2));
-
-        // 모달에 표시
-        const modal = document.getElementById('page-list-modal');
-        const channelNameEl = document.getElementById('modal-channel-name');
-        const pageListEl = document.getElementById('page-list');
-
-        channelNameEl.textContent = colorName;
-
-        if (pageList.length === 0) {
-            pageListEl.innerHTML = '<p class="no-pages">이 별색을 사용하는 페이지가 없습니다.</p>';
-        } else {
-            pageListEl.innerHTML = pageList.map(item =>
-                `<div class="page-item" data-page="${item.pageNum}">
-                    페이지 ${item.pageNum} <span class="page-ratio">(${this.formatPageRatio(item.ratio)})</span>
-                </div>`
-            ).join('');
-
-            // 페이지 아이템 클릭 이벤트
-            pageListEl.querySelectorAll('.page-item').forEach(el => {
-                el.addEventListener('click', () => {
-                    const pageNum = parseInt(el.dataset.page);
-                    this.goToPage(pageNum);
-                    this.closeChannelPageList();
-                });
-            });
-        }
-
-        modal.classList.remove('hidden');
+        this.showPageListPopover(anchorEl, colorName, pageList, '이 별색을 사용하는 페이지가 없습니다.');
     }
 
+    // ===== 페이지 목록 호버 팝업 =====
 
+    initPageListPopover() {
+        this.pageListPopover = document.getElementById('page-list-popover');
+        this.pageListSortMode = 'ratio'; // 'ratio' (사용률순) | 'page' (페이지순)
+        this.popoverShowTimer = null;
+        this.popoverHideTimer = null;
+        this.currentPopover = null; // { anchorEl, title, pageList, emptyMsg }
 
-    closeChannelPageList() {
-        const modal = document.getElementById('page-list-modal');
-        modal.classList.add('hidden');
+        if (!this.pageListPopover) return;
+
+        // 팝업 위에 마우스가 있는 동안은 유지
+        this.pageListPopover.addEventListener('mouseenter', () => this.cancelPopoverHide());
+        this.pageListPopover.addEventListener('mouseleave', () => this.schedulePopoverHide());
+
+        document.getElementById('sort-by-ratio').addEventListener('click', () => this.setPageListSort('ratio'));
+        document.getElementById('sort-by-page').addEventListener('click', () => this.setPageListSort('page'));
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') this.hidePageListPopover();
+        });
+
+        // 팝업이 position: fixed라 사이드바가 스크롤되면 앵커와 어긋남 → 닫는다.
+        // 단, 팝업 내부 목록 스크롤은 예외.
+        document.addEventListener('scroll', (e) => {
+            if (this.currentPopover && !this.pageListPopover.contains(e.target)) {
+                this.hidePageListPopover();
+            }
+        }, true);
+    }
+
+    // 라벨에 호버 팝업 연결 — 호버는 짧은 지연 후, 클릭은 즉시 표시
+    attachPageListPopover(el, openFn) {
+        el.addEventListener('mouseenter', () => {
+            this.cancelPopoverHide();
+            clearTimeout(this.popoverShowTimer);
+            this.popoverShowTimer = setTimeout(openFn, 200);
+        });
+        el.addEventListener('mouseleave', () => {
+            clearTimeout(this.popoverShowTimer);
+            this.schedulePopoverHide();
+        });
+        // 이벤트 전파 차단하여 체크박스 해제 방지
+        el.addEventListener('click', (e) => {
+            e.stopPropagation();
+            clearTimeout(this.popoverShowTimer);
+            openFn();
+        });
+    }
+
+    showPageListPopover(anchorEl, title, pageList, emptyMsg) {
+        if (!this.pageListPopover || !anchorEl) return;
+        this.cancelPopoverHide();
+        this.currentPopover = { anchorEl, title, pageList, emptyMsg };
+
+        document.getElementById('popover-channel-name').textContent = title;
+        this.renderPageListPopover();
+        this.positionPageListPopover(anchorEl);
+        this.pageListPopover.classList.remove('hidden');
+    }
+
+    renderPageListPopover() {
+        if (!this.currentPopover) return;
+        const { pageList, emptyMsg } = this.currentPopover;
+        const pageListEl = document.getElementById('page-list');
+
+        document.getElementById('sort-by-ratio').classList.toggle('active', this.pageListSortMode === 'ratio');
+        document.getElementById('sort-by-page').classList.toggle('active', this.pageListSortMode === 'page');
+
+        if (pageList.length === 0) {
+            pageListEl.innerHTML = `<p class="no-pages">${emptyMsg}</p>`;
+            return;
+        }
+
+        const sorted = [...pageList];
+        if (this.pageListSortMode === 'page') {
+            sorted.sort((a, b) => a.pageNum - b.pageNum);
+        } else {
+            sorted.sort((a, b) => (b.ratio - a.ratio) || (b.covMm2 - a.covMm2));
+        }
+
+        pageListEl.innerHTML = sorted.map(item =>
+            `<div class="page-item" data-page="${item.pageNum}">
+                페이지 ${item.pageNum} <span class="page-ratio">(${this.formatPageRatio(item.ratio)})</span>
+            </div>`
+        ).join('');
+
+        // 팝업은 다른 UI를 막지 않으므로 페이지 이동 후에도 열어둔다
+        // (여러 페이지를 연달아 확인 가능; 마우스가 벗어나면 자동으로 닫힘)
+        pageListEl.querySelectorAll('.page-item').forEach(el => {
+            el.addEventListener('click', () => {
+                this.goToPage(parseInt(el.dataset.page));
+            });
+        });
+    }
+
+    setPageListSort(mode) {
+        if (this.pageListSortMode === mode) return;
+        this.pageListSortMode = mode;
+        this.renderPageListPopover();
+    }
+
+    positionPageListPopover(anchorEl) {
+        const rect = anchorEl.getBoundingClientRect();
+        const pop = this.pageListPopover;
+
+        // 크기를 측정하기 위해 보이지 않는 상태로 먼저 렌더
+        pop.style.visibility = 'hidden';
+        pop.classList.remove('hidden');
+        const pw = pop.offsetWidth;
+        const ph = pop.offsetHeight;
+
+        // 기본은 앵커 오른쪽, 화면을 벗어나면 왼쪽으로
+        let left = rect.right + 8;
+        if (left + pw > window.innerWidth - 8) {
+            left = Math.max(8, rect.left - pw - 8);
+        }
+        let top = rect.top;
+        if (top + ph > window.innerHeight - 8) {
+            top = Math.max(8, window.innerHeight - ph - 8);
+        }
+
+        pop.style.left = `${left}px`;
+        pop.style.top = `${top}px`;
+        pop.style.visibility = '';
+    }
+
+    schedulePopoverHide() {
+        clearTimeout(this.popoverHideTimer);
+        this.popoverHideTimer = setTimeout(() => this.hidePageListPopover(), 250);
+    }
+
+    cancelPopoverHide() {
+        clearTimeout(this.popoverHideTimer);
+    }
+
+    hidePageListPopover() {
+        clearTimeout(this.popoverShowTimer);
+        clearTimeout(this.popoverHideTimer);
+        if (this.pageListPopover) this.pageListPopover.classList.add('hidden');
+        this.currentPopover = null;
     }
 
     showError(message) {

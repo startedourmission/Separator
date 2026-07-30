@@ -837,8 +837,63 @@ h4 {
     font-size: 1.1em;
 }
 
+/* 페이지 목록 호버 팝업 */
+.page-list-popover {
+    position: fixed;
+    z-index: 1200;
+    width: 260px;
+    background: white;
+    border: 1px solid #d5dbdb;
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+    padding: 12px;
+}
+
+.page-list-popover.hidden {
+    display: none;
+}
+
+.popover-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.popover-header h4 {
+    margin: 0;
+    font-size: 0.95em;
+    color: #2c3e50;
+    word-break: break-all;
+}
+
+.popover-sort {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.sort-btn {
+    padding: 3px 8px;
+    font-size: 0.75em;
+    border: 1px solid #d5dbdb;
+    background: #fff;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #7f8c8d;
+    transition: background-color 0.2s;
+}
+
+.sort-btn.active {
+    background: #3498db;
+    border-color: #3498db;
+    color: #fff;
+}
+
 #page-list {
-    margin-bottom: 15px;
+    max-height: 320px;
+    overflow-y: auto;
 }
 
 .page-item {
@@ -866,22 +921,6 @@ h4 {
     color: #7f8c8d;
     text-align: center;
     padding: 20px;
-}
-
-#close-modal {
-    width: 100%;
-    padding: 10px;
-    background: #3498db;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 1em;
-    transition: background-color 0.2s;
-}
-
-#close-modal:hover {
-    background: #2980b9;
 }
 
 /* 로딩 인디케이터 */
