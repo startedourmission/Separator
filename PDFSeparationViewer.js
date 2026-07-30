@@ -306,7 +306,7 @@ export class PDFSeparationViewer {
             pageOffsetInput.addEventListener('input', (e) => this.setPageNumberOffset(e.target.value));
         }
 
-        // 채널 비율 호버/클릭 → 페이지 목록 팝업
+        // 채널 비율 클릭 → 페이지 목록 팝업
         for (const channel of ['cyan', 'magenta', 'yellow', 'black']) {
             const el = this.channelRatioElements[channel];
             this.attachPageListPopover(el, () => this.showChannelPageList(channel, el));
@@ -1721,7 +1721,7 @@ export class PDFSeparationViewer {
             ratioSpan.id = `${checkbox.id}-ratio`;
             ratioSpan.textContent = '-';
 
-            // 별색 비율 호버/클릭 → 페이지 목록 팝업
+            // 별색 비율 클릭 → 페이지 목록 팝업
             this.attachPageListPopover(ratioSpan, () => this.showSpotColorPageList(colorName, ratioSpan));
 
             // 체크박스 참조 저장
@@ -3415,7 +3415,7 @@ export class PDFSeparationViewer {
             const usedPages = this.getChannelPageList(channel).length;
             if (el) {
                 el.textContent = `${usedPages}쪽`;
-                el.title = `이 채널이 사용된 페이지 수 (문서 평균 잉크량 ${ratio.toFixed(1)}%)`;
+                el.title = `이 채널이 사용된 페이지 수 (문서 평균 잉크량 ${ratio.toFixed(1)}%) — 클릭하면 목록`;
             }
             if (label) {
                 const share = this.totalPages > 0 ? (usedPages / this.totalPages) * 100 : 0;
@@ -3455,7 +3455,7 @@ export class PDFSeparationViewer {
 
             if (ratioElement) {
                 ratioElement.textContent = `${usedPages}쪽`;
-                ratioElement.title = '이 별색이 사용된 페이지 수';
+                ratioElement.title = '이 별색이 사용된 페이지 수 — 클릭하면 목록';
             }
 
             // progress bar: 전체 페이지 대비 사용 페이지 비율로 시각화
@@ -3970,15 +3970,16 @@ export class PDFSeparationViewer {
     initPageListPopover() {
         this.pageListPopover = document.getElementById('page-list-popover');
         this.pageListSortMode = 'ratio'; // 'ratio' (사용률순) | 'page' (페이지순)
-        this.popoverShowTimer = null;
-        this.popoverHideTimer = null;
         this.currentPopover = null; // { anchorEl, title, pageList, emptyMsg }
 
         if (!this.pageListPopover) return;
 
-        // 팝업 위에 마우스가 있는 동안은 유지
-        this.pageListPopover.addEventListener('mouseenter', () => this.cancelPopoverHide());
-        this.pageListPopover.addEventListener('mouseleave', () => this.schedulePopoverHide());
+        // 팝업 바깥 클릭 시 닫기 (앵커 클릭은 stopPropagation이라 여기 오지 않음)
+        document.addEventListener('click', (e) => {
+            if (this.currentPopover && !this.pageListPopover.contains(e.target)) {
+                this.hidePageListPopover();
+            }
+        });
 
         document.getElementById('sort-by-ratio').addEventListener('click', () => this.setPageListSort('ratio'));
         document.getElementById('sort-by-page').addEventListener('click', () => this.setPageListSort('page'));
@@ -3996,28 +3997,21 @@ export class PDFSeparationViewer {
         }, true);
     }
 
-    // 라벨에 호버 팝업 연결 — 호버는 짧은 지연 후, 클릭은 즉시 표시
+    // 라벨 클릭 → 팝업 토글 (같은 라벨을 다시 클릭하면 닫힘)
     attachPageListPopover(el, openFn) {
-        el.addEventListener('mouseenter', () => {
-            this.cancelPopoverHide();
-            clearTimeout(this.popoverShowTimer);
-            this.popoverShowTimer = setTimeout(openFn, 200);
-        });
-        el.addEventListener('mouseleave', () => {
-            clearTimeout(this.popoverShowTimer);
-            this.schedulePopoverHide();
-        });
         // 이벤트 전파 차단하여 체크박스 해제 방지
         el.addEventListener('click', (e) => {
             e.stopPropagation();
-            clearTimeout(this.popoverShowTimer);
-            openFn();
+            if (this.currentPopover && this.currentPopover.anchorEl === el) {
+                this.hidePageListPopover();
+            } else {
+                openFn();
+            }
         });
     }
 
     showPageListPopover(anchorEl, title, pageList, emptyMsg) {
         if (!this.pageListPopover || !anchorEl) return;
-        this.cancelPopoverHide();
         this.currentPopover = { anchorEl, title, pageList, emptyMsg };
 
         document.getElementById('popover-channel-name').textContent = title;
@@ -4077,10 +4071,10 @@ export class PDFSeparationViewer {
         const pw = pop.offsetWidth;
         const ph = pop.offsetHeight;
 
-        // 기본은 앵커 오른쪽, 화면을 벗어나면 왼쪽으로
-        let left = rect.right + 8;
-        if (left + pw > window.innerWidth - 8) {
-            left = Math.max(8, rect.left - pw - 8);
+        // 기본은 앵커 왼쪽 (쪽수 라벨을 가리지 않도록), 공간이 없으면 오른쪽으로
+        let left = rect.left - pw - 8;
+        if (left < 8) {
+            left = Math.min(rect.right + 8, window.innerWidth - pw - 8);
         }
         let top = rect.top;
         if (top + ph > window.innerHeight - 8) {
@@ -4092,18 +4086,7 @@ export class PDFSeparationViewer {
         pop.style.visibility = '';
     }
 
-    schedulePopoverHide() {
-        clearTimeout(this.popoverHideTimer);
-        this.popoverHideTimer = setTimeout(() => this.hidePageListPopover(), 250);
-    }
-
-    cancelPopoverHide() {
-        clearTimeout(this.popoverHideTimer);
-    }
-
     hidePageListPopover() {
-        clearTimeout(this.popoverShowTimer);
-        clearTimeout(this.popoverHideTimer);
         if (this.pageListPopover) this.pageListPopover.classList.add('hidden');
         this.currentPopover = null;
     }
