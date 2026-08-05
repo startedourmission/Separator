@@ -1,29 +1,71 @@
 /**
  * BookMockupGenerator.js
  *
- * Three.js BoxGeometry 기반 3D 북 목업 생성기
+ * 디자이너식 2.5D 북 목업 생성기 (면별 원근 워프)
  *
- * 렌더링 방식:
- * 1. 책을 Y축으로 회전시키고(기본 30도), 정면 축 위의 망원 카메라(FOV 14도)로
- *    렌더링 → 키스톤 왜곡 없이 표지가 직사각형을 유지
- * 2. 투명 픽셀을 트림해 책의 실제 경계 상자를 구함
- * 3. 정사각 투명 캔버스에 책 높이가 캔버스의 75%가 되도록 스케일해
- *    가로 중앙에 배치
+ * 실물 상자를 통째로 회전하면 책등이 좁아져 잘 안 보인다. 디자이너 목업은
+ * 책등·표지를 각각 따로 기울여 둘 다 잘 보이게 만든 비물리적 형상을 쓴다.
+ * 레퍼런스 목업(잘된버전.psd)을 실측한 값:
+ * - 책등·표지 모두 실제 폭의 약 73~75%로 압축 (같은 비율 → 책등이 물리보다 넓게 보임)
+ * - 세로 원근: 표지 바깥 모서리 높이 88%, 책등 바깥 모서리 96% (접합선이 가장 큼)
+ * - 두 면은 접합선에서 만나고 세로 중심선을 공유
+ *
+ * 각 면은 원근 보정 스트립(1/h 선형 보간)으로 워프해 그린다. WebGL 불필요.
  */
 
 /**
- * 이미지를 Three.js 텍스처로 변환
+ * 한 면을 원근 워프로 그린다.
+ *
+ * 접합선(joint) 쪽 높이 hNear에서 바깥 모서리 높이 hFar로 줄어드는
+ * 대칭 사다리꼴에 소스 이미지를 투영한다. 원근 보정: 1/h가 화면 x에
+ * 선형이 되도록 소스 u좌표를 비선형 샘플링한다.
+ *
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {HTMLImageElement|HTMLCanvasElement} img - 소스 (세로 전체 사용)
+ * @param {number} jointX - 접합선의 x 좌표
+ * @param {number} destW - 면의 목표 폭 (px)
+ * @param {number} hNear - 접합선 쪽 높이
+ * @param {number} hFar - 바깥 모서리 높이
+ * @param {number} midY - 세로 중심선 y
+ * @param {number} dir - +1: 접합선에서 오른쪽으로(표지), -1: 왼쪽으로(책등)
  */
-function createTexture(img) {
-    const texture = new THREE.Texture(img);
-    texture.needsUpdate = true;
-    texture.minFilter = THREE.LinearFilter;
-    texture.magFilter = THREE.LinearFilter;
-    return texture;
+function drawFacePerspective(ctx, img, jointX, destW, hNear, hFar, midY, dir) {
+    const srcW = img.width;
+    const q0 = 1 / hNear;
+    const q1 = 1 / hFar;
+
+    // 소스 u좌표: 원근 보정 보간 u/w = (q - q0) / (q1 - q0)
+    const uAt = (t) => {
+        const q = q0 + (q1 - q0) * t;
+        return srcW * (q - q0) / (q1 - q0 || 1e-9);
+    };
+
+    const steps = Math.max(8, Math.ceil(destW));
+    for (let i = 0; i < steps; i++) {
+        const t0 = i / steps;
+        const t1 = (i + 1) / steps;
+        const q = q0 + (q1 - q0) * (t0 + t1) / 2;
+        const h = 1 / q;
+        const u0 = uAt(t0);
+        const u1 = uAt(t1);
+
+        const x = dir > 0
+            ? jointX + t0 * destW
+            : jointX - t1 * destW;
+        const w = (t1 - t0) * destW;
+        // 소스가 표지(dir>0)는 왼쪽부터, 책등(dir<0)은 오른쪽부터 접합선
+        const su = dir > 0 ? u0 : srcW - u1;
+
+        ctx.drawImage(
+            img,
+            su, 0, Math.max(u1 - u0, 0.01), img.height,
+            x, midY - h / 2, w + 0.35, h  // +0.35: 스트립 간 미세 틈 방지
+        );
+    }
 }
 
 /**
- * 3D 북 목업 렌더링
+ * 2.5D 북 목업 렌더링
  *
  * @param {HTMLImageElement|HTMLCanvasElement} frontImg - 앞표지 이미지
  * @param {HTMLImageElement|HTMLCanvasElement} spineImg - 책등 이미지
@@ -31,147 +73,67 @@ function createTexture(img) {
  * @param {number} spineW - 책등 너비 (px)
  * @param {number} H - 높이 (px)
  * @param {Object} options
- * @param {number} [options.rotationY=Math.PI/6] - Y축 회전 (라디안, 기본 30도)
+ * @param {number} [options.coverWidthFactor=0.733] - 표지 폭 압축 비율
+ * @param {number} [options.spineWidthFactor=0.755] - 책등 폭 압축 비율
+ * @param {number} [options.coverEdgeRatio=0.84] - 표지 바깥 모서리 높이 / 접합선 높이
+ * @param {number} [options.spineEdgeRatio=0.947] - 책등 바깥 모서리 높이 / 접합선 높이
+ * @param {number} [options.spineBrightness=0.87] - 책등 밝기 (면 구분용)
  * @param {number} [options.sizeRatio=0.75] - 캔버스 높이 대비 책 높이 비율
  * @param {number} [options.posX=0.5] - 책 중심의 가로 위치 (0~1, 0.5=중앙)
  * @param {number} [options.outputScale=1] - 출력 스케일
  * @returns {Promise<Blob>}
  */
 export async function renderBookMockup(frontImg, spineImg, frontW, spineW, H, options = {}) {
-    const rotationY = options.rotationY ?? Math.PI / 6;  // 30도
+    const coverWidthFactor = options.coverWidthFactor ?? 0.733;
+    const spineWidthFactor = options.spineWidthFactor ?? 0.755;
+    const coverEdgeRatio = options.coverEdgeRatio ?? 0.84;
+    const spineEdgeRatio = options.spineEdgeRatio ?? 0.947;
+    const spineBrightness = options.spineBrightness ?? 0.87;
     const sizeRatio = options.sizeRatio ?? 0.75;
     const posX = options.posX ?? 0.5;
     const outputScale = options.outputScale ?? 1;
 
-    // 단위 변환 (1000px = 1 unit)
-    const scale = 1 / 1000;
-    const bookWidth = frontW * scale;   // 표지 너비 = Box의 X
-    const bookHeight = H * scale;       // 높이 = Box의 Y
-    const bookDepth = spineW * scale;   // 책등 두께 = Box의 Z
-
     // =========================================================================
-    // 1. BoxGeometry + 6면 Material
-    // =========================================================================
-    // BoxGeometry 면 순서: [+X, -X, +Y, -Y, +Z, -Z]
-    // - 앞(+Z, index 4) = 표지
-    // - 왼쪽(-X, index 1) = 책등 (표지와 면 구분되도록 살짝 어둡게)
-    // - 나머지 = 종이색 (위/아래/책배/뒤)
-
-    const geometry = new THREE.BoxGeometry(bookWidth, bookHeight, bookDepth);
-
-    const coverTexture = createTexture(frontImg);
-    const spineTexture = createTexture(spineImg);
-
-    const paperMaterial = new THREE.MeshBasicMaterial({ color: 0xf7f6f2 });
-
-    const materials = [
-        paperMaterial,                                                          // 0: +X (책배)
-        new THREE.MeshBasicMaterial({ map: spineTexture, color: 0xdedede }),    // 1: -X = 책등
-        paperMaterial,                                                          // 2: +Y (위)
-        paperMaterial,                                                          // 3: -Y (아래)
-        new THREE.MeshBasicMaterial({ map: coverTexture }),                     // 4: +Z = 표지
-        paperMaterial                                                           // 5: -Z (뒤)
-    ];
-
-    const book = new THREE.Mesh(geometry, materials);
-    book.rotation.y = rotationY;
-
-    const scene = new THREE.Scene();
-    scene.background = null;
-    scene.add(book);
-
-    // =========================================================================
-    // 2. Camera - 정면 축 위의 망원 카메라 (왜곡 최소화)
+    // 1. 책 본체 렌더 (접합선 기준 좌: 책등, 우: 표지)
     // =========================================================================
 
-    const fov = 14;
-    const halfTan = Math.tan(fov / 2 * Math.PI / 180);
-    const aspect = 0.85;
+    const jointH = H * outputScale;                              // 접합선 높이 (가장 큼)
+    const coverDestW = frontW * outputScale * coverWidthFactor;
+    const spineDestW = spineW * outputScale * spineWidthFactor;
 
-    // 회전된 책의 가로 절반 폭
-    const halfWrot = (bookWidth * Math.cos(rotationY) + bookDepth * Math.sin(rotationY)) / 2;
-    const margin = 1.12;
-    const distV = (bookHeight / 2) * margin / halfTan;
-    const distH = halfWrot * margin / (halfTan * aspect);
-    const dist = Math.max(distV, distH) + bookDepth;
+    const bookW = Math.ceil(spineDestW + coverDestW);
+    const bookH = Math.ceil(jointH);
+    const midY = bookH / 2;
+    const jointX = spineDestW;
 
-    const renderHeight = Math.ceil(H * outputScale * margin);
-    const renderWidth = Math.round(renderHeight * aspect);
+    const bookCanvas = document.createElement('canvas');
+    bookCanvas.width = bookW;
+    bookCanvas.height = bookH;
+    const bctx = bookCanvas.getContext('2d');
+    bctx.imageSmoothingQuality = 'high';
 
-    const camera = new THREE.PerspectiveCamera(fov, aspect, 0.1, dist * 4);
-    camera.position.set(0, 0, dist);
-    camera.lookAt(0, 0, 0);
+    // 책등 (접합선에서 왼쪽으로, 살짝 어둡게 해 면 구분)
+    bctx.filter = `brightness(${spineBrightness})`;
+    drawFacePerspective(bctx, spineImg, jointX, spineDestW, jointH, jointH * spineEdgeRatio, midY, -1);
+    bctx.filter = 'none';
 
-    // =========================================================================
-    // 3. Renderer
-    // =========================================================================
-
-    const renderer = new THREE.WebGLRenderer({
-        alpha: true,
-        antialias: true,
-        preserveDrawingBuffer: true
-    });
-    renderer.setSize(renderWidth, renderHeight);
-    renderer.setPixelRatio(1);
-
-    renderer.render(scene, camera);
+    // 표지 (접합선에서 오른쪽으로)
+    drawFacePerspective(bctx, frontImg, jointX, coverDestW, jointH, jointH * coverEdgeRatio, midY, +1);
 
     // =========================================================================
-    // 4. 투명 픽셀 트림 → 책의 실제 경계 상자
+    // 2. 정사각 캔버스에 배치 (높이 sizeRatio, 가로 posX 중심)
     // =========================================================================
 
-    const src2d = document.createElement('canvas');
-    src2d.width = renderWidth;
-    src2d.height = renderHeight;
-    const sctx = src2d.getContext('2d');
-    sctx.drawImage(renderer.domElement, 0, 0);
-    const data = sctx.getImageData(0, 0, renderWidth, renderHeight).data;
-
-    let minX = renderWidth, minY = renderHeight, maxX = -1, maxY = -1;
-    for (let y = 0; y < renderHeight; y++) {
-        for (let x = 0; x < renderWidth; x++) {
-            if (data[(y * renderWidth + x) * 4 + 3] > 8) {
-                if (x < minX) minX = x;
-                if (x > maxX) maxX = x;
-                if (y < minY) minY = y;
-                if (y > maxY) maxY = y;
-            }
-        }
-    }
-
-    // 3D 리소스 정리
-    geometry.dispose();
-    materials.forEach(m => m.dispose());
-    coverTexture.dispose();
-    spineTexture.dispose();
-    renderer.dispose();
-
-    if (maxX < 0) {
-        throw new Error('목업 렌더링 결과가 비어 있습니다.');
-    }
-
-    const bw = maxX - minX + 1;
-    const bh = maxY - minY + 1;
-
-    // =========================================================================
-    // 5. 정사각 캔버스에 배치 (높이 sizeRatio, 가로 posX 중심)
-    // =========================================================================
-
-    const canvasSize = Math.ceil(bh / sizeRatio);
-    const targetH = canvasSize * sizeRatio;
-    const targetW = targetH * bw / bh;
-
+    const canvasSize = Math.ceil(bookH / sizeRatio);
     const outCanvas = document.createElement('canvas');
     outCanvas.width = canvasSize;
     outCanvas.height = canvasSize;
     const octx = outCanvas.getContext('2d');
     octx.imageSmoothingQuality = 'high';
     octx.drawImage(
-        src2d,
-        minX, minY, bw, bh,
-        canvasSize * posX - targetW / 2,
-        (canvasSize - targetH) / 2,
-        targetW, targetH
+        bookCanvas,
+        canvasSize * posX - bookW / 2,
+        (canvasSize - bookH) / 2
     );
 
     return new Promise((resolve) => {
