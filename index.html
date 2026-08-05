@@ -280,6 +280,36 @@
                         <option value="jpg">JPG</option>
                         <option value="pdf">PDF</option>
                     </select>
+                    <div style="margin: 4px 0 8px; padding: 8px; background: #f7f7f7; border-radius: 6px; font-size: 0.85em;">
+                        <div style="font-weight: 600; margin-bottom: 6px;">3D 목업 조정</div>
+                        <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 4px;">
+                            <span style="width: 58px;">꺾임(폭)</span>
+                            <input type="range" id="mockup-cover-width" min="50" max="95" step="1" value="73" style="flex: 1;">
+                            <span id="mockup-cover-width-val" style="width: 34px; text-align: right;">73%</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 4px;">
+                            <span style="width: 58px;">책등 폭</span>
+                            <input type="range" id="mockup-spine-width" min="50" max="95" step="1" value="76" style="flex: 1;">
+                            <span id="mockup-spine-width-val" style="width: 34px; text-align: right;">76%</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 4px;">
+                            <span style="width: 58px;">원근</span>
+                            <input type="range" id="mockup-edge" min="70" max="100" step="1" value="84" style="flex: 1;">
+                            <span id="mockup-edge-val" style="width: 34px; text-align: right;">84%</span>
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
+                            <span style="width: 58px;">크기</span>
+                            <input type="range" id="mockup-size" min="40" max="95" step="1" value="75" style="flex: 1;">
+                            <span id="mockup-size-val" style="width: 34px; text-align: right;">75%</span>
+                        </label>
+                        <button id="mockup-preview-btn" class="tool-btn" style="width: 100%; margin-bottom: 6px;">
+                            3D 목업 미리보기
+                        </button>
+                        <div id="mockup-preview-wrap" style="display: none;">
+                            <canvas id="mockup-preview-canvas"
+                                style="width: 100%; border: 1px solid #ddd; border-radius: 4px; background: #eee;"></canvas>
+                        </div>
+                    </div>
                     <button id="export-separated" class="tool-btn" style="width: 100%; margin-bottom: 8px;">
                         내려받기
                     </button>

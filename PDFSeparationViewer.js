@@ -452,6 +452,28 @@ export class PDFSeparationViewer {
             exportPngZipBtn.addEventListener('click', () => this.exportPagesAsPngZip());
         }
 
+        // 3D 목업 조정 슬라이더 + 미리보기
+        const mockupPreviewBtn = document.getElementById('mockup-preview-btn');
+        if (mockupPreviewBtn) {
+            mockupPreviewBtn.addEventListener('click', () => this.previewBookMockup());
+        }
+        for (const id of ['mockup-cover-width', 'mockup-spine-width', 'mockup-edge', 'mockup-size']) {
+            const el = document.getElementById(id);
+            if (!el) continue;
+            el.addEventListener('input', () => {
+                const valEl = document.getElementById(id + '-val');
+                if (valEl) valEl.textContent = el.value + '%';
+                // 미리보기가 열려 있으면 파트 캐시로 즉시 다시 워프 (렌더 재사용, 디바운스)
+                clearTimeout(this._mockupPreviewTimer);
+                this._mockupPreviewTimer = setTimeout(() => {
+                    if (this._mockupPartsCache &&
+                        document.getElementById('mockup-preview-wrap')?.style.display !== 'none') {
+                        this.renderMockupPreview();
+                    }
+                }, 150);
+            });
+        }
+
         // Drag and Drop & Clipboard
         this.setupDragAndDrop();
         this.setupClipboardPaste();
@@ -4575,15 +4597,15 @@ export class PDFSeparationViewer {
                         const spineImg = extractSubImage(spineX, spinePart.widthMm);
                         const frontImg = extractSubImage(frontX, frontPart.widthMm);
 
-                        // 4. 목업 생성 (BookMockupGenerator)
-                        // Three.js BoxGeometry 기반 3D 목업 렌더링
+                        // 4. 목업 생성 (BookMockupGenerator, 면별 원근 워프)
+                        // 슬라이더로 조정한 값 사용
                         const mockupBlob = await renderBookMockup(
                             frontImg,
                             spineImg,
                             frontImg.width,
                             spineImg.width,
                             frontImg.height,
-                            {} // 기본값 사용
+                            this.getMockupOptions()
                         );
 
                         // 5. ZIP에 추가
@@ -4606,6 +4628,143 @@ export class PDFSeparationViewer {
             console.error('PDF 분할 실패:', error);
             alert('PDF 분할 중 오류가 발생했습니다: ' + error.message);
             this.hideLoading();
+        }
+    }
+
+    /**
+     * 3D 목업 조정 슬라이더 값 → renderBookMockup 옵션
+     * 책등 원근은 실측 관계(표지 수렴량의 1/3)로 연동한다.
+     */
+    getMockupOptions() {
+        const pct = (id, fallback) => {
+            const el = document.getElementById(id);
+            const v = el ? parseInt(el.value, 10) : NaN;
+            return (Number.isFinite(v) ? v : fallback) / 100;
+        };
+        const edge = pct('mockup-edge', 84);
+        return {
+            coverWidthFactor: pct('mockup-cover-width', 73),
+            spineWidthFactor: pct('mockup-spine-width', 76),
+            coverEdgeRatio: edge,
+            spineEdgeRatio: 1 - (1 - edge) / 3,
+            sizeRatio: pct('mockup-size', 75)
+        };
+    }
+
+    /**
+     * 3D 목업 미리보기
+     * 저해상도(150 DPI) 펼침면을 1회 렌더해 표1/책등 파트를 캐시하고,
+     * 슬라이더 조정 시에는 캐시된 파트로 워프만 다시 수행한다.
+     */
+    async previewBookMockup() {
+        const pageNum = this.currentPage;
+        const metadata = this.pageMetadata.get(pageNum);
+
+        if (!this.currentPDFData) {
+            alert('PDF 파일이 로드되지 않았습니다.');
+            return;
+        }
+        if (!metadata || !metadata.trimBox || !metadata.mediaBox) {
+            alert('재단 영역(TrimBox) 정보가 없습니다. 먼저 "자동 계산"을 실행하거나 값을 확인해주세요.');
+            return;
+        }
+
+        const spineMm = parseFloat(this.spineInput.value) || 0;
+        const coverMm = parseFloat(this.coverInput.value) || 0;
+        const flapMm = parseFloat(this.flapInput.value) || 0;
+        if (!spineMm && !coverMm) {
+            alert('책등과 표지 너비가 설정되지 않았습니다. "자동 계산"을 먼저 실행하거나 값을 입력해주세요.');
+            return;
+        }
+
+        const cacheKey = `${pageNum}|${spineMm}|${coverMm}|${flapMm}`;
+        if (!this._mockupPartsCache || this._mockupPartsCache.key !== cacheKey) {
+            this.showLoading('목업 미리보기 렌더링 중...');
+            try {
+                const previewDPI = 150;
+                const mediaBox = metadata.mediaBox;
+                const trimBox = metadata.trimBox;
+                const renderWidth = Math.floor(mediaBox.width * previewDPI / 72);
+                const renderHeight = Math.floor(mediaBox.height * previewDPI / 72);
+
+                const gsImageData = await this.ghostscript.renderPage(pageNum, {
+                    dpi: previewDPI,
+                    width: renderWidth,
+                    height: renderHeight,
+                    pdfWidth: mediaBox.width,
+                    pdfHeight: mediaBox.height,
+                    opaque: true
+                });
+                const pageCanvas = document.createElement('canvas');
+                pageCanvas.width = renderWidth;
+                pageCanvas.height = renderHeight;
+                pageCanvas.getContext('2d').putImageData(gsImageData, 0, 0);
+
+                // TrimBox 크롭 좌표 (renderHighResSpread와 동일한 변환)
+                const scaleX = renderWidth / mediaBox.width;
+                const scaleY = renderHeight / mediaBox.height;
+                const trimXpx = (trimBox.x - mediaBox.x) * scaleX;
+                const trimYpx = (mediaBox.height - (trimBox.y + trimBox.height)) * scaleY;
+                const trimWpx = trimBox.width * scaleX;
+                const trimHpx = trimBox.height * scaleY;
+
+                const totalMm = (flapMm * 2) + (coverMm * 2) + spineMm;
+                const pxPerMm = trimWpx / totalMm;
+                const spineStartMm = flapMm + coverMm;
+                const frontStartMm = flapMm + coverMm + spineMm;
+
+                const extract = (xMm, wMm) => {
+                    const c = document.createElement('canvas');
+                    c.width = Math.max(1, Math.floor(wMm * pxPerMm));
+                    c.height = Math.max(1, Math.floor(trimHpx));
+                    c.getContext('2d').drawImage(
+                        pageCanvas,
+                        trimXpx + xMm * pxPerMm, trimYpx, c.width, c.height,
+                        0, 0, c.width, c.height);
+                    return c;
+                };
+
+                this._mockupPartsCache = {
+                    key: cacheKey,
+                    spineC: extract(spineStartMm, spineMm),
+                    frontC: extract(frontStartMm, coverMm)
+                };
+            } catch (error) {
+                console.error('목업 미리보기 준비 실패:', error);
+                alert('목업 미리보기 준비 중 오류가 발생했습니다: ' + error.message);
+                this.hideLoading();
+                return;
+            }
+            this.hideLoading();
+        }
+
+        const wrap = document.getElementById('mockup-preview-wrap');
+        if (wrap) wrap.style.display = 'block';
+        await this.renderMockupPreview();
+    }
+
+    /**
+     * 캐시된 파트로 목업을 워프해 미리보기 캔버스에 그린다 (슬라이더 조정 시 호출)
+     */
+    async renderMockupPreview() {
+        const cache = this._mockupPartsCache;
+        const canvas = document.getElementById('mockup-preview-canvas');
+        if (!cache || !canvas) return;
+
+        try {
+            const blob = await renderBookMockup(
+                cache.frontC, cache.spineC,
+                cache.frontC.width, cache.spineC.width, cache.frontC.height,
+                this.getMockupOptions()
+            );
+            const bmp = await createImageBitmap(blob);
+            canvas.width = bmp.width;
+            canvas.height = bmp.height;
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(bmp, 0, 0);
+        } catch (error) {
+            console.error('목업 미리보기 렌더 실패:', error);
         }
     }
 
