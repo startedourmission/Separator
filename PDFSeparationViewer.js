@@ -4334,7 +4334,8 @@ export class PDFSeparationViewer {
                 width: renderWidth,
                 height: renderHeight,
                 pdfWidth: metadata.mediaBox.width,
-                pdfHeight: metadata.mediaBox.height
+                pdfHeight: metadata.mediaBox.height,
+                opaque: true // 잉크 없는 영역을 투명 대신 종이 흰색으로 (JPG 검정 배경 방지)
             });
 
             const tempCanvas = document.createElement('canvas');
@@ -4501,7 +4502,11 @@ export class PDFSeparationViewer {
                     const partCanvas = document.createElement('canvas');
                     partCanvas.width = w;
                     partCanvas.height = spreadResult.height;
-                    partCanvas.getContext('2d').drawImage(
+                    const partCtx = partCanvas.getContext('2d');
+                    // JPG는 알파가 없으므로 흰 배경을 깔고 합성
+                    partCtx.fillStyle = '#ffffff';
+                    partCtx.fillRect(0, 0, w, spreadResult.height);
+                    partCtx.drawImage(
                         fullImage, x, 0, w, spreadResult.height, 0, 0, w, spreadResult.height);
                     const jpgBlob = await new Promise(resolve => partCanvas.toBlob(resolve, 'image/jpeg', 0.95));
                     zip.file(`${part.name}.jpg`, jpgBlob);
@@ -4672,7 +4677,8 @@ export class PDFSeparationViewer {
                     width: renderWidth,
                     height: renderHeight,
                     pdfWidth: mediaBox.width,
-                    pdfHeight: mediaBox.height
+                    pdfHeight: mediaBox.height,
+                    opaque: true
                 });
                 const pageCanvas = document.createElement('canvas');
                 pageCanvas.width = renderWidth;
@@ -4800,7 +4806,8 @@ export class PDFSeparationViewer {
                     width: renderWidth,
                     height: renderHeight,
                     pdfWidth: pageSize.width,
-                    pdfHeight: pageSize.height
+                    pdfHeight: pageSize.height,
+                    opaque: true
                 });
                 const gsCanvas = document.createElement('canvas');
                 gsCanvas.width = renderWidth;

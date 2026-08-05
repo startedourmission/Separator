@@ -14,6 +14,28 @@ function resolvePdfData(explicit) {
     return explicit || cachedPdfData;
 }
 
+// CMYK 입력 프로파일 (Japan Color 2001 Coated) — 워커당 1회만 로드해 캐시.
+// gs 내장 기본 프로파일은 리치 블랙을 푸르스름하게 변환하는데, 국내 인쇄/포토샵
+// 표준인 Japan Color를 쓰면 디자이너가 보는 색과 일치한다 (실측: 표지 리치 블랙
+// 기본 rgb(17,27,33) → Japan Color rgb(23,22,25), 컬러매니지드 기준 rgb(19,20,23)).
+// 로드 실패 시 null을 반환하고 기본 프로파일로 동작한다.
+let cmykProfilePromise = null;
+function getCMYKProfile() {
+    if (!cmykProfilePromise) {
+        cmykProfilePromise = fetch(new URL('JapanColor2001Coated.icc', self.location.href))
+            .then(r => {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.arrayBuffer();
+            })
+            .then(buf => new Uint8Array(buf))
+            .catch(e => {
+                console.warn('CMYK 프로파일 로드 실패, gs 기본 프로파일 사용:', e.message);
+                return null;
+            });
+    }
+    return cmykProfilePromise;
+}
+
 async function getCompiledWasm() {
     if (!compiledWasm) {
         const url = new URL('gs.wasm', self.location.href).href;
@@ -260,7 +282,11 @@ async function processPDF(pdfData, options, pageNum = 1) {
             return { format: 'tiff', data: tiffData };
         } else {
             // 기존 PNG 렌더링
-            const ghostscriptArgs = buildGhostscriptArgs(options, outputWidth, outputHeight, targetPage);
+            const cmykProfile = await getCMYKProfile();
+            if (cmykProfile) {
+                moduleInstance.FS.writeFile("cmyk.icc", cmykProfile);
+            }
+            const ghostscriptArgs = buildGhostscriptArgs(options, outputWidth, outputHeight, targetPage, !!cmykProfile);
 
             try {
                 moduleInstance.callMain(ghostscriptArgs);
@@ -309,18 +335,23 @@ function buildTiffCMYKArgs(options, width, height, pageNum = 1) {
     return args;
 }
 
-function buildGhostscriptArgs(options, width, height, pageNum = 1) {
+function buildGhostscriptArgs(options, width, height, pageNum = 1, hasCmykProfile = false) {
     // PDF 크기와 원하는 출력 크기를 기반으로 DPI 계산
     const pdfWidth = options.pdfWidth || width;
     const pdfHeight = options.pdfHeight || height;
     // DPI가 옵션으로 전달되면 그것을 사용
     const dpi = options.dpi || Math.max(1, Math.round((width / pdfWidth) * 72));
 
+    // opaque: 내보내기용 — 잉크 없는 영역(종이)을 투명 대신 흰색으로 칠한다.
+    // pngalpha로 뽑은 투명 영역은 JPG 변환 시 검정으로 합성되는 문제가 있다.
+    const device = options.opaque ? 'png16m' : 'pngalpha';
+
     const args = [
         '-dNOPAUSE',
         '-dBATCH',
         '-dSAFER',
-        '-sDEVICE=pngalpha',
+        `-sDEVICE=${device}`,
+        ...(hasCmykProfile ? ['-sDefaultCMYKProfile=/cmyk.icc'] : []),
         '-dGraphicsAlphaBits=4',
         '-dTextAlphaBits=4',
         `-r${dpi}`,
