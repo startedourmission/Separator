@@ -4319,39 +4319,28 @@ export class PDFSeparationViewer {
         this.showLoading('고화질 렌더링 중...');
 
         try {
-            // 1. 고화질로 페이지 재렌더링 (PDF.js 사용 -> RGB 보장, 에러 방지)
+            // 1. 고화질로 페이지 재렌더링 (Ghostscript 사용)
+            // pdf.js는 CMYK를 ICC 프로파일 없이 단순 변환해 색이 틀어진다
+            // (리치 블랙이 푸르게 뜨는 등). 뷰어 본화면과 동일한 gs(pngalpha)
+            // 경로를 쓰면 내보내기 색이 뷰어와 일치한다.
             // 인쇄용 600 DPI 또는 현재 설정된 DPI 중 높은 쪽 사용
             const exportDPI = Math.max(600, this.renderDPI);
 
-            // PDF.js 로드 확인
-            if (!window.pdfjsLib) {
-                throw new Error("PDF.js library is not loaded.");
-            }
+            const renderWidth = Math.floor(metadata.mediaBox.width * exportDPI / 72);
+            const renderHeight = Math.floor(metadata.mediaBox.height * exportDPI / 72);
 
-            const loadingTask = pdfjsLib.getDocument({ data: this.currentPDFData });
-            const pdf = await loadingTask.promise;
-            const page = await pdf.getPage(pageNum);
-
-            // PDF.js uses 72 DPI base.
-            const scaleFactor = exportDPI / 72;
-            const viewport = page.getViewport({ scale: scaleFactor });
-
-            const renderWidth = Math.floor(viewport.width);
-            const renderHeight = Math.floor(viewport.height);
+            const gsImageData = await this.ghostscript.renderPage(pageNum, {
+                dpi: exportDPI,
+                width: renderWidth,
+                height: renderHeight,
+                pdfWidth: metadata.mediaBox.width,
+                pdfHeight: metadata.mediaBox.height
+            });
 
             const tempCanvas = document.createElement('canvas');
             tempCanvas.width = renderWidth;
             tempCanvas.height = renderHeight;
-            const tempCtx = tempCanvas.getContext('2d');
-
-            const renderContext = {
-                canvasContext: tempCtx,
-                viewport: viewport
-            };
-
-            await page.render(renderContext).promise;
-
-            // 이미 tempCanvas에 RGB로 그려짐. 별도 변환 불필요.
+            tempCanvas.getContext('2d').putImageData(gsImageData, 0, 0);
 
             // 2. TrimBox 영역 크롭
             const mediaBox = metadata.mediaBox;
@@ -4470,45 +4459,55 @@ export class PDFSeparationViewer {
                 ];
             }
 
-            // 각 파트별로 PDF 생성
+            // JPG 내보내기용 고화질 펼침면 — GS 렌더 1회를 파트 JPG와 목업이 공유.
+            // (파트별 PDF를 pdf.js로 각각 렌더하면 색이 틀어지고 N배 느리다)
+            let spreadResult = null;
+            let fullImage = null;
+            if (exportFormat === 'jpg') {
+                spreadResult = await this.renderHighResSpread();
+                if (!spreadResult || !spreadResult.blob) {
+                    throw new Error('고화질 펼침면 렌더링에 실패했습니다.');
+                }
+                fullImage = await createImageBitmap(spreadResult.blob);
+            }
+
+            // 각 파트별로 생성 (PDF: 벡터 크롭 / JPG: 펼침면 렌더에서 크롭)
+            let currentMmX = 0;
             for (const part of parts) {
-                const partWidthPt = part.widthMm * ptPerMm;
-
-                // 새 PDF 생성 및 페이지 복사
-                const newPdf = await PDFDocument.create();
-                const [copiedPage] = await newPdf.copyPages(sourcePdf, [pageNum - 1]);
-                newPdf.addPage(copiedPage);
-
-                // CropBox 설정
-                // x: 현재 x 위치
-                // y: trimBox의 y (높이는 전체 trimBox 높이 사용)
-                // width: 파트 너비
-                // height: trimBox 높이
-                copiedPage.setCropBox(currentX, trimY, partWidthPt, trimH);
-                copiedPage.setMediaBox(currentX, trimY, partWidthPt, trimH); // MediaBox도 맞춰줌 (뷰어 호환성)
-
-                const pdfBytes = await newPdf.save();
-
                 if (exportFormat === 'pdf') {
+                    const partWidthPt = part.widthMm * ptPerMm;
+
+                    // 새 PDF 생성 및 페이지 복사
+                    const newPdf = await PDFDocument.create();
+                    const [copiedPage] = await newPdf.copyPages(sourcePdf, [pageNum - 1]);
+                    newPdf.addPage(copiedPage);
+
+                    // CropBox 설정
+                    // x: 현재 x 위치
+                    // y: trimBox의 y (높이는 전체 trimBox 높이 사용)
+                    // width: 파트 너비
+                    // height: trimBox 높이
+                    copiedPage.setCropBox(currentX, trimY, partWidthPt, trimH);
+                    copiedPage.setMediaBox(currentX, trimY, partWidthPt, trimH); // MediaBox도 맞춰줌 (뷰어 호환성)
+
+                    const pdfBytes = await newPdf.save();
                     zip.file(`${part.name}.pdf`, pdfBytes);
+
+                    currentX += partWidthPt;
                 } else {
-                    // PDF → JPG 변환
-                    const partPdf = await pdfjsLib.getDocument({ data: pdfBytes }).promise;
-                    const partPage = await partPdf.getPage(1);
-                    const jpgScale = 600 / 72;
-                    const partViewport = partPage.getViewport({ scale: jpgScale });
+                    const pxPerMm = spreadResult.width / totalMm;
+                    const x = Math.floor(currentMmX * pxPerMm);
+                    const w = Math.floor(part.widthMm * pxPerMm);
                     const partCanvas = document.createElement('canvas');
-                    partCanvas.width = Math.floor(partViewport.width);
-                    partCanvas.height = Math.floor(partViewport.height);
-                    const partCtx = partCanvas.getContext('2d');
-                    await partPage.render({ canvasContext: partCtx, viewport: partViewport }).promise;
+                    partCanvas.width = w;
+                    partCanvas.height = spreadResult.height;
+                    partCanvas.getContext('2d').drawImage(
+                        fullImage, x, 0, w, spreadResult.height, 0, 0, w, spreadResult.height);
                     const jpgBlob = await new Promise(resolve => partCanvas.toBlob(resolve, 'image/jpeg', 0.95));
                     zip.file(`${part.name}.jpg`, jpgBlob);
-                    partPdf.destroy();
                 }
 
-                // 다음 위치로 이동
-                currentX += partWidthPt;
+                currentMmX += part.widthMm;
             }
 
             // -------------------------------------------------------------
@@ -4516,12 +4515,16 @@ export class PDFSeparationViewer {
             // -------------------------------------------------------------
             this.showLoading('목업 이미지 생성 중 (Canvas Rendering)...');
             try {
-                // 1. 고화질 펼침면 이미지 생성 (TrimBox 영역)
-                const spreadResult = await this.renderHighResSpread();
+                // 1. 고화질 펼침면 이미지 (TrimBox 영역) — JPG 내보내기와 렌더 공유,
+                //    PDF 모드였으면 여기서 생성
+                if (!spreadResult) {
+                    spreadResult = await this.renderHighResSpread();
+                    if (spreadResult && spreadResult.blob) {
+                        fullImage = await createImageBitmap(spreadResult.blob);
+                    }
+                }
 
-                if (spreadResult && spreadResult.blob) {
-                    const fullImage = await createImageBitmap(spreadResult.blob);
-
+                if (spreadResult && fullImage) {
                     // 2. 픽셀 단위 좌표 계산
                     // renderHighResSpread는 TrimBox 전체를 반환함.
                     // totalMm = 전체 너비 mm
@@ -4633,12 +4636,11 @@ export class PDFSeparationViewer {
         this.showLoading('AB 테스트용 앞표지 추출 중...');
 
         try {
-            const { PDFDocument } = window.PDFLib;
             const ZipLib = window.JSZip || JSZip;
             const zip = new ZipLib();
 
-            const sourcePdf = await PDFDocument.load(this.currentPDFData);
-            const totalPages = sourcePdf.getPageCount();
+            const totalPages = this.totalPages;
+            const exportDPI = 600;
 
             // 앞표지 시작 오프셋 (mm): 뒷날개 + 뒷표지 + 책등
             const frontCoverOffsetMm = (flapMm > 0 ? flapMm : 0) + coverMm + spineMm;
@@ -4650,43 +4652,51 @@ export class PDFSeparationViewer {
 
                 // 해당 페이지의 metadata에서 trimBox 가져오기
                 const metadata = this.pageMetadata.get(pageNum);
-                if (!metadata || !metadata.trimBox) {
+                if (!metadata || !metadata.trimBox || !metadata.mediaBox) {
                     console.warn(`페이지 ${pageNum}: TrimBox 없음, 건너뜀`);
                     continue;
                 }
 
+                const mediaBox = metadata.mediaBox;
                 const trimBox = metadata.trimBox;
-                const trimX = trimBox.x;
-                const trimY = trimBox.y;
-                const trimW = trimBox.width;
-                const trimH = trimBox.height;
-
-                const ptPerMm = trimW / totalMm;
-                const frontCoverX = trimX + (frontCoverOffsetMm * ptPerMm);
+                const ptPerMm = trimBox.width / totalMm;
+                const frontCoverX = trimBox.x + (frontCoverOffsetMm * ptPerMm);
                 const frontCoverW = coverMm * ptPerMm;
 
-                // 새 PDF에 앞표지 영역만 크롭
-                const newPdf = await PDFDocument.create();
-                const [copiedPage] = await newPdf.copyPages(sourcePdf, [i]);
-                newPdf.addPage(copiedPage);
+                // 페이지 전체를 GS로 렌더 후 앞표지 영역만 크롭
+                // (pdf.js는 CMYK 색이 틀어짐 — renderHighResSpread와 동일 경로 사용)
+                const renderWidth = Math.floor(mediaBox.width * exportDPI / 72);
+                const renderHeight = Math.floor(mediaBox.height * exportDPI / 72);
+                const gsImageData = await this.ghostscript.renderPage(pageNum, {
+                    dpi: exportDPI,
+                    width: renderWidth,
+                    height: renderHeight,
+                    pdfWidth: mediaBox.width,
+                    pdfHeight: mediaBox.height
+                });
+                const pageCanvas = document.createElement('canvas');
+                pageCanvas.width = renderWidth;
+                pageCanvas.height = renderHeight;
+                pageCanvas.getContext('2d').putImageData(gsImageData, 0, 0);
 
-                copiedPage.setCropBox(frontCoverX, trimY, frontCoverW, trimH);
-                copiedPage.setMediaBox(frontCoverX, trimY, frontCoverW, trimH);
+                const scaleX = renderWidth / mediaBox.width;
+                const scaleY = renderHeight / mediaBox.height;
+                const cropX = (frontCoverX - mediaBox.x) * scaleX;
+                // PDF 좌표계(Bottom-Up) -> Canvas 좌표계(Top-Down) 변환
+                const cropY = (mediaBox.height - (trimBox.y + trimBox.height)) * scaleY;
+                const cropW = frontCoverW * scaleX;
+                const cropH = trimBox.height * scaleY;
 
-                // PDF → JPG 변환
-                const pdfBytes = await newPdf.save();
-                const partPdf = await pdfjsLib.getDocument({ data: pdfBytes }).promise;
-                const partPage = await partPdf.getPage(1);
-                const jpgScale = 600 / 72;
-                const partViewport = partPage.getViewport({ scale: jpgScale });
                 const partCanvas = document.createElement('canvas');
-                partCanvas.width = Math.floor(partViewport.width);
-                partCanvas.height = Math.floor(partViewport.height);
+                partCanvas.width = Math.floor(cropW);
+                partCanvas.height = Math.floor(cropH);
                 const partCtx = partCanvas.getContext('2d');
-                await partPage.render({ canvasContext: partCtx, viewport: partViewport }).promise;
+                // JPG는 알파가 없으므로 흰 배경을 깔고 합성
+                partCtx.fillStyle = '#ffffff';
+                partCtx.fillRect(0, 0, partCanvas.width, partCanvas.height);
+                partCtx.drawImage(pageCanvas, cropX, cropY, cropW, cropH, 0, 0, partCanvas.width, partCanvas.height);
                 const jpgBlob = await new Promise(resolve => partCanvas.toBlob(resolve, 'image/jpeg', 0.95));
                 zip.file(`cover_${String(pageNum).padStart(3, '0')}.jpg`, jpgBlob);
-                partPdf.destroy();
             }
 
             const content = await zip.generateAsync({ type: "blob" });
@@ -4711,8 +4721,8 @@ export class PDFSeparationViewer {
             return;
         }
 
-        if (!window.pdfjsLib) {
-            alert('PDF.js 라이브러리가 로드되지 않았습니다.');
+        if (!this.ghostscript) {
+            alert('Ghostscript가 초기화되지 않았습니다.');
             return;
         }
 
@@ -4767,35 +4777,47 @@ export class PDFSeparationViewer {
 
         this.showLoading('PNG 변환 준비 중...');
 
-        let pdf = null;
         try {
             const ZipLib = window.JSZip || JSZip;
             const zip = new ZipLib();
             const scaleFactor = exportDPI / 72;
-
-            pdf = await pdfjsLib.getDocument({ data: this.currentPDFData }).promise;
 
             let trimmedCount = 0;
             for (let i = 0; i < targetPages.length; i++) {
                 const pageNum = targetPages[i];
                 this.showLoading(`PNG 변환 중... (${i + 1}/${targetPages.length})`);
 
-                const page = await pdf.getPage(pageNum);
-                const viewport = page.getViewport({ scale: scaleFactor });
+                // GS로 렌더 (pdf.js는 CMYK 색이 틀어짐 — 뷰어와 동일 경로 사용)
+                const metadata = this.pageMetadata.get(pageNum);
+                const pageSize = (metadata && metadata.mediaBox)
+                    ? { width: metadata.mediaBox.width, height: metadata.mediaBox.height }
+                    : await this.ghostscript.getPageSize(pageNum);
+
+                const renderWidth = Math.floor(pageSize.width * scaleFactor);
+                const renderHeight = Math.floor(pageSize.height * scaleFactor);
+                const gsImageData = await this.ghostscript.renderPage(pageNum, {
+                    dpi: exportDPI,
+                    width: renderWidth,
+                    height: renderHeight,
+                    pdfWidth: pageSize.width,
+                    pdfHeight: pageSize.height
+                });
+                const gsCanvas = document.createElement('canvas');
+                gsCanvas.width = renderWidth;
+                gsCanvas.height = renderHeight;
+                gsCanvas.getContext('2d').putImageData(gsImageData, 0, 0);
 
                 const canvas = document.createElement('canvas');
-                canvas.width = Math.floor(viewport.width);
-                canvas.height = Math.floor(viewport.height);
+                canvas.width = renderWidth;
+                canvas.height = renderHeight;
                 const ctx = canvas.getContext('2d');
 
                 // 투명 PNG로 나오지 않도록 흰 배경을 먼저 깔아준다
                 ctx.fillStyle = '#ffffff';
                 ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-                await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+                ctx.drawImage(gsCanvas, 0, 0);
 
                 // TrimBox가 있으면 재단선 제외 영역만 크롭
-                const metadata = this.pageMetadata.get(pageNum);
                 let outCanvas = canvas;
 
                 if (metadata && metadata.trimBox && metadata.mediaBox) {
@@ -4830,8 +4852,6 @@ export class PDFSeparationViewer {
                 const labelNum = useOffset ? this.toDisplayPage(pageNum) : pageNum;
                 const blob = await new Promise(resolve => outCanvas.toBlob(resolve, 'image/png'));
                 zip.file(`page_${String(labelNum).padStart(3, '0')}.png`, blob);
-
-                page.cleanup();
             }
 
             this.showLoading('ZIP 압축 중...');
@@ -4848,8 +4868,6 @@ export class PDFSeparationViewer {
             console.error('PNG ZIP 내보내기 실패:', error);
             alert('PNG 변환 중 오류가 발생했습니다: ' + error.message);
             this.hideLoading();
-        } finally {
-            if (pdf) pdf.destroy();
         }
     }
 
