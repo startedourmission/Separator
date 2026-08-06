@@ -281,7 +281,11 @@
                         <option value="pdf">PDF</option>
                     </select>
                     <div style="margin: 4px 0 8px; padding: 8px; background: #f7f7f7; border-radius: 6px; font-size: 0.85em;">
-                        <div style="font-weight: 600; margin-bottom: 6px;">3D 목업 조정</div>
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+                            <span style="font-weight: 600;">3D 목업 조정</span>
+                            <button id="mockup-reset-btn" type="button"
+                                style="font-size: 0.9em; padding: 2px 8px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer;">기본값</button>
+                        </div>
                         <label style="display: flex; align-items: center; gap: 6px; margin-bottom: 4px;">
                             <span style="width: 58px;">꺾임(폭)</span>
                             <input type="range" id="mockup-cover-width" min="50" max="95" step="1" value="73" style="flex: 1;">

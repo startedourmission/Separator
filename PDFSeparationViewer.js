@@ -457,6 +457,28 @@ export class PDFSeparationViewer {
         if (mockupPreviewBtn) {
             mockupPreviewBtn.addEventListener('click', () => this.previewBookMockup());
         }
+        const mockupResetBtn = document.getElementById('mockup-reset-btn');
+        if (mockupResetBtn) {
+            mockupResetBtn.addEventListener('click', () => {
+                const defaults = {
+                    'mockup-cover-width': 73,
+                    'mockup-spine-width': 76,
+                    'mockup-edge': 84,
+                    'mockup-size': 75
+                };
+                for (const [id, val] of Object.entries(defaults)) {
+                    const el = document.getElementById(id);
+                    if (!el) continue;
+                    el.value = String(val);
+                    const valEl = document.getElementById(id + '-val');
+                    if (valEl) valEl.textContent = val + '%';
+                }
+                if (this._mockupPartsCache &&
+                    document.getElementById('mockup-preview-wrap')?.style.display !== 'none') {
+                    this.renderMockupPreview();
+                }
+            });
+        }
         for (const id of ['mockup-cover-width', 'mockup-spine-width', 'mockup-edge', 'mockup-size']) {
             const el = document.getElementById(id);
             if (!el) continue;
