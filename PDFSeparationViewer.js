@@ -457,6 +457,21 @@ export class PDFSeparationViewer {
         if (mockupPreviewBtn) {
             mockupPreviewBtn.addEventListener('click', () => this.previewBookMockup());
         }
+        const mockupZoomBtn = document.getElementById('mockup-zoom-btn');
+        if (mockupZoomBtn) {
+            mockupZoomBtn.addEventListener('click', () => {
+                const canvas = document.getElementById('mockup-preview-canvas');
+                const popup = document.getElementById('mockup-zoom-popup');
+                const img = document.getElementById('mockup-zoom-img');
+                if (!canvas || !popup || !img || canvas.width < 10) return;
+                img.src = canvas.toDataURL('image/png');
+                popup.classList.remove('hidden');
+            });
+        }
+        const mockupZoomPopup = document.getElementById('mockup-zoom-popup');
+        if (mockupZoomPopup) {
+            mockupZoomPopup.addEventListener('click', () => mockupZoomPopup.classList.add('hidden'));
+        }
         const mockupResetBtn = document.getElementById('mockup-reset-btn');
         if (mockupResetBtn) {
             mockupResetBtn.addEventListener('click', () => {
@@ -4620,18 +4635,28 @@ export class PDFSeparationViewer {
                         const frontImg = extractSubImage(frontX, frontPart.widthMm);
 
                         // 4. 목업 생성 (BookMockupGenerator, 면별 원근 워프)
-                        // 슬라이더로 조정한 값 사용
+                        // 슬라이더로 조정한 값으로 그림자 없는/있는 버전을 모두 생성
+                        const mockupOptions = this.getMockupOptions();
                         const mockupBlob = await renderBookMockup(
                             frontImg,
                             spineImg,
                             frontImg.width,
                             spineImg.width,
                             frontImg.height,
-                            this.getMockupOptions()
+                            mockupOptions
+                        );
+                        const mockupShadowBlob = await renderBookMockup(
+                            frontImg,
+                            spineImg,
+                            frontImg.width,
+                            spineImg.width,
+                            frontImg.height,
+                            { ...mockupOptions, shadow: true }
                         );
 
                         // 5. ZIP에 추가
                         zip.file('cover 3D(그림자X)_책이름.png', mockupBlob);
+                        zip.file('cover 3D(그림자O)_책이름.png', mockupShadowBlob);
                     }
                 }
             } catch (mockupError) {
@@ -4785,6 +4810,13 @@ export class PDFSeparationViewer {
             const ctx = canvas.getContext('2d');
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.drawImage(bmp, 0, 0);
+
+            // 크게 보기 팝업이 열려 있으면 함께 갱신
+            const popup = document.getElementById('mockup-zoom-popup');
+            const zoomImg = document.getElementById('mockup-zoom-img');
+            if (popup && zoomImg && !popup.classList.contains('hidden')) {
+                zoomImg.src = canvas.toDataURL('image/png');
+            }
         } catch (error) {
             console.error('목업 미리보기 렌더 실패:', error);
         }
