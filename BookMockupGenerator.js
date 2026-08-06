@@ -80,6 +80,7 @@ function drawFacePerspective(ctx, img, jointX, destW, hNear, hFar, midY, dir) {
  * @param {number} [options.spineBrightness=0.87] - 책등 밝기 (면 구분용)
  * @param {number} [options.sizeRatio=0.75] - 캔버스 높이 대비 책 높이 비율
  * @param {number} [options.posX=0.5] - 책 중심의 가로 위치 (0~1, 0.5=중앙)
+ * @param {number} [options.posY=0.5] - 책 중심의 세로 위치 (0~1, 0.5=중앙)
  * @param {number} [options.outputScale=1] - 출력 스케일
  * @param {number} [options.maxCanvas=4000] - 출력 캔버스 한 변 상한 (px)
  * @param {boolean} [options.shadow=false] - 왼쪽 아래로 드리운 그림자 렌더
@@ -93,6 +94,7 @@ export async function renderBookMockup(frontImg, spineImg, frontW, spineW, H, op
     const spineBrightness = options.spineBrightness ?? 0.87;
     const sizeRatio = options.sizeRatio ?? 0.75;
     const posX = options.posX ?? 0.5;
+    const posY = options.posY ?? 0.5;
     const maxCanvas = options.maxCanvas ?? 4000;
     let outputScale = options.outputScale ?? 1;
 
@@ -157,7 +159,7 @@ export async function renderBookMockup(frontImg, spineImg, frontW, spineW, H, op
     octx.imageSmoothingQuality = 'high';
 
     const bookX = canvasSize * posX - bookW / 2;
-    const bookY = (canvasSize - bookH) / 2;
+    const bookY = canvasSize * posY - bookH / 2;
 
     // 그림자 (레퍼런스 형상: 우상단 광원 기준, 책 왼쪽 아래로 드리운 쐐기 + 바닥 접지)
     if (options.shadow) {

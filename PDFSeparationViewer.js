@@ -453,6 +453,37 @@ export class PDFSeparationViewer {
         }
 
         // 3D 목업 조정 슬라이더 + 미리보기
+        // 본 패널('')과 크게 보기 팝업('-z')에 같은 슬라이더 세트가 있고 항상 동기화된다.
+        const MOCKUP_SLIDER_IDS = [
+            'mockup-cover-width', 'mockup-spine-width', 'mockup-edge',
+            'mockup-size', 'mockup-pos-x', 'mockup-pos-y'
+        ];
+        const MOCKUP_DEFAULTS = {
+            'mockup-cover-width': 73,
+            'mockup-spine-width': 76,
+            'mockup-edge': 84,
+            'mockup-size': 75,
+            'mockup-pos-x': 50,
+            'mockup-pos-y': 50
+        };
+        const syncMockupSlider = (id, value) => {
+            for (const suffix of ['', '-z']) {
+                const el = document.getElementById(id + suffix);
+                if (el) el.value = String(value);
+                const valEl = document.getElementById(id + suffix + '-val');
+                if (valEl) valEl.textContent = value + '%';
+            }
+        };
+        const refreshMockupPreview = () => {
+            clearTimeout(this._mockupPreviewTimer);
+            this._mockupPreviewTimer = setTimeout(() => {
+                if (this._mockupPartsCache &&
+                    document.getElementById('mockup-preview-wrap')?.style.display !== 'none') {
+                    this.renderMockupPreview();
+                }
+            }, 150);
+        };
+
         const mockupPreviewBtn = document.getElementById('mockup-preview-btn');
         if (mockupPreviewBtn) {
             mockupPreviewBtn.addEventListener('click', () => this.previewBookMockup());
@@ -464,51 +495,42 @@ export class PDFSeparationViewer {
                 const popup = document.getElementById('mockup-zoom-popup');
                 const img = document.getElementById('mockup-zoom-img');
                 if (!canvas || !popup || !img || canvas.width < 10) return;
+                // 팝업 슬라이더를 본 패널 값으로 맞춘 뒤 열기
+                for (const id of MOCKUP_SLIDER_IDS) {
+                    const main = document.getElementById(id);
+                    if (main) syncMockupSlider(id, main.value);
+                }
                 img.src = canvas.toDataURL('image/png');
                 popup.classList.remove('hidden');
             });
         }
         const mockupZoomPopup = document.getElementById('mockup-zoom-popup');
         if (mockupZoomPopup) {
-            mockupZoomPopup.addEventListener('click', () => mockupZoomPopup.classList.add('hidden'));
-        }
-        const mockupResetBtn = document.getElementById('mockup-reset-btn');
-        if (mockupResetBtn) {
-            mockupResetBtn.addEventListener('click', () => {
-                const defaults = {
-                    'mockup-cover-width': 73,
-                    'mockup-spine-width': 76,
-                    'mockup-edge': 84,
-                    'mockup-size': 75
-                };
-                for (const [id, val] of Object.entries(defaults)) {
-                    const el = document.getElementById(id);
-                    if (!el) continue;
-                    el.value = String(val);
-                    const valEl = document.getElementById(id + '-val');
-                    if (valEl) valEl.textContent = val + '%';
-                }
-                if (this._mockupPartsCache &&
-                    document.getElementById('mockup-preview-wrap')?.style.display !== 'none') {
-                    this.renderMockupPreview();
-                }
+            // 어두운 배경(팝업 자체)을 클릭할 때만 닫힘 — 내부 컨트롤 클릭은 무시
+            mockupZoomPopup.addEventListener('click', (e) => {
+                if (e.target === mockupZoomPopup) mockupZoomPopup.classList.add('hidden');
             });
         }
-        for (const id of ['mockup-cover-width', 'mockup-spine-width', 'mockup-edge', 'mockup-size']) {
-            const el = document.getElementById(id);
-            if (!el) continue;
-            el.addEventListener('input', () => {
-                const valEl = document.getElementById(id + '-val');
-                if (valEl) valEl.textContent = el.value + '%';
-                // 미리보기가 열려 있으면 파트 캐시로 즉시 다시 워프 (렌더 재사용, 디바운스)
-                clearTimeout(this._mockupPreviewTimer);
-                this._mockupPreviewTimer = setTimeout(() => {
-                    if (this._mockupPartsCache &&
-                        document.getElementById('mockup-preview-wrap')?.style.display !== 'none') {
-                        this.renderMockupPreview();
-                    }
-                }, 150);
+        for (const btnId of ['mockup-reset-btn', 'mockup-reset-btn-z']) {
+            const btn = document.getElementById(btnId);
+            if (!btn) continue;
+            btn.addEventListener('click', () => {
+                for (const [id, val] of Object.entries(MOCKUP_DEFAULTS)) {
+                    syncMockupSlider(id, val);
+                }
+                refreshMockupPreview();
             });
+        }
+        for (const id of MOCKUP_SLIDER_IDS) {
+            for (const suffix of ['', '-z']) {
+                const el = document.getElementById(id + suffix);
+                if (!el) continue;
+                el.addEventListener('input', () => {
+                    syncMockupSlider(id, el.value);
+                    // 미리보기가 열려 있으면 파트 캐시로 즉시 다시 워프 (렌더 재사용, 디바운스)
+                    refreshMockupPreview();
+                });
+            }
         }
 
         // Drag and Drop & Clipboard
@@ -4694,7 +4716,9 @@ export class PDFSeparationViewer {
             spineWidthFactor: pct('mockup-spine-width', 76),
             coverEdgeRatio: edge,
             spineEdgeRatio: 1 - (1 - edge) / 3,
-            sizeRatio: pct('mockup-size', 75)
+            sizeRatio: pct('mockup-size', 75),
+            posX: pct('mockup-pos-x', 50),
+            posY: pct('mockup-pos-y', 50)
         };
     }
 
