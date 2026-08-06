@@ -81,6 +81,8 @@ function drawFacePerspective(ctx, img, jointX, destW, hNear, hFar, midY, dir) {
  * @param {number} [options.sizeRatio=0.75] - 캔버스 높이 대비 책 높이 비율
  * @param {number} [options.posX=0.5] - 책 중심의 가로 위치 (0~1, 0.5=중앙)
  * @param {number} [options.outputScale=1] - 출력 스케일
+ * @param {number} [options.maxCanvas=4000] - 출력 캔버스 한 변 상한 (px)
+ * @param {boolean} [options.shadow=false] - 왼쪽 아래로 드리운 그림자 렌더
  * @returns {Promise<Blob>}
  */
 export async function renderBookMockup(frontImg, spineImg, frontW, spineW, H, options = {}) {
@@ -91,7 +93,15 @@ export async function renderBookMockup(frontImg, spineImg, frontW, spineW, H, op
     const spineBrightness = options.spineBrightness ?? 0.87;
     const sizeRatio = options.sizeRatio ?? 0.75;
     const posX = options.posX ?? 0.5;
-    const outputScale = options.outputScale ?? 1;
+    const maxCanvas = options.maxCanvas ?? 4000;
+    let outputScale = options.outputScale ?? 1;
+
+    // 출력 캔버스 크기 상한 — 600 DPI 소스를 그대로 쓰면 7000px+ 캔버스가 되어
+    // 브라우저 캔버스 메모리 한계로 그리기가 조용히 실패한다 (빈 PNG / 면 소실)
+    const projectedCanvas = (H * outputScale) / sizeRatio;
+    if (projectedCanvas > maxCanvas) {
+        outputScale *= maxCanvas / projectedCanvas;
+    }
 
     // =========================================================================
     // 1. 책 본체 렌더 (접합선 기준 좌: 책등, 우: 표지)
@@ -112,13 +122,28 @@ export async function renderBookMockup(frontImg, spineImg, frontW, spineW, H, op
     const bctx = bookCanvas.getContext('2d');
     bctx.imageSmoothingQuality = 'high';
 
+    // 고해상도(600 DPI) 소스를 스트립마다 축소하면 스트립 수 × 고품질 리샘플링
+    // 비용이 폭증한다. 워프 전에 목표 높이로 1회만 축소해 둔다.
+    const prepSource = (img) => {
+        if (img.height <= bookH * 1.2) return img;
+        const c = document.createElement('canvas');
+        c.height = bookH;
+        c.width = Math.max(1, Math.round(img.width * bookH / img.height));
+        const pctx = c.getContext('2d');
+        pctx.imageSmoothingQuality = 'high';
+        pctx.drawImage(img, 0, 0, c.width, c.height);
+        return c;
+    };
+    const frontSrc = prepSource(frontImg);
+    const spineSrc = prepSource(spineImg);
+
     // 책등 (접합선에서 왼쪽으로, 살짝 어둡게 해 면 구분)
     bctx.filter = `brightness(${spineBrightness})`;
-    drawFacePerspective(bctx, spineImg, jointX, spineDestW, jointH, jointH * spineEdgeRatio, midY, -1);
+    drawFacePerspective(bctx, spineSrc, jointX, spineDestW, jointH, jointH * spineEdgeRatio, midY, -1);
     bctx.filter = 'none';
 
     // 표지 (접합선에서 오른쪽으로)
-    drawFacePerspective(bctx, frontImg, jointX, coverDestW, jointH, jointH * coverEdgeRatio, midY, +1);
+    drawFacePerspective(bctx, frontSrc, jointX, coverDestW, jointH, jointH * coverEdgeRatio, midY, +1);
 
     // =========================================================================
     // 2. 정사각 캔버스에 배치 (높이 sizeRatio, 가로 posX 중심)
@@ -130,11 +155,35 @@ export async function renderBookMockup(frontImg, spineImg, frontW, spineW, H, op
     outCanvas.height = canvasSize;
     const octx = outCanvas.getContext('2d');
     octx.imageSmoothingQuality = 'high';
-    octx.drawImage(
-        bookCanvas,
-        canvasSize * posX - bookW / 2,
-        (canvasSize - bookH) / 2
-    );
+
+    const bookX = canvasSize * posX - bookW / 2;
+    const bookY = (canvasSize - bookH) / 2;
+
+    // 그림자 (레퍼런스 형상: 우상단 광원 기준, 책 왼쪽 아래로 드리운 쐐기 + 바닥 접지)
+    if (options.shadow) {
+        const spineBotY = bookY + midY + (jointH * spineEdgeRatio) / 2;
+        const jointBotY = bookY + midY + jointH / 2;
+        const coverBotY = bookY + midY + (jointH * coverEdgeRatio) / 2;
+        const sx = bookX;                       // 책등 왼쪽 모서리
+        const jx = bookX + spineDestW;          // 접합선
+        const cx = bookX + bookW;               // 표지 오른쪽 모서리
+
+        octx.save();
+        octx.filter = `blur(${Math.max(4, Math.round(canvasSize * 0.012))}px)`;
+        octx.fillStyle = 'rgba(0, 0, 0, 0.30)';
+        octx.beginPath();
+        octx.moveTo(sx - bookW * 0.34, bookY + bookH * 0.80);        // 왼쪽 먼 꼭짓점
+        octx.lineTo(sx + 2, spineBotY - jointH * 0.20);              // 책등 왼쪽면 위
+        octx.lineTo(jx, jointBotY);                                  // 접합선 바닥
+        octx.lineTo(cx, coverBotY + canvasSize * 0.004);             // 표지 오른쪽 바닥
+        octx.lineTo(cx - bookW * 0.03, coverBotY + canvasSize * 0.012);
+        octx.lineTo(sx + 2, spineBotY + canvasSize * 0.010);         // 책등 바닥 아래
+        octx.closePath();
+        octx.fill();
+        octx.restore();
+    }
+
+    octx.drawImage(bookCanvas, bookX, bookY);
 
     return new Promise((resolve) => {
         outCanvas.toBlob(resolve, 'image/png');
