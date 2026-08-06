@@ -511,6 +511,17 @@ export class PDFSeparationViewer {
                 if (e.target === mockupZoomPopup) mockupZoomPopup.classList.add('hidden');
             });
         }
+        const mockupZoomCloseBtn = document.getElementById('mockup-zoom-close');
+        if (mockupZoomCloseBtn && mockupZoomPopup) {
+            mockupZoomCloseBtn.addEventListener('click', () => mockupZoomPopup.classList.add('hidden'));
+        }
+        const mockupZoomDownloadBtn = document.getElementById('mockup-zoom-download');
+        if (mockupZoomDownloadBtn && mockupZoomPopup) {
+            mockupZoomDownloadBtn.addEventListener('click', () => {
+                mockupZoomPopup.classList.add('hidden');
+                this.exportSeparatedImages();
+            });
+        }
         for (const btnId of ['mockup-reset-btn', 'mockup-reset-btn-z']) {
             const btn = document.getElementById(btnId);
             if (!btn) continue;
