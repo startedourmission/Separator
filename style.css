@@ -4,12 +4,17 @@
     box-sizing: border-box;
 }
 
+/* 기존 body{zoom:0.8}을 대체한다. zoom은 Safari에서 vw/좌표계와 어긋나
+   레이아웃이 깨지므로, 동일한 축소 효과를 루트 폰트 크기로 낸다. */
+html {
+    font-size: 12.8px;
+}
+
 body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     background-color: #f5f5f5;
     color: #333;
     overflow: hidden;
-    zoom: 0.8;
 }
 
 /* 초기 안내 메시지 */
@@ -62,8 +67,11 @@ body {
 }
 
 .container {
-    width: 125vw;
-    height: 125vh;
+    /* zoom + vw 조합은 엔진마다 해석이 달라(WebKit은 vw에 zoom을 적용하지 않음)
+       오른쪽 열이 화면 밖으로 밀려난다. 레이아웃은 뷰포트 100%로 두고
+       축소는 폰트 크기(rem 기준)로만 처리한다. */
+    width: 100%;
+    height: 100vh;
     margin: 0 auto;
     padding: 20px;
     display: grid;
