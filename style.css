@@ -659,6 +659,40 @@ h4 {
     color: #2c3e50;
 }
 
+.zoom-controls-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+#zoom-reset-btn {
+    padding: 3px 10px;
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    color: #2c3e50;
+    transition: all 0.2s;
+}
+
+#zoom-reset-btn:hover {
+    background: #eef2f7;
+    border-color: #3498db;
+    color: #3498db;
+}
+
+/* 이미 100%면 되돌릴 것이 없으므로 흐리게 */
+#zoom-reset-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+    background: white;
+    border-color: #ddd;
+    color: #2c3e50;
+}
+
 .page-controls {
     display: flex;
     align-items: center;

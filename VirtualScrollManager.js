@@ -22,6 +22,7 @@ export class VirtualScrollManager {
         this.activeRenders = 0;
         this.displayMode = 'single'; // 'single' | 'two-page'
         this.deferredComposites = new Set(); // 분판 변경 시 화면 밖 페이지의 지연 재합성 큐
+        this.zoomGestureActive = false; // 줌 제스처 중 렌더 큐 정지 플래그
         this._deferredScheduled = false;
     }
 
@@ -179,6 +180,11 @@ export class VirtualScrollManager {
 
     // 렌더링 큐 처리
     async processRenderQueue() {
+        // 줌 제스처 중에는 새 렌더를 시작하지 않는다.
+        // 확대하면 페이지가 커지면서 IntersectionObserver가 새 페이지를 계속
+        // 물어오는데, 한 장당 GS 렌더 + CMYK 합성이 ~90ms라 제스처가 그만큼 밀린다.
+        // 큐에는 그대로 쌓아두고 손을 뗀 뒤(finalizeZoom) 한꺼번에 처리한다.
+        if (this.zoomGestureActive) return;
         if (this.activeRenders >= this.maxConcurrentRenders) return;
         if (this.renderQueue.size === 0) return;
 
@@ -188,16 +194,25 @@ export class VirtualScrollManager {
             return Math.abs(a - currentPage) - Math.abs(b - currentPage);
         });
 
-        const pageNum = sortedQueue[0];
-        this.renderQueue.delete(pageNum);
+        // 빈 슬롯을 한 번에 채운다.
+        // 한 호출당 한 장만 시작하면, 여러 장이 동시에 큐에 들어왔을 때 남은 장들은
+        // 다른 렌더가 끝나 finally가 다시 돌 때까지 대기한다. 그 체인이 끊기면
+        // (renderPage가 이미 rendered라 즉시 반환하는 등) 큐가 그대로 멈춰 버린다.
+        const slots = this.maxConcurrentRenders - this.activeRenders;
+        const batch = sortedQueue.slice(0, Math.max(1, slots));
 
-        this.activeRenders++;
-        try {
-            await this.renderPage(pageNum);
-        } finally {
-            this.activeRenders--;
-            this.processRenderQueue();
-        }
+        batch.forEach((pageNum) => {
+            this.renderQueue.delete(pageNum);
+            this.activeRenders++;
+
+            Promise.resolve()
+                .then(() => this.renderPage(pageNum))
+                .catch((error) => console.error(`페이지 ${pageNum} 렌더링 실패:`, error))
+                .finally(() => {
+                    this.activeRenders--;
+                    this.processRenderQueue();
+                });
+        });
     }
 
     // 페이지 렌더링
@@ -556,6 +571,106 @@ export class VirtualScrollManager {
         requestAnimationFrame(() => {
             this.scrollToPage(currentPage);
         });
+    }
+
+    // 커서 아래(또는 가장 가까운) 페이지와 그 안에서의 상대 위치를 찾는다.
+    // 페이지 사이 간격에 커서가 놓였을 때도 가장 가까운 페이지를 기준으로 잡는다.
+    findAnchorPage(cursorX, cursorY, vpRect) {
+        let best = null;
+        let bestDist = Infinity;
+
+        this.pageElements.forEach((el, pageNum) => {
+            const r = el.wrapper.getBoundingClientRect();
+            if (!r.height) return;
+            const top = r.top - vpRect.top;
+            const bottom = r.bottom - vpRect.top;
+            // 커서가 페이지 세로 범위 밖이면 그 거리를, 안이면 0을 쓴다
+            const dist = cursorY < top ? top - cursorY : (cursorY > bottom ? cursorY - bottom : 0);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = {
+                    pageNum,
+                    fracX: r.width ? (cursorX - (r.left - vpRect.left)) / r.width : 0.5,
+                    fracY: r.height ? (cursorY - top) / r.height : 0.5
+                };
+            }
+        });
+
+        return best;
+    }
+
+    // 커서 위치를 고정점으로 삼는 줌 (휠/핀치 제스처용)
+    //
+    // updateZoom()과 달리 현재 페이지로 스크롤을 되돌리지 않는다. 제스처 중에는
+    // 커서 아래 있던 지점이 그 자리에 머물러야 하고, 매 틱마다 scrollToPage()가
+    // 끼어들면 화면이 페이지 경계로 튄다. 캔버스 재합성도 보이는 페이지로만
+    // 제한한다 — 300쪽 문서에서 전 페이지를 매 틱 재합성하면 제스처가 멎는다.
+    updateZoomAnchored(zoomLevel, clientX, clientY) {
+        const vpRect = this.viewport.getBoundingClientRect();
+        const oldPageWidth = this.pageWidth;
+        const oldPageHeight = this.pageHeight;
+
+        // 커서의 뷰포트 내 위치
+        const cursorX = clientX == null ? this.viewport.clientWidth / 2 : clientX - vpRect.left;
+        const cursorY = clientY == null ? this.viewport.clientHeight / 2 : clientY - vpRect.top;
+
+        if (!oldPageWidth || !oldPageHeight) {
+            this.viewer.zoomLevel = zoomLevel;
+            this.updateZoom(zoomLevel);
+            return;
+        }
+
+        this.zoomGestureActive = true;
+
+        // 커서 아래 페이지와, 그 페이지 안에서의 상대 위치(0~1)를 기억한다.
+        // 스크롤 좌표를 배율로 곱하는 방식은 콘텐츠 패딩(20px)과 중앙 정렬 여백이
+        // 배율에 따라 변하지 않아 어긋난다. 실제 요소 위치를 재는 편이 정확하다.
+        const anchor = this.findAnchorPage(cursorX, cursorY, vpRect);
+
+        this.viewer.zoomLevel = zoomLevel;
+        this.recalculatePageDimensions();
+
+        // wrapper 크기만 먼저 갱신 (캔버스 버퍼는 그대로 두고 CSS가 늘려 보여준다)
+        this.pageElements.forEach((el) => {
+            el.wrapper.style.width = `${this.pageWidth}px`;
+            el.wrapper.style.height = `${this.pageHeight}px`;
+        });
+
+        // 레이아웃이 반영된 뒤 같은 지점이 커서 아래 오도록 스크롤 보정
+        if (anchor) {
+            const el = this.pageElements.get(anchor.pageNum);
+            if (el) {
+                const r = el.wrapper.getBoundingClientRect();
+                const targetX = r.left - vpRect.left + anchor.fracX * r.width;
+                const targetY = r.top - vpRect.top + anchor.fracY * r.height;
+                this.viewport.scrollLeft += targetX - cursorX;
+                this.viewport.scrollTop += targetY - cursorY;
+            }
+        }
+
+        // 제스처 중에는 캔버스를 건드리지 않는다.
+        //
+        // 줌은 캔버스의 '표시 크기'만 바꿀 뿐 픽셀 내용은 그대로다. 이미 그려진
+        // 버퍼를 CSS가 늘려 보여주므로 재합성할 이유가 없다. 특히 canvas.width에
+        // 값을 대입하면 캔버스가 통째로 지워져서 반드시 재합성(수백만 픽셀
+        // CMYK→RGB 변환)이 뒤따르는데, 이게 제스처가 밀리던 원인이었다.
+        // 해상도 보정은 손을 뗀 뒤 finalizeZoom()에서 한 번만 한다.
+        this.updateCurrentPage();
+    }
+
+    // 제스처가 끝난 뒤 정리 — 관찰 범위(rootMargin)를 새 페이지 높이에 맞추고,
+    // 제스처 중 멈춰 뒀던 렌더 큐를 다시 돌린다.
+    //
+    // 배율을 올려도 재렌더는 하지 않는다. 렌더 해상도는 줌이 아니라 DPI 설정
+    // (renderDPI)으로 정해지므로, 다시 렌더해도 같은 크기의 버퍼가 나올 뿐
+    // 페이지당 ~90ms만 쓰고 선명해지지 않는다. 더 선명하게 보려면 DPI를 올려야 한다.
+    finalizeZoom() {
+        this.zoomGestureActive = false;
+        this.setupIntersectionObserver();
+        this.updateCurrentPage();
+
+        // 제스처 중 멈춰 있던 큐를 이제 처리한다
+        this.processRenderQueue();
     }
 
     // 모든 보이는 페이지 리렌더링 (분판 변경 또는 화질 변경 시)

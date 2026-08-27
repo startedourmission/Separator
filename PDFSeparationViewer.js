@@ -147,6 +147,7 @@ export class PDFSeparationViewer {
         // 뷰어 컨트롤
         this.zoomSlider = document.getElementById('zoom-slider');
         this.zoomValue = document.getElementById('zoom-value');
+        this.zoomResetBtn = document.getElementById('zoom-reset-btn');
         this.prevPageBtn = document.getElementById('prev-page');
         this.nextPageBtn = document.getElementById('next-page');
         this.currentPageInput = document.getElementById('current-page');
@@ -268,7 +269,15 @@ export class PDFSeparationViewer {
             if (this.scrollManager && this.scrollManager.totalPages > 0) {
                 this.scrollManager.updateZoom(this.zoomLevel);
             }
+            this.updateZoomResetBtn();
         });
+
+        if (this.zoomResetBtn) {
+            this.zoomResetBtn.addEventListener('click', () => this.resetZoom());
+            this.updateZoomResetBtn();
+        }
+
+        this.setupGestureZoom();
 
         // 보기 모드 변경
         this.viewModeSelect.addEventListener('change', (e) => {
@@ -3675,6 +3684,141 @@ export class PDFSeparationViewer {
         }
 
         return separations;
+    }
+
+
+    // 슬라이더/라벨과 내부 배율을 함께 갱신.
+    // 휠·핀치는 연속값이라 25% 단위인 슬라이더에는 가장 가까운 눈금만 반영한다.
+    syncZoomUI() {
+        const percent = this.zoomLevel * 100;
+        this.zoomValue.textContent = `${Math.round(percent)}%`;
+        const step = parseInt(this.zoomSlider.step) || 1;
+        const min = parseInt(this.zoomSlider.min);
+        const max = parseInt(this.zoomSlider.max);
+        const snapped = Math.min(max, Math.max(min, Math.round(percent / step) * step));
+        this.zoomSlider.value = String(snapped);
+        this.updateZoomResetBtn();
+    }
+
+    // 100%일 때는 되돌릴 것이 없으므로 버튼을 비활성화
+    updateZoomResetBtn() {
+        if (!this.zoomResetBtn) return;
+        this.zoomResetBtn.disabled = Math.abs(this.zoomLevel - 1) < 0.005;
+    }
+
+    // 배율을 100%로 되돌린다
+    resetZoom() {
+        this.zoomLevel = 1.0;
+        this.zoomSlider.value = '100';
+        this.zoomValue.textContent = '100%';
+        this.updateZoomResetBtn();
+
+        if (this.scrollManager && this.scrollManager.totalPages > 0) {
+            // 슬라이더와 같은 경로 — 현재 페이지를 화면에 유지한 채 크기만 되돌린다
+            this.scrollManager.zoomGestureActive = false;
+            this.scrollManager.updateZoom(this.zoomLevel);
+        }
+    }
+
+    // 커서를 고정점으로 배율을 곱하고 화면에 반영
+    applyGestureZoom(factor, clientX, clientY) {
+        if (!this.scrollManager || this.scrollManager.totalPages === 0) return;
+
+        const min = (parseInt(this.zoomSlider.min) || 25) / 100;
+        const max = (parseInt(this.zoomSlider.max) || 500) / 100;
+        const next = Math.min(max, Math.max(min, this.zoomLevel * factor));
+        if (Math.abs(next - this.zoomLevel) < 0.0005) return;
+
+        this.zoomLevel = next;
+        this.syncZoomUI();
+        this.scrollManager.updateZoomAnchored(next, clientX, clientY);
+
+        // 제스처가 멎으면 관찰 범위와 렌더 해상도를 새 배율에 맞춘다
+        clearTimeout(this._gestureZoomEndTimer);
+        this._gestureZoomEndTimer = setTimeout(() => {
+            this.scrollManager.finalizeZoom();
+        }, 180);
+    }
+
+    // 트랙패드 핀치 / Cmd(Ctrl)+휠 줌
+    setupGestureZoom() {
+        const viewport = document.getElementById('scroll-viewport');
+        if (!viewport) return;
+
+        // 브라우저가 핀치를 페이지 전체 줌으로 가로채지 않게 한다
+        viewport.style.touchAction = 'pan-x pan-y';
+
+        // 휠 이벤트는 한 제스처에 수십 번 들어오므로 프레임당 한 번만 반영한다.
+        // 누적 delta를 모아 rAF에서 한 번에 적용 — 300쪽 문서에서도 끊기지 않는다.
+        let pendingDelta = 0;
+        let pendingX = null;
+        let pendingY = null;
+        let rafId = null;
+
+        const flush = () => {
+            rafId = null;
+            const delta = pendingDelta;
+            pendingDelta = 0;
+            if (!delta) return;
+
+            // 지수 변환: 확대/축소가 대칭이 되고 delta가 커도 배율이 폭주하지 않는다.
+            // 한 프레임 변화폭은 ±35%로 제한 — 이벤트가 한꺼번에 몰려도
+            // 한 번에 크게 튀지 않게 하는 안전장치다.
+            const raw = -delta / SENSITIVITY;
+            const clamped = Math.max(-0.3, Math.min(0.3, raw));
+            this.applyGestureZoom(Math.exp(clamped), pendingX, pendingY);
+        };
+
+        const queue = (delta, clientX, clientY) => {
+            pendingDelta += delta;
+            pendingX = clientX;
+            pendingY = clientY;
+            if (rafId === null) rafId = requestAnimationFrame(flush);
+        };
+
+        // 마우스 휠은 한 칸에 100~120 단위로 크게 들어오고, 트랙패드 핀치는
+        // 1~10 단위로 잘게 들어온다. 같은 나눗수를 쓰면 한쪽이 반드시 과하거나
+        // 둔해지므로 이벤트 크기를 보고 감도를 나눈다.
+        const WHEEL_SENSITIVITY = 1260;
+        const PINCH_SENSITIVITY = 250;
+        let SENSITIVITY = PINCH_SENSITIVITY;
+
+        viewport.addEventListener('wheel', (e) => {
+            // 트랙패드 핀치는 브라우저가 ctrlKey=true인 wheel로 보낸다.
+            // Cmd(맥)/Ctrl(윈도) + 휠도 같은 경로로 처리.
+            if (!e.ctrlKey && !e.metaKey) return;
+            e.preventDefault();
+
+            // deltaMode: 0=픽셀, 1=줄, 2=페이지 — 줄/페이지 단위는 픽셀로 환산
+            let delta = e.deltaY;
+            if (e.deltaMode === 1) delta *= 16;
+            else if (e.deltaMode === 2) delta *= viewport.clientHeight;
+
+            SENSITIVITY = Math.abs(delta) >= 40 ? WHEEL_SENSITIVITY : PINCH_SENSITIVITY;
+
+            queue(delta, e.clientX, e.clientY);
+        }, { passive: false });
+
+        // Safari 전용 제스처 이벤트 (핀치를 wheel로 주지 않는 경우 대비)
+        let gestureStartZoom = 1;
+        let gestureCenter = { x: null, y: null };
+
+        viewport.addEventListener('gesturestart', (e) => {
+            e.preventDefault();
+            gestureStartZoom = this.zoomLevel;
+            gestureCenter = { x: e.clientX, y: e.clientY };
+        });
+
+        viewport.addEventListener('gesturechange', (e) => {
+            e.preventDefault();
+            if (!e.scale) return;
+            // gesture 이벤트의 scale은 제스처 시작 기준 누적값이라
+            // 현재 배율 대비 비율로 환산해서 넘긴다
+            const target = gestureStartZoom * e.scale;
+            this.applyGestureZoom(target / this.zoomLevel, gestureCenter.x, gestureCenter.y);
+        });
+
+        viewport.addEventListener('gestureend', (e) => e.preventDefault());
     }
 
     async handleMouseMove(event) {
