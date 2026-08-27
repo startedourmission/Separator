@@ -266,15 +266,35 @@ export class PDFSeparationViewer {
         this.canvas.addEventListener('mousemove', (e) => this.handleMouseMove(e));
         this.canvas.addEventListener('mouseleave', () => this.clearMouseInfo());
 
-        // 줌 컨트롤
+        // 줌 컨트롤 — 휠/핀치와 같은 경로를 쓴다.
+        //
+        // 예전에는 input마다 updateZoom()을 불렀는데, 이게 모든 페이지의 캔버스를
+        // 재합성해서 드래그 40번에 19초가 걸렸다(휠은 같은 조건에서 20ms).
+        // 슬라이더는 커서 위치가 없으므로 뷰포트 중앙을 고정점으로 삼는다.
+        let sliderRaf = null;
+        let pendingSliderZoom = null;
+
         this.zoomSlider.addEventListener('input', (e) => {
             this.zoomLevel = this.snapZoom(this.sliderPosToZoom(parseInt(e.target.value)));
             this.zoomValue.textContent = `${Math.round(this.zoomLevel * 100)}%`;
-            // 스크롤 뷰어 줌 업데이트
-            if (this.scrollManager && this.scrollManager.totalPages > 0) {
-                this.scrollManager.updateZoom(this.zoomLevel);
-            }
             this.updateZoomResetBtn();
+
+            if (!this.scrollManager || this.scrollManager.totalPages === 0) return;
+
+            // 드래그는 픽셀마다 input을 쏘므로 프레임당 한 번만 반영한다
+            pendingSliderZoom = this.zoomLevel;
+            if (sliderRaf === null) {
+                sliderRaf = requestAnimationFrame(() => {
+                    sliderRaf = null;
+                    this.scrollManager.updateZoomAnchored(pendingSliderZoom, null, null);
+                });
+            }
+
+            // 드래그가 멎으면 관찰 범위 갱신 + 멈춰 둔 렌더 큐 처리
+            clearTimeout(this._sliderZoomEndTimer);
+            this._sliderZoomEndTimer = setTimeout(() => {
+                this.scrollManager.finalizeZoom();
+            }, 180);
         });
 
         if (this.zoomResetBtn) {
