@@ -148,6 +148,11 @@ export class PDFSeparationViewer {
         this.zoomSlider = document.getElementById('zoom-slider');
         this.zoomValue = document.getElementById('zoom-value');
         this.zoomResetBtn = document.getElementById('zoom-reset-btn');
+
+        // 줌 범위. 슬라이더 min/max는 이제 배율이 아니라 위치값(0~1000)이므로
+        // 실제 한계는 여기서 관리한다. 휠/핀치 클램프도 이 값을 쓴다.
+        this.minZoom = 0.25;
+        this.maxZoom = 5.0;
         this.prevPageBtn = document.getElementById('prev-page');
         this.nextPageBtn = document.getElementById('next-page');
         this.currentPageInput = document.getElementById('current-page');
@@ -263,8 +268,8 @@ export class PDFSeparationViewer {
 
         // 줌 컨트롤
         this.zoomSlider.addEventListener('input', (e) => {
-            this.zoomLevel = parseInt(e.target.value) / 100;
-            this.zoomValue.textContent = e.target.value + '%';
+            this.zoomLevel = this.snapZoom(this.sliderPosToZoom(parseInt(e.target.value)));
+            this.zoomValue.textContent = `${Math.round(this.zoomLevel * 100)}%`;
             // 스크롤 뷰어 줌 업데이트
             if (this.scrollManager && this.scrollManager.totalPages > 0) {
                 this.scrollManager.updateZoom(this.zoomLevel);
@@ -3687,16 +3692,41 @@ export class PDFSeparationViewer {
     }
 
 
+    // 자주 쓰는 배율 근처(트랙 기준 ±1.2%)면 딱 떨어지게 붙인다.
+    // 로그 슬라이더는 연속값이라 그냥 두면 100%에 손으로 맞추기 어렵다.
+    snapZoom(zoom) {
+        const stops = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 5];
+        const pos = this.zoomToSliderPos(zoom);
+        for (const s of stops) {
+            if (Math.abs(this.zoomToSliderPos(s) - pos) <= 12) return s;
+        }
+        return zoom;
+    }
+
+    // 슬라이더는 로그 스케일이다.
+    //
+    // 선형이면 25~100% 구간이 트랙의 16%밖에 안 돼서 낮은 배율은 손으로 잡기가
+    // 어렵다. 로그로 두면 배율이 2배 되는 구간마다 폭이 같아져 25~100%가 트랙의
+    // 46%를 차지하고, 100%가 거의 한가운데 온다.
+    sliderPosToZoom(pos) {
+        const t = Math.min(1, Math.max(0, pos / 1000));
+        const lo = Math.log(this.minZoom);
+        const hi = Math.log(this.maxZoom);
+        return Math.exp(lo + (hi - lo) * t);
+    }
+
+    zoomToSliderPos(zoom) {
+        const z = Math.min(this.maxZoom, Math.max(this.minZoom, zoom));
+        const lo = Math.log(this.minZoom);
+        const hi = Math.log(this.maxZoom);
+        return Math.round(((Math.log(z) - lo) / (hi - lo)) * 1000);
+    }
+
     // 슬라이더/라벨과 내부 배율을 함께 갱신.
     // 휠·핀치는 연속값이라 25% 단위인 슬라이더에는 가장 가까운 눈금만 반영한다.
     syncZoomUI() {
-        const percent = this.zoomLevel * 100;
-        this.zoomValue.textContent = `${Math.round(percent)}%`;
-        const step = parseInt(this.zoomSlider.step) || 1;
-        const min = parseInt(this.zoomSlider.min);
-        const max = parseInt(this.zoomSlider.max);
-        const snapped = Math.min(max, Math.max(min, Math.round(percent / step) * step));
-        this.zoomSlider.value = String(snapped);
+        this.zoomValue.textContent = `${Math.round(this.zoomLevel * 100)}%`;
+        this.zoomSlider.value = String(this.zoomToSliderPos(this.zoomLevel));
         this.updateZoomResetBtn();
     }
 
@@ -3709,7 +3739,7 @@ export class PDFSeparationViewer {
     // 배율을 100%로 되돌린다
     resetZoom() {
         this.zoomLevel = 1.0;
-        this.zoomSlider.value = '100';
+        this.zoomSlider.value = String(this.zoomToSliderPos(1.0));
         this.zoomValue.textContent = '100%';
         this.updateZoomResetBtn();
 
@@ -3724,8 +3754,8 @@ export class PDFSeparationViewer {
     applyGestureZoom(factor, clientX, clientY) {
         if (!this.scrollManager || this.scrollManager.totalPages === 0) return;
 
-        const min = (parseInt(this.zoomSlider.min) || 25) / 100;
-        const max = (parseInt(this.zoomSlider.max) || 500) / 100;
+        const min = this.minZoom;
+        const max = this.maxZoom;
         const next = Math.min(max, Math.max(min, this.zoomLevel * factor));
         if (Math.abs(next - this.zoomLevel) < 0.0005) return;
 
