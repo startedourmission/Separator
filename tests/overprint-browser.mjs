@@ -36,6 +36,12 @@ try {
             return el?.status==='rendered' && v.isCurrentPageData(el.pageData) && v.currentVariant().scanned;
         },null,{timeout:60000});
     }
+    async function loadDocument(file) {
+        await page.evaluate(()=>{window.previousTestDocument=viewer.currentPDF;});
+        await page.locator('#pdf-file').setInputFiles(file);
+        await page.waitForFunction(()=>viewer.currentPDF && viewer.currentPDF!==window.previousTestDocument);
+        await settled();
+    }
     async function toggle(on){await page.locator('#overprint-preview').setChecked(on);await settled();}
     async function sample(){return page.evaluate(()=>{
         const v=viewer,el=v.scrollManager.pageElements.get(1),data=el.pageData.imageData;
@@ -49,10 +55,105 @@ try {
         const im=await viewer.ghostscript.renderPage(1,{dpi:72,width:120,height:60,pdfWidth:120,pdfHeight:60,opaque:true});
         return [...im.data.slice((30*120+60)*4,(30*120+60)*4+4)];
     });}
+    async function comparisonReady() {
+        await page.waitForFunction(()=>!!viewer.scrollManager.pageElements.get(1)?.comparison,null,{timeout:60000});
+    }
+    async function visibleCenterPixel() {
+        const box=await page.locator('.page-wrapper[data-page="1"]').boundingBox();
+        const png=await page.screenshot({clip:{x:Math.floor(box.x+box.width/2),y:Math.floor(box.y+box.height/2),width:1,height:1}});
+        return page.evaluate(async base64=>{
+            const blob=await (await fetch('data:image/png;base64,'+base64)).blob();
+            const bitmap=await createImageBitmap(blob);
+            const canvas=document.createElement('canvas');canvas.width=canvas.height=1;
+            const ctx=canvas.getContext('2d');ctx.drawImage(bitmap,0,0);bitmap.close();
+            return [...ctx.getImageData(0,0,1,1).data];
+        },png.toString('base64'));
+    }
+    async function testComparison(on,off) {
+        await page.locator('#overprint-compare-toggle').click();
+        await comparisonReady();
+        await page.evaluate(()=>{
+            window.compareGsCalls=0;
+            window.compareCompositeCalls=0;
+            const composite=viewer.scrollManager.renderToCanvas.bind(viewer.scrollManager);
+            viewer.scrollManager.renderToCanvas=(...args)=>{window.compareCompositeCalls++;return composite(...args);};
+            const run=viewer.workerPool.runTask.bind(viewer.workerPool);
+            viewer.workerPool.runTask=(type,...args)=>{if(['process','processTiffsep'].includes(type))window.compareGsCalls++;return run(type,...args);};
+        });
+        const box=await page.locator('.page-wrapper[data-page="1"]').boundingBox();
+        const handle=page.locator('.page-wrapper[data-page="1"] .comparison-handle');
+        const h=await handle.boundingBox();
+        await page.mouse.move(h.x+h.width/2,h.y+h.height/2);await page.mouse.down();
+        await page.mouse.move(box.x+box.width*.75,h.y+h.height/2,{steps:20});await page.mouse.up();
+        assert.deepEqual(await visibleCenterPixel(),off.rgb,'left side must show knockout');
+        await handle.focus();await page.keyboard.press('Home');
+        assert.deepEqual(await visibleCenterPixel(),on.rgb,'0% divider must show only overprint');
+        await page.keyboard.press('End');
+        assert.deepEqual(await visibleCenterPixel(),off.rgb,'100% divider must show only knockout');
+        await page.keyboard.press('Home');
+        for (let i=0;i<25;i++) await page.keyboard.press('ArrowRight');
+        assert.deepEqual(await visibleCenterPixel(),on.rgb);
+        const pointer=await page.evaluate(()=>{
+            const m=viewer.scrollManager,el=m.pageElements.get(1),r=el.canvas.getBoundingClientRect();
+            const c=m.comparison;
+            return [c.dataAtPointer(el,{clientX:r.left+r.width*.1}).renderSettings.overprint,
+                c.dataAtPointer(el,{clientX:r.left+r.width*.9}).renderSettings.overprint];
+        });
+        assert.deepEqual(pointer,[false,true]);
+        await page.locator('#overprint-preview').setChecked(false);
+        assert.deepEqual(await visibleCenterPixel(),on.rgb,'comparison sides must stay fixed after checkbox changes');
+        await page.locator('#overprint-compare-toggle').click();
+        assert.deepEqual(await visibleCenterPixel(),off.rgb,'leaving comparison must show selected knockout mode');
+        await page.locator('#overprint-preview').setChecked(true);
+        await page.locator('#overprint-compare-toggle').click();
+        await page.locator('#overprint-compare-toggle').click();
+        await page.locator('#overprint-compare-toggle').click();await comparisonReady();
+        await page.evaluate(()=>{viewer.zoomLevel=1.1;viewer.scrollManager.updateZoom(1.1);});
+        await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(resolve)));
+        await page.evaluate(()=>{viewer.zoomLevel=1;viewer.scrollManager.updateZoom(1);});
+        assert.equal(await page.evaluate(()=>window.compareGsCalls),0,'dragging, zooming and reopening must not invoke Ghostscript');
+        assert.equal(await page.evaluate(()=>window.compareCompositeCalls),0,'dragging and zooming must not recomposite pixels');
+        await page.evaluate(()=>viewer.scrollManager.comparison.setPosition(50));
+        await page.screenshot({path:path.join(artifacts,'comparison-fixture.png')});
+        await page.locator('#overprint-compare-toggle').click();
+        console.log('PASS comparison: actual left/right pixels, pointer drag, keyboard, cursor ink source, zero rerenders');
+    }
+    async function testInstantToggle(on, off) {
+        // The alternate screen is prepared even before the comparison button is used.
+        await comparisonReady();
+        const timing = await page.evaluate(() => {
+            const m=viewer.scrollManager, el=m.pageElements.get(1);
+            const canvases=new Set([el.canvas, el.comparison.canvas]);
+            const render=m.renderToCanvas;
+            const uncached=viewer.renderUncachedPageData;
+            let composites=0, renders=0;
+            m.renderToCanvas=function(...args){composites++;return render.apply(this,args);};
+            viewer.renderUncachedPageData=function(...args){renders++;return uncached.apply(this,args);};
+            const cb=document.getElementById('overprint-preview');
+            const start=performance.now();
+            const modes=[];
+            for(let i=0;i<20;i++) {
+                cb.checked=i%2===1;cb.dispatchEvent(new Event('change'));
+                modes.push(el.pageData.renderSettings.overprint===cb.checked && canvases.has(el.canvas));
+            }
+            const elapsed=performance.now()-start;
+            m.renderToCanvas=render;viewer.renderUncachedPageData=uncached;
+            return {composites,renders,elapsed,modes};
+        });
+        assert.ok(timing.modes.every(Boolean),'each checkbox event must synchronously select the prepared canvas');
+        assert.equal(timing.composites,0,'checkbox must not recomposite pixels');
+        assert.equal(timing.renders,0,'checkbox must not rerender PDF');
+        await page.locator('#overprint-preview').setChecked(false);
+        assert.deepEqual(await visibleCenterPixel(),off.rgb,'unchecked screen must show knockout immediately');
+        await page.locator('#overprint-preview').setChecked(true);
+        assert.deepEqual(await visibleCenterPixel(),on.rgb,'checked screen must show overprint immediately');
+        console.log(`PASS instant checkbox: 20 synchronous switches in ${timing.elapsed.toFixed(1)} ms, zero renders/composites`);
+        return timing;
+    }
     const results={};
     for(const spot of [true,false]) {
         await page.locator('#overprint-preview').setChecked(true);
-        await page.locator('#pdf-file').setInputFiles({name:`${spot?'spot':'process'}.pdf`,mimeType:'application/pdf',buffer:overprintPDF(spot)});
+        await loadDocument({name:`${spot?'spot':'process'}.pdf`,mimeType:'application/pdf',buffer:overprintPDF(spot)});
         await settled();
         const on=await sample(),rgbOn=await exportPixel();
         assert.equal(on.ink.black,255);
@@ -66,7 +167,8 @@ try {
         assert.notDeepEqual(spot?on.spotRatios:on.ratios,spot?off.spotRatios:off.ratios,'scan totals must honor overprint');
         // Cached measurements and page renders must return to the same ON result.
         await toggle(true);assert.deepEqual(await sample(),on);
-        // Rapid transitions deliberately leave renders in flight.
+        await testInstantToggle(on,off);
+        // Rapid transitions must preserve the latest selected mode.
         await page.evaluate(()=>{
             const cb=document.getElementById('overprint-preview');
             for(const value of [false,true,false]){cb.checked=value;cb.dispatchEvent(new Event('change'));}
@@ -78,6 +180,7 @@ try {
         await toggle(true);assert.deepEqual(await sample(),on);
         await page.locator('#exclude-annotations').setChecked(true);await settled();
         assert.deepEqual(await sample(),on);
+        if(spot) await testComparison(on,off);
         results[spot?'spot':'process']={on,off,rgbOn,rgbOff};
         console.log(`PASS ${spot?'spot':'process'}: ON/OFF plates, scan, RGB export, cached return, rapid toggles`);
     }
@@ -92,7 +195,7 @@ try {
     if(await fs.stat(cover).catch(()=>null)) {
         await page.locator('#overprint-preview').setChecked(true);
         await page.evaluate(()=>{viewer.renderDPI=300;});
-        await page.locator('#pdf-file').setInputFiles(cover);
+        await loadDocument(cover);
         await settled();
         await page.waitForFunction(()=>viewer.spotColors.includes('PANTONE 2285 C'));
         const coverSamples=await page.evaluate(()=>{
@@ -109,7 +212,13 @@ try {
         await toggle(false);
         const offImage=await page.evaluate(()=>viewer.scrollManager.pageElements.get(1).canvas.toDataURL());
         await fs.writeFile(path.join(artifacts,'higs-overprint-off.png'),Buffer.from(offImage.split(',')[1],'base64'));
+        await page.locator('#overprint-compare-toggle').click();await comparisonReady();
+        await page.screenshot({path:path.join(artifacts,'higs-comparison.png')});
+        await page.locator('#overprint-compare-toggle').click();
         results.coverSamples=coverSamples;
+        const coverOff=await sample();
+        await toggle(true);
+        results.coverTogglePerformance=await testInstantToggle(await sample(),coverOff);
         console.log('PASS higs_cover.pdf: all three reported regions retain black');
     }
     assert.deepEqual(errors,[],'browser errors');

@@ -1,3 +1,4 @@
+import { PageRenderCache } from './page-render-cache.js';
 import { compositeSeparations } from './separation-renderer.js';
 import { overprintArgs } from './render-settings.js';
 import { WorkerPool } from './worker-pool.js';
@@ -35,9 +36,10 @@ export class PDFSeparationViewer {
         this.excludeAnnotations = true;
 
         this.overprintPreview = true;
-        // 주석 × 오버프린트 조합별 측정값. 비트맵은 현재 설정만 보관한다.
+        // 주석 × 오버프린트 조합별 측정값. 원본 잉크판은 용량 제한 캐시로 재사용한다.
         this.scanVariants = {};
         this.renderGeneration = 0;
+        this.renderCache = new PageRenderCache();
 
         // 스캔 세대 번호 — 스캔 중 설정이 바뀌면 증가시켜 이전 스캔을 무효화
         this.scanGeneration = 0;
@@ -362,7 +364,7 @@ export class PDFSeparationViewer {
         ]) {
             checkbox?.addEventListener('change', (e) => {
                 this[setting] = e.target.checked;
-                this.refreshRenderSettings();
+                this.refreshRenderSettings(setting === 'overprintPreview');
             });
         }
 
@@ -2178,10 +2180,18 @@ export class PDFSeparationViewer {
     }
 
     // 페이지 데이터 렌더링 (캐시/프리로드용)
-    async renderPageData(pageNum) {
+    async renderPageData(pageNum, renderSettings = this.getRenderSettings()) {
         const renderGeneration = this.renderGeneration;
-        const renderSettings = this.getRenderSettings();
-        const renderVariant = this.currentVariant();
+        const dpi = this.renderDPI;
+        const key = JSON.stringify([pageNum, dpi, renderSettings.excludeAnnots,
+            renderSettings.overprint, this.spotColors]);
+        const data = await this.renderCache.getOrRender(key,
+            () => this.renderUncachedPageData(pageNum, renderSettings, dpi, renderGeneration));
+        return { ...data, renderGeneration, renderSettings };
+    }
+
+    async renderUncachedPageData(pageNum, renderSettings, dpi, renderGeneration) {
+        const renderVariant = this.currentVariant(renderSettings);
         // 이미지 모드인 경우
         if (this.currentFileType === 'image' && this.imgObject) {
             // 컨테이너 크기 확인
@@ -2229,7 +2239,7 @@ export class PDFSeparationViewer {
         const baseHeight = Math.floor(baseWidth / pdfAspectRatio);
 
         // 렌더링 해상도는 DPI 설정에 따름
-        const scaleFactor = (this.renderDPI || 72) / 72;
+        const scaleFactor = (dpi || 72) / 72;
         const pdfWidthPt = pageSize ? pageSize.width : baseWidth; // pageSize is in points
         const pdfHeightPt = pageSize ? pageSize.height : baseHeight;
 
@@ -2250,7 +2260,7 @@ export class PDFSeparationViewer {
                 const result = await this.ghostscript.processTiffsep(
                     this.currentPDFData,
                     pageNum,
-                    this.renderDPI,
+                    dpi,
                     renderSettings
                 );
 
@@ -2297,7 +2307,7 @@ export class PDFSeparationViewer {
 
                     if (!alreadyMeasured) {
                         // 워커는 tiffsep DPI를 300으로 캡하므로 실제 사용된 DPI를 기록해야 정규화가 맞음
-                        const usedDpi = result.dpi || Math.min(this.renderDPI || 72, 300);
+                        const usedDpi = result.dpi || Math.min(dpi || 72, 300);
                         this.replacePageChannelData(imageData, pageNum, usedDpi, renderVariant);
                         this.accumulateSpotColorData(spotColorData, pageNum, imageData.width, imageData.height, usedDpi, renderVariant);
 
@@ -2328,7 +2338,7 @@ export class PDFSeparationViewer {
             renderOptions.pdfHeight = pageSize?.height || renderHeight;
             renderOptions.pageNum = pageNum;
             renderOptions.useCMYK = true;
-            renderOptions.dpi = this.renderDPI; // DPI 명시적 전달
+            renderOptions.dpi = dpi; // DPI 명시적 전달
 
             imageData = await this.ghostscript.renderPage(pageNum, renderOptions);
 
@@ -2343,7 +2353,10 @@ export class PDFSeparationViewer {
 
     // 캐시에 페이지 추가
     isCurrentPageData(pageData) {
-        return pageData?.renderGeneration === this.renderGeneration;
+        return pageData?.renderGeneration === this.renderGeneration &&
+            (!pageData.renderSettings ||
+                (pageData.renderSettings.overprint === this.overprintPreview &&
+                 pageData.renderSettings.excludeAnnots === this.excludeAnnotations));
     }
 
     addToCache(pageNum, pageData) {
@@ -2392,8 +2405,9 @@ export class PDFSeparationViewer {
     }
 
     // PDF 로드 시 캐시 클리어
-    clearPageCache() {
+    clearPageCache(preserveRenders = false) {
         this.renderGeneration++;
+        if (!preserveRenders) this.renderCache?.clear();
         this.pageCache.clear();
         this.preloadingPages.clear();
     }
@@ -3244,8 +3258,8 @@ export class PDFSeparationViewer {
         return { excludeAnnots: this.excludeAnnotations, overprint: this.overprintPreview };
     }
 
-    currentVariant() {
-        const key = `${this.excludeAnnotations ? 'noAnnots' : 'annots'}:${this.overprintPreview ? 'overprint' : 'knockout'}`;
+    currentVariant(settings = this.getRenderSettings()) {
+        const key = `${settings.excludeAnnots ? 'noAnnots' : 'annots'}:${settings.overprint ? 'overprint' : 'knockout'}`;
         return this.scanVariants[key] ||= { channel: {}, spot: {}, scanned: false };
     }
 
@@ -3263,22 +3277,28 @@ export class PDFSeparationViewer {
         return variant;
     }
 
-    refreshRenderSettings() {
+    refreshRenderSettings(overprintOnly = false) {
         if (!this.currentPDFData) return;
-        // 이미 측정한 설정으로 돌아가더라도 이전 스캔/렌더의 늦은 응답은 무효화한다.
+        // 이전 스캔의 늦은 응답은 무효화하고 새 설정의 측정값으로 전환한다.
         this.scanGeneration++;
         clearTimeout(this.scanHideTimer);
         this.scanHideTimer = null;
         this.workerPool?.cancelQueuedTasks();
         const variant = this.switchScanVariant();
-        this.clearPageCache();
+        if (overprintOnly) {
+            // 오버프린트 전환은 두 모드의 완성된 캔버스를 그대로 유지한다.
+            this.pageCache.clear();
+        } else {
+            this.clearPageCache(true);
+        }
         this.pagePreviews.clear();
         this._mockupPartsCache = null;
         this.baseImageData = null;
         this.originalCMYKData = null;
         this.spotColorData = {};
         this.clearMouseInfo();
-        this.scrollManager?.updateAllVisiblePages(true);
+        if (overprintOnly) this.scrollManager?.comparison.switchMode();
+        else this.scrollManager?.updateAllVisiblePages(true);
         this.updateChannelRatios(this.calculateTotalChannelRatios());
         this.updateSpotColorRatios(this.calculateSpotColorRatios());
         if (variant.scanned) {

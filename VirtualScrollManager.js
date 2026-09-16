@@ -1,3 +1,4 @@
+import { OverprintComparison } from './OverprintComparison.js';
 import { compositeSeparations } from './separation-renderer.js';
 
 // Virtual Scroll Manager - 스크롤 기반 PDF 뷰어
@@ -23,10 +24,12 @@ export class VirtualScrollManager {
         this.deferredComposites = new Set(); // 분판 변경 시 화면 밖 페이지의 지연 재합성 큐
         this.zoomGestureActive = false; // 줌 제스처 중 렌더 큐 정지 플래그
         this._deferredScheduled = false;
+        this.comparison = new OverprintComparison(this);
     }
 
     // 초기화
     init(totalPages, aspectRatio) {
+        this.comparison.syncAvailability();
         this.totalPages = totalPages;
         this.pageAspectRatio = aspectRatio || 1 / 1.414;
 
@@ -42,6 +45,7 @@ export class VirtualScrollManager {
         // 스크롤 이벤트 (현재 페이지 추적)
         this.viewport.addEventListener('scroll', this.debounce(() => {
             this.updateCurrentPage();
+            this.comparison.prepareVisiblePages();
         }, 100));
 
         // 창 크기 변경 시 리사이징
@@ -108,6 +112,7 @@ export class VirtualScrollManager {
 
     // 모든 페이지 placeholder 생성
     createPagePlaceholders() {
+        for (const el of this.pageElements.values()) this.comparison.release(el);
         this.content.innerHTML = '';
         this.pageElements.clear();
 
@@ -157,6 +162,10 @@ export class VirtualScrollManager {
                     this.queuePageRender(pageNum);
                     // 분판 변경이 지연돼 있던 페이지가 다시 보이면 즉시 재합성
                     this.flushDeferredComposite(pageNum);
+                    const el = this.pageElements.get(pageNum);
+                    if (el?.status === 'rendered' && this.isWrapperInViewport(el.wrapper)) {
+                        this.comparison.prepare(pageNum, el);
+                    }
                 } else {
                     this.handlePageHidden(pageNum);
                 }
@@ -228,6 +237,7 @@ export class VirtualScrollManager {
             // 캐시 확인
             let pageData = this.viewer.pageCache.get(pageNum);
 
+            if (pageData && !this.viewer.isCurrentPageData(pageData)) pageData = null;
             if (!pageData) {
                 // GS 렌더(~1초)를 기다리는 동안 스캔 미리보기가 있으면 즉시 표시 —
                 // 먼 페이지로 점프해도 빈 화면 대신 흐릿한 페이지가 0ms에 뜨고,
@@ -268,12 +278,15 @@ export class VirtualScrollManager {
             pageEl.status = 'rendered';
 
             // 마우스 이벤트 바인딩
-            canvas.addEventListener('mousemove', (e) => {
-                this.viewer.handleCanvasMouseMove(e, pageNum, canvas, pageData);
-            });
-            canvas.addEventListener('mouseleave', () => {
-                this.viewer.clearMouseInfo();
-            });
+            pageEl.wrapper.onmousemove = (e) => {
+                if (pageEl.status !== 'rendered' || !pageEl.canvas) return;
+                this.viewer.handleCanvasMouseMove(e, pageNum, pageEl.canvas, this.comparison.dataAtPointer(pageEl, e));
+            };
+            pageEl.wrapper.onmouseleave = () => this.viewer.clearMouseInfo();
+            this.comparison.syncAvailability();
+            if (this.isWrapperInViewport(pageEl.wrapper)) {
+                this.comparison.prepare(pageNum, pageEl);
+            }
 
         } catch (error) {
             console.error(`페이지 ${pageNum} 렌더링 실패:`, error);
@@ -366,6 +379,7 @@ export class VirtualScrollManager {
 
         if (distance > this.bufferPages + 2) {
             if (pageEl.canvas) {
+                this.comparison.release(pageEl);
                 const ctx = pageEl.canvas.getContext('2d');
                 ctx.clearRect(0, 0, pageEl.canvas.width, pageEl.canvas.height);
                 pageEl.canvas.width = 0;
@@ -458,21 +472,8 @@ export class VirtualScrollManager {
             el.wrapper.style.width = `${this.pageWidth}px`;
             el.wrapper.style.height = `${this.pageHeight}px`;
 
-            if (el.canvas) {
-                // 고해상도 데이터가 있으면 캔버스 버퍼 크기 유지, 없으면 뷰어 크기에 맞춤
-                if (el.pageData && el.pageData.imageData) {
-                    el.canvas.width = el.pageData.imageData.width;
-                    el.canvas.height = el.pageData.imageData.height;
-                } else {
-                    el.canvas.width = this.pageWidth;
-                    el.canvas.height = this.pageHeight;
-                }
-
-                // 리렌더링
-                if (el.pageData) {
-                    this.renderToCanvas(el.canvas, el.pageData);
-                }
-            }
+            // 캔버스는 이미 렌더 DPI 크기다. 줌은 CSS 표시 크기만 바꾸므로
+            // width 재대입/분판 재합성 없이 비교 양쪽 버퍼를 그대로 확대한다.
         });
 
         // Observer 재설정 (rootMargin 변경)
@@ -586,11 +587,13 @@ export class VirtualScrollManager {
 
     // 모든 보이는 페이지 리렌더링 (분판 변경 또는 화질 변경 시)
     updateAllVisiblePages(forceGsRender = false) {
+        this.comparison.syncAvailability();
         if (forceGsRender) {
             this.deferredComposites.clear();
             this.pageElements.forEach((el, pageNum) => {
                 if (el.status !== 'placeholder') {
                     // 설정 전환 전에 시작된 렌더가 끝나도 새 화면/캐시를 덮지 못하게 한다.
+                    this.comparison.release(el);
                     el.renderToken = null;
                     el.status = 'placeholder';
                     el.canvas = null;
@@ -611,6 +614,7 @@ export class VirtualScrollManager {
                     // 겹쳐 토글이 수 초씩 걸리므로, 화면 밖 페이지는 유휴 시간에 처리.
                     if (this.isWrapperInViewport(el.wrapper)) {
                         this.renderToCanvas(el.canvas, el.pageData);
+                        this.comparison.recompose(el);
                         this.deferredComposites.delete(pageNum);
                     } else {
                         this.deferredComposites.add(pageNum);
@@ -625,7 +629,8 @@ export class VirtualScrollManager {
     isWrapperInViewport(wrapper) {
         const vp = this.viewport.getBoundingClientRect();
         const r = wrapper.getBoundingClientRect();
-        return r.bottom > vp.top - 100 && r.top < vp.bottom + 100;
+        return r.width > 0 && r.height > 0 &&
+            r.bottom > vp.top - 100 && r.top < vp.bottom + 100;
     }
 
     // 화면 밖 페이지의 분판 재합성을 유휴 시간에 하나씩 처리
@@ -644,6 +649,7 @@ export class VirtualScrollManager {
             const el = this.pageElements.get(pageNum);
             if (el && el.status === 'rendered' && el.canvas && el.pageData) {
                 this.renderToCanvas(el.canvas, el.pageData);
+                this.comparison.recompose(el);
             }
 
             if (this.deferredComposites.size > 0) {
@@ -666,6 +672,7 @@ export class VirtualScrollManager {
         const el = this.pageElements.get(pageNum);
         if (el && el.status === 'rendered' && el.canvas && el.pageData) {
             this.renderToCanvas(el.canvas, el.pageData);
+            this.comparison.recompose(el);
         }
     }
 
@@ -683,6 +690,7 @@ export class VirtualScrollManager {
         if (this.observer) {
             this.observer.disconnect();
         }
+        for (const el of this.pageElements.values()) this.comparison.release(el);
         this.pageElements.clear();
         this.renderQueue.clear();
         this.content.innerHTML = '';

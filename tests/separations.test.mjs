@@ -72,3 +72,23 @@ test('a render finishing after a setting switch cannot paint its old page', asyn
     finish({renderGeneration:0});await pending;
     assert.equal(v.pageCache.size,0);
 });
+
+test('single-page mode does not prepare comparisons for display:none pages', () => {
+    const manager = Object.assign(Object.create(VirtualScrollManager.prototype), {
+        viewport: {getBoundingClientRect: () => ({top:20,bottom:800})}
+    });
+    const wrapper = rect => ({getBoundingClientRect: () => rect});
+    assert.equal(manager.isWrapperInViewport(wrapper({top:0,bottom:0,width:0,height:0})),false);
+    assert.equal(manager.isWrapperInViewport(wrapper({top:100,bottom:500,width:800,height:400})),true);
+});
+
+
+test('late results from the other overprint mode cannot enter the selected page cache', () => {
+    const v = viewer();
+    const old = {renderGeneration:0, renderSettings:{excludeAnnots:true,overprint:true}};
+    v.overprintPreview = false;
+    v.addToCache(1, old);
+    assert.equal(v.pageCache.size, 0);
+    v.addToCache(1, {...old, renderSettings:{excludeAnnots:true,overprint:false}});
+    assert.equal(v.pageCache.size, 1);
+});
