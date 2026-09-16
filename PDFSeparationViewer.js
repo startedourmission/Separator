@@ -37,6 +37,7 @@ export class PDFSeparationViewer {
         this.excludeAnnotations = true;
 
         this.overprintPreview = true;
+        this.inkCoverageLimit = 0;
         // 주석 × 오버프린트 조합별 측정값. 원본 잉크판은 용량 제한 캐시로 재사용한다.
         this.scanVariants = {};
         this.renderGeneration = 0;
@@ -267,6 +268,18 @@ export class PDFSeparationViewer {
             });
         });
 
+        const inkLimitButtons = [...document.querySelectorAll('[data-ink-limit]')];
+        for (const button of inkLimitButtons) {
+            button.addEventListener('click', () => {
+                const limit = Number(button.dataset.inkLimit);
+                this.inkCoverageLimit = this.inkCoverageLimit === limit ? 0 : limit;
+                for (const control of inkLimitButtons) {
+                    control.setAttribute('aria-pressed', String(Number(control.dataset.inkLimit) === this.inkCoverageLimit));
+                }
+                this.updateSeparation();
+            });
+        }
+
         this.canvas.addEventListener('mousemove', (e) => this.handleMouseMove(e));
         this.canvas.addEventListener('mouseleave', () => this.clearMouseInfo());
 
@@ -374,6 +387,9 @@ export class PDFSeparationViewer {
 
         // 표지 계산기 입력 이벤트
         const updateCalcManual = () => {
+            this.coverCalculationManual = true;
+            this.cropDetectionToken = null;
+            if (this.autoCoverCalculation) this.autoCoverCalculation.status = 'done';
             this.coverCalculatorInputs.spine = parseFloat(this.spineInput.value) || 0;
             this.coverCalculatorInputs.flap = parseFloat(this.flapInput.value) || 0;
             this.coverCalculatorInputs.cover = parseFloat(this.coverInput.value) || 0;
@@ -1281,6 +1297,7 @@ export class PDFSeparationViewer {
             const result = await this.ghostscript.loadPDF(data);
             if (result.success) {
                 this.currentPDF = data;
+                this.resetCoverCalculation();
                 this.totalPages = result.pages;
                 this.currentPage = 1;
                 this.resetPageNumberOffset();
@@ -1335,7 +1352,12 @@ export class PDFSeparationViewer {
                 // 메타데이터(TrimBox)와 별색 프로브가 끝나면 백그라운드 스캔 시작
                 // (재단선 제외 계산에 페이지별 TrimBox가, 스캔 방식 결정에 별색 유무가 필요)
                 Promise.allSettled([this.extractPDFMetadata(), this.spotProbePromise])
-                    .then(() => this.scanAllPagesInBackground());
+                    .then(() => {
+                        if (this.currentPDFData !== probeDoc) return;
+                        this.autoCoverCalculation.ready = true;
+                        this.maybeAutoCalculateCover();
+                        this.scanAllPagesInBackground();
+                    });
 
 
             } else {
@@ -1886,7 +1908,9 @@ export class PDFSeparationViewer {
 
         try {
             const { PDFDocument } = PDFLib;
-            const pdfDoc = await PDFDocument.load(this.currentPDF);
+            const document = this.currentPDF;
+            const pdfDoc = await PDFDocument.load(document);
+            if (this.currentPDF !== document) return;
             const pages = pdfDoc.getPages();
 
             this.pageMetadata.clear();
@@ -1996,10 +2020,47 @@ export class PDFSeparationViewer {
 
         // 페이지 변경 시 마커 제거
         this.clearCropMarkers();
+        this.maybeAutoCalculateCover();
     }
 
     clearCropMarkers() {
         document.querySelectorAll('.crop-marker').forEach(m => m.remove());
+    }
+
+    resetCoverCalculation() {
+        this.autoCoverCalculation = {document: this.currentPDFData, ready: false, status: 'pending'};
+        this.cropDetectionToken = null;
+        this.coverCalculationManual = false;
+        this.finalMarks = [];
+        this.allCandidates = [];
+        this.pageMetadata.clear();
+        this.coverCalculatorInputs = {spine:0, flap:0, cover:0, margin:0};
+        for (const input of [this.spineInput,this.flapInput,this.coverInput]) input.value = '0';
+        this.calcResultElement.textContent = '펼침면 크기 계산 대기 중…';
+    }
+
+    maybeAutoCalculateCover() {
+        const state = this.autoCoverCalculation;
+        if (!state?.ready || state.status !== 'pending' || state.document !== this.currentPDFData ||
+            this.currentFileType !== 'pdf' || this.currentPage !== 1) return;
+        const el = this.scrollManager?.pageElements.get(1);
+        if (el?.status !== 'rendered' || !el.pageData || !this.pageMetadata.has(1)) return;
+        state.status = 'running';
+        // 먼저 PDF 화면을 표시하고, 준비된 페이지로 1회 자동 분석한다.
+        setTimeout(async () => {
+            if (this.autoCoverCalculation !== state || state.status !== 'running' || state.document !== this.currentPDFData) return;
+            if (this.currentPage !== 1 || this.scrollManager?.pageElements.get(1)?.status !== 'rendered') {
+                state.status = 'pending';
+                return;
+            }
+            try { await this.detectCropMarks({automatic:true}); }
+            catch (error) { console.warn('펼침면 자동 계산 실패:', error); }
+            finally {
+                if (this.autoCoverCalculation === state && state.status === 'running') {
+                    state.status = this.currentPage === 1 ? 'done' : 'pending';
+                }
+            }
+        }, 0);
     }
 
     // 표지 펼침면 계산
@@ -2018,7 +2079,7 @@ export class PDFSeparationViewer {
 
         let spineWidth = 0, coverWidth = 0, flapWidth = 0;
 
-        if (isManual) {
+        if (isManual || this.coverCalculationManual) {
             // 수동 입력 시: 필드 값 우선 사용
             spineWidth = this.coverCalculatorInputs.spine;
             coverWidth = this.coverCalculatorInputs.cover;
@@ -2026,7 +2087,12 @@ export class PDFSeparationViewer {
         } else {
             // 자동 감지 시: finalMarks 기반 계산
             if (this.finalMarks.length < 4) {
-                this.calcResultElement.textContent = `펼침면 너비 : 0.00 x 0.00 mm`;
+                if (metadata?.trimBox) {
+                    const widthMm = metadata.trimBox.width * 25.4 / 72;
+                    this.calcResultElement.textContent = `펼침면 너비 : ${widthMm.toFixed(2)} x ${trimHeightMm.toFixed(2)} mm`;
+                } else {
+                    this.calcResultElement.textContent = '펼침면 크기 계산 대기 중…';
+                }
                 return;
             }
 
@@ -2406,9 +2472,16 @@ export class PDFSeparationViewer {
     }
 
     // 재단선 자동 감지 (이미지 기반 감지 + 벡터 정밀 보정)
-    async detectCropMarks() {
-        this.showLoading('재단선 분석 중 (정밀 모드)...');
+    async detectCropMarks({automatic = false} = {}) {
+        const document = this.currentPDFData;
+        const token = this.cropDetectionToken = {};
         const pageNum = this.currentPage;
+        const isCurrent = () => this.currentPDFData === document && this.currentPage === pageNum && this.cropDetectionToken === token;
+        if (!automatic) {
+            this.coverCalculationManual = false;
+            if (this.autoCoverCalculation) this.autoCoverCalculation.status = 'done';
+            this.showLoading('재단선 분석 중 (정밀 모드)...');
+        }
         const pageObj = this.scrollManager.pageElements.get(pageNum);
 
         // 메타데이터가 없는 경우(이미지 파일 등)를 위한 Fallback
@@ -2427,8 +2500,8 @@ export class PDFSeparationViewer {
         const metadata = this.pageMetadata.get(pageNum);
 
         if (!pageObj || !pageObj.canvas || !metadata) {
-            alert('현재 페이지의 이미지 또는 메타데이터를 찾을 수 없습니다.');
-            this.hideLoading();
+            if (!automatic) alert('현재 페이지의 이미지 또는 메타데이터를 찾을 수 없습니다.');
+            if (!automatic) this.hideLoading();
             return;
         }
 
@@ -2501,26 +2574,25 @@ export class PDFSeparationViewer {
             candidates = candidates.filter(c => c.x >= trimLeftPx && c.x <= trimRightPx);
         }
 
-        this.allCandidates = candidates;
 
         // 이미지 후보 부족 시 벡터 폴백: PDF 안의 짧은 세로선 중 페이지 모서리에 위치한 것을 클러스터링.
         // 배경에 트림마크가 시각적으로 묻혀 있어도 벡터 path는 정확히 남아 있어서 잡힘.
         if (candidates.length < 4) {
             try {
                 const vectorMarks = await this._findTrimMarksFromVector(pageNum, metadata, canvas.width);
+                if (!isCurrent()) return;
                 if (vectorMarks && vectorMarks.length >= 4) {
                     candidates = vectorMarks;
-                    this.allCandidates = candidates;
                     console.log(`벡터 폴백으로 ${vectorMarks.length}개 재단선 후보 추출`);
                 } else {
-                    alert(`재단선을 찾지 못했습니다.`);
-                    this.hideLoading();
+                    if (!automatic) alert(`재단선을 찾지 못했습니다.`);
+                    if (!automatic) this.hideLoading();
                     return;
                 }
             } catch (e) {
                 console.warn('벡터 폴백 실패:', e);
-                alert(`재단선을 찾지 못했습니다.`);
-                this.hideLoading();
+                if (!automatic) alert(`재단선을 찾지 못했습니다.`);
+                if (!automatic) this.hideLoading();
                 return;
             }
         }
@@ -2600,12 +2672,16 @@ export class PDFSeparationViewer {
             console.warn('벡터 보정 실패 (이미지 좌표 유지):', e);
         }
 
+        if (!isCurrent()) return;
+        this.allCandidates = candidates;
         this.finalMarks = finalMarks;
 
         this.renderCropMarkers();
         this.calculateCoverSpread();
-        this.showLoading(`분석 완료!`, '');
-        setTimeout(() => this.hideLoading(), 1000);
+        if (!automatic) {
+            this.showLoading(`분석 완료!`, '');
+            setTimeout(() => { if (isCurrent()) this.hideLoading(); }, 1000);
+        }
     }
 
     // 벡터 수직선 좌표 추출 (보정용 — 필터 없이 모든 수직선 수집)
@@ -3845,7 +3921,7 @@ export class PDFSeparationViewer {
             }
 
             if (inkValues) {
-                const tac = this.calculateTAC(inkValues);
+                const tac = this.calculateTAC(inkValues, spotColorInkValues);
                 this.tacValueElement.textContent = tac.toFixed(1);
 
                 // 채널별 잉크 비율 UI 업데이트
@@ -3859,8 +3935,9 @@ export class PDFSeparationViewer {
         }
     }
 
-    calculateTAC(inkValues) {
-        return inkValues.cyan + inkValues.magenta + inkValues.yellow + inkValues.black;
+    calculateTAC(inkValues, spotColorInkValues = {}) {
+        const processTotal = inkValues.cyan + inkValues.magenta + inkValues.yellow + inkValues.black;
+        return processTotal + Object.values(spotColorInkValues).reduce((sum, value) => sum + value, 0);
     }
 
     /**
@@ -3907,7 +3984,7 @@ export class PDFSeparationViewer {
 
     // Task 5.2: 별색 잉크량 UI 업데이트
     updateSpotColorInkInfo(spotColorInkValues) {
-        // 별색 잉크량을 CMYK TAC 아래에 표시
+        // 별색별 잉크량을 전체 TAC 아래에 표시
         if (!this.spotInkInfoContainer) {
             return;
         }
@@ -4044,7 +4121,7 @@ export class PDFSeparationViewer {
             }
 
             if (inkValues) {
-                const tac = this.calculateTAC(inkValues);
+                const tac = this.calculateTAC(inkValues, spotColorInkValues);
                 this.tacValueElement.textContent = tac.toFixed(1);
                 this.updateChannelInkInfo(inkValues);
                 this.updateSpotColorInkInfo(spotColorInkValues);

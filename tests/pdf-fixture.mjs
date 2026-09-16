@@ -1,6 +1,6 @@
 // Small deterministic PDF: black overprints either a spot green or process cyan.
-export function overprintPDF(spot = true) {
-    const content = `${spot ? '/Spot cs 1 scn' : '1 0 0 0 k'} 10 10 100 40 re f\n/OP gs 0 0 0 1 k 40 20 40 20 re f\n`;
+export function overprintPDF(spot = true, contentOverride) {
+    const content = contentOverride ?? `${spot ? '/Spot cs 1 scn' : '1 0 0 0 k'} 10 10 100 40 re f\n/OP gs 0 0 0 1 k 40 20 40 20 re f\n`;
     const objects = [
         '<< /Type /Catalog /Pages 2 0 R >>',
         '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',

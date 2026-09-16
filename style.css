@@ -1305,3 +1305,9 @@ h4 {
 .comparison-handle:focus-visible { outline: 3px solid #111; outline-offset: 2px; }
 .scroll-content:not(.comparison-active) .comparison-layer,
 .scroll-content:not(.comparison-active) .comparison-divider { display: none; }
+
+.ink-limit-controls { display: flex; gap: 6px; margin: 8px 0 4px; }
+.ink-limit-controls button { flex: 1; padding: 6px 8px; border: 1px solid #d8dce1; border-radius: 5px; background: white; color: #555; font: inherit; font-size: .8rem; cursor: pointer; }
+.ink-limit-controls button[aria-pressed="true"] { background: #c92b2b; border-color: #c92b2b; color: white; }
+.ink-limit-controls button:focus-visible { outline: 2px solid #246baf; outline-offset: 2px; }
+.ink-limit-help { font-size: .7rem; color: #777; margin-bottom: 8px; }

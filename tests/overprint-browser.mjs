@@ -26,6 +26,7 @@ const errors=[];
 try {
     const page=await browser.newPage({viewport:{width:1600,height:1000},ignoreHTTPSErrors:true});
     page.on('pageerror',e=>errors.push(e.message));
+    page.on('dialog',async dialog=>{errors.push('Unexpected dialog: '+dialog.message());await dialog.dismiss();});
     page.on('console',msg=>{if(msg.type()==='error')errors.push(msg.text());});
     await page.goto(`http://127.0.0.1:${server.address().port}`,{waitUntil:'networkidle'});
     await page.waitForFunction(()=>window.viewer?.ghostscript&&viewer.workerPool?.initialized);
@@ -286,6 +287,60 @@ try {
     await page.evaluate(()=>{viewer.workerPool=window.savedPool;});
     console.log('PASS single-worker fallback');
 
+    // Four patches: exactly 300%, 340%, 360%, and 300% + 100% spot.
+    const coverageContent = '1 1 1 0 k 0 0 30 60 re f\n'
+        + '1 1 1 .4 k 30 0 30 60 re f\n'
+        + '1 1 1 .6 k 60 0 30 60 re f\n'
+        + '1 1 1 0 k 90 0 30 60 re f\n/OP gs /Spot cs 1 scn 90 0 30 60 re f\n';
+    await toggle(true);
+    await loadDocument({name:'coverage.pdf',mimeType:'application/pdf',buffer:overprintPDF(true,coverageContent)});
+    await comparisonReady();
+    await page.waitForFunction(()=>viewer.autoCoverCalculation?.status==='done');
+    const coverageSample=()=>page.evaluate(()=>{
+        const el=viewer.scrollManager.pageElements.get(1),c=el.canvas;
+        return [1,3,5,7].map(n=>[...c.getContext('2d').getImageData(Math.floor(c.width*n/8),Math.floor(c.height/2),1,1).data]);
+    });
+    const originalCoverage=await coverageSample(),red=[255,35,35,255];
+    await page.evaluate(()=>{window.coverageGsCalls=0;const run=viewer.renderUncachedPageData;
+        window.coverageSavedRender=run;viewer.renderUncachedPageData=function(...args){window.coverageGsCalls++;return run.apply(this,args);};});
+    await page.locator('#ink-limit-300').click();
+    assert.deepEqual(await coverageSample(),[originalCoverage[0],red,red,red]);
+    assert.equal(await page.locator('#ink-limit-300').getAttribute('aria-pressed'),'true');
+    await page.locator('#ink-limit-350').click();
+    assert.deepEqual(await coverageSample(),[originalCoverage[0],originalCoverage[1],red,red]);
+    assert.equal(await page.locator('#ink-limit-300').getAttribute('aria-pressed'),'false');
+    const analysis=await page.evaluate(()=>{
+        const el=viewer.scrollManager.pageElements.get(1),c=viewer.scrollManager.getAnalysisCanvas(el);
+        return [1,3,5,7].map(n=>[...c.getContext('2d').getImageData(Math.floor(c.width*n/8),Math.floor(c.height/2),1,1).data]);
+    });
+    assert.deepEqual(analysis,originalCoverage,'OCR and crop detection must receive original colors');
+    await page.locator('#overprint-compare-toggle').click();
+    const compared=await page.evaluate(()=>{
+        const el=viewer.scrollManager.pageElements.get(1);
+        return [el,el.comparison].map(e=>({overprint:(e.pageData||e.data).renderSettings.overprint,
+            pixel:[...e.canvas.getContext('2d').getImageData(Math.floor(e.canvas.width*7/8),Math.floor(e.canvas.height/2),1,1).data]}));
+    });
+    assert.deepEqual(compared.find(e=>e.overprint).pixel,red);
+    assert.notDeepEqual(compared.find(e=>!e.overprint).pixel,red,'knockout must not count removed underlying ink');
+    await page.locator('#overprint-compare-toggle').click();
+    await page.screenshot({path:path.join(artifacts,'ink-coverage-350.png')});
+    // Verify both the GPU and CPU fallback, with plates hidden from the artwork.
+    const hiddenCoverage=await page.evaluate(()=>{
+        const m=viewer.scrollManager,el=m.pageElements.get(1),gpu=m.gpu,getSettings=viewer.getCurrentSeparations;
+        viewer.getCurrentSeparations=()=>({cyan:false,magenta:false,yellow:false,black:false,spotColors:{}});
+        const sample=()=>{m.renderToCanvas(el.canvas,el.pageData);return [1,3,5,7].map(n=>[...el.canvas.getContext('2d').getImageData(Math.floor(el.canvas.width*n/8),Math.floor(el.canvas.height/2),1,1).data]);};
+        const accelerated=sample();m.gpu=null;const fallback=sample();m.gpu=gpu;viewer.getCurrentSeparations=getSettings;
+        return {accelerated,fallback};
+    });
+    assert.deepEqual(hiddenCoverage.accelerated,[[255,255,255,255],[255,255,255,255],red,red]);
+    assert.deepEqual(hiddenCoverage.fallback,hiddenCoverage.accelerated);
+    await page.locator('#ink-limit-350').click();
+    assert.deepEqual(await coverageSample(),originalCoverage);
+    assert.equal(await page.locator('#ink-limit-350').getAttribute('aria-pressed'),'false');
+    assert.equal(await page.evaluate(()=>window.coverageGsCalls),0,'threshold buttons must reuse existing PDF plates');
+    await page.evaluate(()=>{viewer.renderUncachedPageData=window.coverageSavedRender;});
+    console.log('PASS coverage warnings: strict 300/350 thresholds, spots, hidden plates, comparison, clean analysis, CPU/GPU and zero PDF renders');
+
     const cover=path.join(root,'higs_cover.pdf');
     if(await fs.stat(cover).catch(()=>null)) {
         await page.locator('#overprint-preview').setChecked(true);
@@ -293,6 +348,15 @@ try {
         await loadDocument(cover);
         await settled();
         await page.waitForFunction(()=>viewer.spotColors.includes('PANTONE 2285 C'));
+        await page.waitForFunction(()=>viewer.autoCoverCalculation?.status==='done',null,{timeout:60000});
+        results.autoCover=await page.evaluate(()=>({
+            text:viewer.calcResultElement.textContent,marks:viewer.finalMarks.length,
+            ...viewer.coverCalculatorInputs
+        }));
+        assert.ok(results.autoCover.marks>=4,'cover crop marks must be detected without clicking the button');
+        assert.ok(results.autoCover.cover>0 && results.autoCover.spine>0);
+        assert.ok(results.autoCover.text.includes('257.00 mm'));
+        console.log('PASS automatic cover calculation:',results.autoCover);
         const coverSamples=await page.evaluate(()=>{
             const el=viewer.scrollManager.pageElements.get(1),im=el.pageData.imageData;
             return [[430,188],[430,400],[1410,698]].map(([x,y])=>{

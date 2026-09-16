@@ -278,6 +278,7 @@ export class VirtualScrollManager {
             pageEl.canvas = canvas;
             pageEl.pageData = pageData;
             pageEl.status = 'rendered';
+            this.viewer.maybeAutoCalculateCover?.();
 
             // 마우스 이벤트 바인딩
             pageEl.wrapper.onmousemove = (e) => {
@@ -305,7 +306,7 @@ export class VirtualScrollManager {
     }
 
     getAnalysisCanvas(pageEl) {
-        if (pageEl.canvas.width === pageEl.pageData.imageData.width) return pageEl.canvas;
+        if (pageEl.canvas.width === pageEl.pageData.imageData.width && !this.viewer.inkCoverageLimit) return pageEl.canvas;
         const canvas = document.createElement('canvas');
         this.renderToCanvas(canvas, pageEl.pageData, true);
         return canvas;
@@ -353,13 +354,14 @@ export class VirtualScrollManager {
 
         // 현재 분판 설정 가져오기
         const separations = this.viewer.getCurrentSeparations();
+        const inkLimit = fullResolution ? 0 : (this.viewer.inkCoverageLimit || 0);
         const spotColorData = pageData.spotColorData || {};
 
         if (this.gpu === undefined) {
             try { this.gpu = new SeparationGPU(); }
             catch (error) { console.warn('GPU 색 변환 대신 ICC CPU 변환 사용:', error.message); this.gpu = null; }
         }
-        if (this.gpu?.render(canvas, imageData, spotColorData, separations, pageData.spotCMYK, canvas.classList.contains('comparison-layer'))) return;
+        if (this.gpu?.render(canvas, imageData, spotColorData, separations, pageData.spotCMYK, canvas.classList.contains('comparison-layer'), inkLimit)) return;
 
         // CMYK 렌더링
         const srcWidth = imageData.width;
@@ -384,7 +386,7 @@ export class VirtualScrollManager {
         }
         const tempImageData = this._tempImageData;
 
-        compositeSeparations(imageData, spotColorData, separations, tempImageData.data, pageData.spotCMYK);
+        compositeSeparations(imageData, spotColorData, separations, tempImageData.data, pageData.spotCMYK, inkLimit);
 
         // 크기가 같으면 임시 캔버스를 거치지 않고 바로 출력 (전체 픽셀 복사 1회 절약)
         if (dstWidth === srcWidth && dstHeight === srcHeight) {

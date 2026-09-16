@@ -94,3 +94,78 @@ test('late results from the other overprint mode cannot enter the selected page 
     v.addToCache(1, {...old, renderSettings:{excludeAnnots:true,overprint:false}});
     assert.equal(v.pageCache.size, 1);
 });
+
+
+test('cursor totals include every spot plate in both viewer paths, including totals above 400%', async () => {
+    const v=viewer();
+    assert.equal(v.calculateTAC({cyan:100,magenta:100,yellow:100,black:100},{SpotA:100,SpotB:75}),575);
+    const process={cyan:0,magenta:0,yellow:0,black:100};
+    assert.equal(v.calculateTAC(process),100);
+    const imageData={type:'cmyk',width:1,height:1,channels:Object.fromEntries(
+        Object.entries(process).map(([name,value])=>[name,Uint8Array.of(value*2.55)]))};
+    imageData.channels.black[0]=255;
+    const canvas={width:1,height:1,getBoundingClientRect:()=>({left:0,top:0,width:100,height:100})};
+    Object.assign(v,{
+        currentPDF:true,canvas,baseWidth:1,baseHeight:1,zoomLevel:1,
+        originalCMYKData:imageData,spotColors:['SpotA','SpotB'],
+        tacValueElement:{textContent:''},cursorCoordsElement:{textContent:''},
+        updateChannelInkInfo:()=>{},updateSpotColorInkInfo:()=>{}
+    });
+    for(const [spots,expected] of [
+        [{SpotA:Uint8Array.of(255),SpotB:Uint8Array.of(128)},'250.2'],
+        [{SpotA:Uint8Array.of(255)},'200.0'],
+        [{},'100.0']
+    ]) {
+        v.spotColorData=spots;
+        const event={clientX:50,clientY:50};
+        v.handleCanvasMouseMove(event,1,canvas,{imageData,spotColorData:spots});
+        assert.equal(v.tacValueElement.textContent,expected);
+        v.tacValueElement.textContent='';
+        await v.handleMouseMove(event);
+        assert.equal(v.tacValueElement.textContent,expected);
+    }
+});
+
+
+test('cover auto calculation waits for metadata and render, then runs once', async () => {
+    const v=viewer(), doc={};let calls=0;
+    Object.assign(v,{
+        currentPDFData:doc,currentFileType:'pdf',currentPage:1,
+        autoCoverCalculation:{document:doc,ready:false,status:'pending'},
+        scrollManager:{pageElements:new Map([[1,{status:'loading'}]])},pageMetadata:new Map(),
+        detectCropMarks:async options=>{assert.equal(options.automatic,true);calls++;}
+    });
+    v.maybeAutoCalculateCover();assert.equal(calls,0);
+    v.autoCoverCalculation.ready=true;v.pageMetadata.set(1,{});
+    v.maybeAutoCalculateCover();assert.equal(v.autoCoverCalculation.status,'pending');
+    v.scrollManager.pageElements.set(1,{status:'rendered',pageData:{}});
+    v.maybeAutoCalculateCover();v.maybeAutoCalculateCover();
+    await new Promise(resolve=>setTimeout(resolve,10));
+    assert.equal(calls,1);assert.equal(v.autoCoverCalculation.status,'done');
+    v.maybeAutoCalculateCover();assert.equal(calls,1);
+    v.autoCoverCalculation.status='pending';v.maybeAutoCalculateCover();
+    v.autoCoverCalculation={document:{},ready:false,status:'pending'};
+    await new Promise(resolve=>setTimeout(resolve,10));
+    assert.equal(calls,1,'a replaced document must cancel scheduled analysis');
+});
+
+test('a PDF without crop marks shows its TrimBox dimensions without guessed book parts', () => {
+    const v=viewer();
+    Object.assign(v,{currentPage:1,finalMarks:[],calcResultElement:{textContent:''},
+        pageMetadata:new Map([[1,{trimBox:{width:720,height:360}}]])});
+    v.calculateCoverSpread();
+    assert.equal(v.calcResultElement.textContent,'펼침면 너비 : 254.00 x 127.00 mm');
+});
+
+test('coverage warnings use strict thresholds and include hidden spot plates', () => {
+    const channels={cyan:Uint8Array.of(255,255,255,255),magenta:Uint8Array.of(255,255,255,255),
+        yellow:Uint8Array.of(255,255,255,255),black:Uint8Array.of(0,102,153,0)};
+    const data={width:4,height:1,channels},spots={TestGreen:Uint8Array.of(0,0,0,255)};
+    const hidden={cyan:false,magenta:false,yellow:false,black:false,spotColors:{}};
+    const render=limit=>[...compositeSeparations(data,spots,hidden,new Uint8ClampedArray(16),{},limit)];
+    const red=[255,35,35,255],white=[255,255,255,255];
+    assert.deepEqual(render(300),[...white,...red,...red,...red]);
+    assert.deepEqual(render(350),[...white,...white,...red,...red]);
+    assert.deepEqual(render(0),[...white,...white,...white,...white]);
+    assert.equal(spots.TestGreen[3],255,'warnings must not alter original plate values');
+});

@@ -136,9 +136,14 @@
             <div class="info-panel">
                 <h3>정보</h3>
                 <div class="ink-info">
-                    <span>마우스 위치 잉크량 (TAC): </span>
+                    <span title="커서 위치의 C·M·Y·K와 모든 별색 잉크량을 합산합니다.">마우스 위치 총 잉크량 (별색 포함): </span>
                     <span id="tac-value">-</span>%
                 </div>
+                <div class="ink-limit-controls" role="group" aria-label="총 잉크량 초과 영역 표시">
+                    <button type="button" id="ink-limit-300" data-ink-limit="300" aria-pressed="false">300% 초과</button>
+                    <button type="button" id="ink-limit-350" data-ink-limit="350" aria-pressed="false">350% 초과</button>
+                </div>
+                <div class="ink-limit-help">CMYK + 별색 · 초과 영역을 빨간색으로 표시</div>
                 <div class="cursor-position">
                     <span>좌표: </span>
                     <span id="cursor-coords">-</span>

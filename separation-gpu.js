@@ -22,6 +22,7 @@ uniform vec4 equivalents[10];
 uniform vec3 fallback[10];
 uniform int modes[10];
 uniform int count;
+uniform float inkLimit;
 void main(){
     vec4 ink=texture(process,uv)*mask;
     vec3 multiplier=vec3(1);
@@ -43,6 +44,16 @@ void main(){
     vec3 linear=mix(a,b,fract(t.w));
     vec3 rgb=mix(12.92*linear,1.055*pow(max(linear,vec3(0)),vec3(1./2.4))-.055,step(vec3(.0031308),linear));
     color=vec4(rgb*multiplier,1);
+    if(inkLimit>0.) {
+        ivec2 size=textureSize(process,0);
+        ivec2 pixel=clamp(ivec2(uv*vec2(size)),ivec2(0),size-1);
+        float total=dot(floor(texelFetch(process,pixel,0)*255.+.5),vec4(1));
+        for(int i=0;i<10;i++) {
+            if(i>=count) break;
+            total+=floor(texelFetch(spots,ivec3(pixel,i),0).r*255.+.5);
+        }
+        if(total*100.>inkLimit*255.) color=vec4(1.,35./255.,35./255.,1.);
+    }
 }`;
 
 // One shared GL context. Source textures survive separation toggles. Canvas copies
@@ -68,7 +79,7 @@ export class SeparationGPU {
         gl.deleteShader(v);gl.deleteShader(f);
         if(!gl.getProgramParameter(this.program,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(this.program));
         gl.useProgram(this.program);
-        this.uniform=Object.fromEntries(['process','spots','profile','mask','equivalents[0]','fallback[0]','modes[0]','count']
+        this.uniform=Object.fromEntries(['process','spots','profile','mask','equivalents[0]','fallback[0]','modes[0]','count','inkLimit']
             .map(n=>[n,gl.getUniformLocation(this.program,n)]));
         gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
         this.profile=gl.createTexture();gl.activeTexture(gl.TEXTURE2);gl.bindTexture(gl.TEXTURE_3D,this.profile);
@@ -113,7 +124,7 @@ export class SeparationGPU {
         if(!temporary) {this.pages.set(data,item);this.bytes+=bytes;}
         return item;
     }
-    render(canvas,data,spotData,separations,spotCMYK={},background=false) {
+    render(canvas,data,spotData,separations,spotCMYK={},background=false,inkLimit=0) {
         if(this.lost || this.gl.isContextLost()) return false;
         const item=this.source(data,spotData,background);
         if(!item) return false;
@@ -132,6 +143,7 @@ export class SeparationGPU {
         gl.uniform4fv(this.uniform.mask,['cyan','magenta','yellow','black'].map(n=>separations[n]?1:0));
         gl.uniform4fv(this.uniform['equivalents[0]'],eq);gl.uniform3fv(this.uniform['fallback[0]'],rgb);
         gl.uniform1iv(this.uniform['modes[0]'],modes);gl.uniform1i(this.uniform.count,item.names.length);
+        gl.uniform1f(this.uniform.inkLimit,inkLimit);
         gl.drawArrays(gl.TRIANGLES,0,3);
         if(item.temporary) {gl.deleteTexture(item.process);gl.deleteTexture(item.spots);}
         if(gl.getError()!==gl.NO_ERROR) {this.lost=true;this.clear();return false;}
