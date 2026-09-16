@@ -4,7 +4,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { overprintPDF } from './pdf-fixture.mjs';
+import { overprintPDF, knockoutGroupPDF } from './pdf-fixture.mjs';
 
 const root=fileURLToPath(new URL('../',import.meta.url));
 const artifacts=path.join(root,'_docs/overprint-verification');
@@ -340,6 +340,90 @@ try {
     assert.equal(await page.evaluate(()=>window.coverageGsCalls),0,'threshold buttons must reuse existing PDF plates');
     await page.evaluate(()=>{viewer.renderUncachedPageData=window.coverageSavedRender;});
     console.log('PASS coverage warnings: strict 300/350 thresholds, spots, hidden plates, comparison, clean analysis, CPU/GPU and zero PDF renders');
+
+    // Regression: an isolated knockout K100 form must not manufacture CMY.
+    const knockoutFixture=knockoutGroupPDF();
+    const preparationCases=await page.evaluate(async fixtures=>{
+        const {preparePDFForRendering}=await import('./pdf-render-preparation.js');
+        const reports=[];
+        for(const fixture of fixtures) {
+            const bytes=new Uint8Array(fixture),before=bytes.slice();
+            const result=await preparePDFForRendering(bytes);
+            const doc=await PDFLib.PDFDocument.load(result.bytes);
+            const forms=doc.getPage(0).node.Resources().lookup(PDFLib.PDFName.of('XObject'));
+            const knockout=name=>forms.lookup(PDFLib.PDFName.of(name)).dict.lookup(PDFLib.PDFName.of('Group')).lookup(PDFLib.PDFName.of('K')).asBoolean();
+            reports.push({count:result.correctedGroups,sameBytes:result.bytes===bytes,
+                originalIntact:bytes.every((v,i)=>v===before[i]),main:knockout('Fm'),other:knockout('Other')});
+        }
+        return reports;
+    },[knockoutFixture,knockoutGroupPDF({mixed:true}),knockoutGroupPDF({transparent:true}),
+        knockoutGroupPDF({isolated:false}),knockoutGroupPDF({knockout:false})].map(bytes=>[...bytes]));
+    assert.deepEqual(preparationCases.map(c=>c.count),[1,0,0,0,0]);
+    assert.ok(preparationCases.every(c=>c.originalIntact));
+    assert.equal(preparationCases[0].main,false);
+    assert.equal(preparationCases[0].other,true,'shared group must not change on another form');
+    assert.ok(preparationCases.slice(1).every(c=>c.sameBytes),'unqualified documents must keep original bytes');
+    await toggle(true);
+    await loadDocument({name:'isolated-knockout.pdf',mimeType:'application/pdf',buffer:knockoutFixture});
+    await comparisonReady();
+    const corrected=await sample(), correctedExport=await exportPixel();
+    assert.deepEqual(corrected.ink,{cyan:0,magenta:0,yellow:0,black:255});
+    for(const name of ['cyan','magenta','yellow']) assert.equal(corrected.ratios[name],0,'scan must use corrected rendering bytes');
+    const originalInk=await page.evaluate(async bytes=>{
+        const result=await viewer.ghostscript.processTiffsep(new Uint8Array(bytes),1,72,{excludeAnnots:true,overprint:true});
+        return await Promise.all(['Cyan','Magenta','Yellow','Black'].map(async name=>{
+            const plate=await viewer.parseSpotColorTIFF(result.channels[name],name);
+            return plate.data[Math.floor(plate.height/2)*plate.width+Math.floor(plate.width/2)];
+        }));
+    },[...knockoutFixture]);
+    assert.deepEqual(originalInk,[255,255,255,255],'fixture must reproduce the uncorrected engine bug');
+    await toggle(false);
+    assert.deepEqual((await sample()).ink,corrected.ink);
+    assert.deepEqual(await exportPixel(),correctedExport,'RGB export must not acquire spurious CMY');
+    await toggle(true);
+    await page.locator('#ink-limit-300').click();
+    assert.notDeepEqual((await sample()).rgb,[255,35,35,255],'K100 must not trigger a 300% warning');
+    await page.locator('#ink-limit-300').click();
+    const fallbackInk=await page.evaluate(async()=>{
+        const saved=viewer.workerPool;viewer.workerPool=null;
+        try {
+            const result=await viewer.ghostscript.processTiffsep(viewer.currentPDFData,1,72,{excludeAnnots:true,overprint:true});
+            return await Promise.all(['Cyan','Magenta','Yellow','Black'].map(async name=>{
+                const plate=await viewer.parseSpotColorTIFF(result.channels[name],name);
+                return plate.data[Math.floor(plate.height/2)*plate.width+Math.floor(plate.width/2)];
+            }));
+        } finally {viewer.workerPool=saved;}
+    });
+    assert.deepEqual(fallbackInk,[0,0,0,255],'fallback worker must receive the same corrected PDF');
+    await loadDocument({name:'knockout-on-cyan.pdf',mimeType:'application/pdf',buffer:knockoutGroupPDF({background:true})});
+    assert.deepEqual((await sample()).ink,{cyan:0,magenta:0,yellow:0,black:255},'isolated group must still knock out the external cyan backdrop');
+    assert.equal(await page.evaluate(()=>{
+        const im=viewer.scrollManager.pageElements.get(1).pageData.imageData;
+        return im.channels.cyan[5*im.width+5];
+    }),255,'real cyan outside the group must survive');
+    console.log('PASS isolated knockout: source bug reproduced, corrected K-only plates, scan, export, warnings, worker fallback, original/shared resources intact');
+
+    if(process.env.OVERPRINT_REGRESSION_PDF) {
+        await loadDocument(process.env.OVERPRINT_REGRESSION_PDF);
+        const real=await page.evaluate(async()=>{
+            const a=(await viewer.renderPageData(2,{excludeAnnots:true,overprint:true})).imageData;
+            const b=(await viewer.renderPageData(2,{excludeAnnots:true,overprint:false})).imageData;
+            const channels={};
+            for(const name of ['cyan','magenta','yellow','black']) {
+                let changed=0,regionMax=0;
+                for(let i=0;i<a.width*a.height;i++) {
+                    if(a.channels[name][i]!==b.channels[name][i]) changed++;
+                    const x=i%a.width,y=Math.floor(i/a.width);
+                    if(x>=1200&&x<1410&&y>=570&&y<714) regionMax=Math.max(regionMax,a.channels[name][i]);
+                }
+                channels[name]={changed,regionMax};
+            }
+            return channels;
+        });
+        for(const name of ['cyan','magenta','yellow']) assert.deepEqual(real[name],{changed:0,regionMax:0});
+        assert.deepEqual(real.black,{changed:0,regionMax:255});
+        console.log('PASS supplied 0916 PDF page 2: zero CMY in film graphics and identical ON/OFF plates');
+    }
 
     const cover=path.join(root,'higs_cover.pdf');
     if(await fs.stat(cover).catch(()=>null)) {

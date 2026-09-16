@@ -6,6 +6,7 @@ import { VirtualScrollManager } from './VirtualScrollManager.js';
 import { getSpotColorRGB, registerSpotColorRGB } from './constants.js';
 import { renderBookMockup } from './BookMockupGenerator.js';
 import { cmykToRGB255, warmUpColorProfile } from './color-profile.js';
+import { preparePDFForRendering } from './pdf-render-preparation.js';
 
 export class PDFSeparationViewer {
     constructor() {
@@ -698,17 +699,26 @@ export class PDFSeparationViewer {
             this.ghostscript = {
                 loadPDF: async (data) => {
                     try {
-                        this.currentPDFData = new Uint8Array(data);
+                        const source = this.currentPDFData = new Uint8Array(data);
+                        this.renderPDFData = source;
+                        let prepared;
+                        try {
+                            prepared = await preparePDFForRendering(source);
+                        } catch (error) {
+                            console.warn('렌더링용 PDF 사본 준비 실패, 원본 사용:', error.message);
+                        }
+                        if (this.currentPDFData !== source) return {cancelled:true};
+                        this.renderPDFData = prepared?.bytes || source;
 
                         // 워커들에 문서 바이트를 1회만 전송해 캐시 — 이후 작업 메시지는
                         // pdfData를 싣지 않아 호출당 수 MB 복제가 사라진다
-                        this.worker.postMessage({ type: 'setPDF', data: { pdfData: this.currentPDFData } });
+                        this.worker.postMessage({ type: 'setPDF', data: { pdfData: this.renderPDFData } });
                         if (this.workerPool) {
-                            this.workerPool.setPDFData(this.currentPDFData);
+                            this.workerPool.setPDFData(this.renderPDFData);
                         }
 
                         // 페이지 수 조회
-                        const pageCount = await this.ghostscript.getPageCount();
+                        const pageCount = prepared?.pageCount ?? await this.ghostscript.getPageCount();
 
                         return { success: true, pages: pageCount };
                     } catch (error) {
@@ -1295,6 +1305,7 @@ export class PDFSeparationViewer {
             this.showLoading('PDF 로딩 중...', '33%');
 
             const result = await this.ghostscript.loadPDF(data);
+            if (result.cancelled) return;
             if (result.success) {
                 this.currentPDF = data;
                 this.resetCoverCalculation();
@@ -1397,7 +1408,7 @@ export class PDFSeparationViewer {
 
         // WorkerPool에 PDF 데이터 설정
         if (this.workerPool && this.currentPDFData) {
-            this.workerPool.setPDFData(this.currentPDFData);
+            this.workerPool.setPDFData(this.renderPDFData || this.currentPDFData);
             // 이전 스캔이 큐에 남겨둔 청크를 비운다.
             // 그대로 두면 워커가 계속 옛 설정으로 렌더하느라 새 스캔의 첫 결과가
             // 한참 뒤에야 도착해서 진행률이 0%에 멈춘 것처럼 보인다.
