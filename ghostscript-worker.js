@@ -1,5 +1,6 @@
 // Ghostscript WebWorker
 import Module from './gs.mjs';
+import { overprintArgs } from './render-settings.js';
 
 // gs.wasm(16MB)을 매 호출마다 fetch+컴파일하면 페이지당 수백 ms~수 초를 낭비하므로
 // 워커당 1회만 컴파일해서 캐시하고, 이후에는 인스턴스화만 수행
@@ -327,9 +328,7 @@ function buildTiffCMYKArgs(options, width, height, pageNum = 1) {
 
 
     // 오버프린트 지원
-    if (options.overprint) {
-        args.push('-dOverprint=/enable');
-    }
+    args.push(...overprintArgs(options.overprint));
 
     args.push('input.pdf');
     return args;
@@ -364,9 +363,7 @@ function buildGhostscriptArgs(options, width, height, pageNum = 1, hasCmykProfil
 
 
     // 오버프린트 시뮬레이션
-    if (options.overprint) {
-        args.push('-dOverprint=/enable');
-    }
+    args.push(...overprintArgs(options.overprint, true));
 
     args.push('input.pdf');
     return args;
@@ -388,7 +385,7 @@ self.addEventListener('message', async function (e) {
 
 
             try {
-                const { pageNum, dpi, excludeAnnots } = data;
+                const { pageNum, dpi, excludeAnnots, overprint } = data;
                 const pdfData = resolvePdfData(data.pdfData);
                 const gsOutput = [];
                 const moduleInstance = await Module(createModuleConfig({
@@ -412,6 +409,7 @@ self.addEventListener('message', async function (e) {
                     `-dLastPage=${pageNum || 1}`,
                     '-dMaxSpots=10',
                     ...annotArgs(excludeAnnots),
+                    ...overprintArgs(overprint),
                     '-sOutputFile=plate%d.tif',
                     'input.pdf'
                 ];
@@ -695,7 +693,7 @@ self.addEventListener('message', async function (e) {
         } else if (type === 'renderPagesChunk') {
             // 페이지 범위를 GS 1회 실행으로 렌더링 (tiff32nc CMYK).
             // 페이지마다 모듈 초기화 + PDF 파싱을 반복하지 않으므로 훨씬 빠름.
-            const { firstPage, lastPage, dpi, excludeAnnots } = data;
+            const { firstPage, lastPage, dpi, excludeAnnots, overprint } = data;
             const pdfData = resolvePdfData(data.pdfData);
             try {
                 const moduleInstance = await Module(createModuleConfig({ noExitRuntime: false }));
@@ -710,6 +708,7 @@ self.addEventListener('message', async function (e) {
                     `-dFirstPage=${firstPage}`,
                     `-dLastPage=${lastPage}`,
                     ...annotArgs(excludeAnnots),
+                    ...overprintArgs(overprint),
                     '-sOutputFile=scan_%d.tif',
                     'input.pdf'
                 ];
@@ -834,7 +833,7 @@ self.addEventListener('message', async function (e) {
         } else if (type === 'processTiffsepChunk') {
             // 페이지 범위를 tiffsep으로 1회 실행 — 별색 분판 교정용.
             // plateN(색상명).tif 형식으로 페이지별 분판 파일이 생성됨 (N = 범위 내 순번).
-            const { firstPage, lastPage, dpi, excludeAnnots } = data;
+            const { firstPage, lastPage, dpi, excludeAnnots, overprint } = data;
             const pdfData = resolvePdfData(data.pdfData);
             try {
                 const tiffsepDpi = Math.min(dpi || 72, 300);
@@ -851,6 +850,7 @@ self.addEventListener('message', async function (e) {
                     `-dLastPage=${lastPage}`,
                     '-dMaxSpots=10',
                     ...annotArgs(excludeAnnots),
+                    ...overprintArgs(overprint),
                     '-sOutputFile=plate%d.tif',
                     'input.pdf'
                 ];

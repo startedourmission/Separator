@@ -1,5 +1,4 @@
-import { getSpotColorRGB } from './constants.js';
-import { getColorTables } from './color-profile.js';
+import { compositeSeparations } from './separation-renderer.js';
 
 // Virtual Scroll Manager - 스크롤 기반 PDF 뷰어
 export class VirtualScrollManager {
@@ -218,8 +217,11 @@ export class VirtualScrollManager {
     // 페이지 렌더링
     async renderPage(pageNum) {
         const pageEl = this.pageElements.get(pageNum);
-        if (!pageEl || pageEl.status === 'rendered') return;
+        if (!pageEl || pageEl.status === 'rendered' || pageEl.status === 'loading') return;
 
+        const renderToken = {};
+        pageEl.renderToken = renderToken;
+        const generation = this.viewer.renderGeneration;
         pageEl.status = 'loading';
 
         try {
@@ -242,6 +244,9 @@ export class VirtualScrollManager {
 
                 // 렌더링 데이터 가져오기
                 pageData = await this.viewer.renderPageData(pageNum);
+                if (pageEl.renderToken !== renderToken ||
+                    this.pageElements.get(pageNum) !== pageEl ||
+                    generation !== this.viewer.renderGeneration) return;
                 this.viewer.addToCache(pageNum, pageData);
             }
 
@@ -272,7 +277,7 @@ export class VirtualScrollManager {
 
         } catch (error) {
             console.error(`페이지 ${pageNum} 렌더링 실패:`, error);
-            pageEl.status = 'placeholder';
+            if (pageEl.renderToken === renderToken) pageEl.status = 'placeholder';
         }
     }
 
@@ -334,101 +339,7 @@ export class VirtualScrollManager {
         }
         const tempImageData = this._tempImageData;
 
-        const { cyan, magenta, yellow, black } = imageData.channels;
-        const pixels = tempImageData.data;
-
-        // 분판 플래그 캐싱 (매 픽셀 property 접근 방지)
-        const showC = separations.cyan;
-        const showM = separations.magenta;
-        const showY = separations.yellow;
-        const showK = separations.black;
-
-        // 별색 데이터 준비 (RGB 컴포넌트를 플랫 배열로 사전 추출)
-        const hasSpotData = Object.keys(spotColorData).length > 0;
-        const activeSpots = [];
-        if (hasSpotData) {
-            for (const [colorName, colorData] of Object.entries(spotColorData)) {
-                if (separations.spotColors && separations.spotColors[colorName]) {
-                    const rgb = getSpotColorRGB(colorName);
-                    // CMY 기여분도 사전 계산
-                    activeSpots.push({
-                        data: colorData,
-                        r: rgb.r, g: rgb.g, b: rgb.b,
-                        cContrib: (255 - rgb.r) / 255,
-                        mContrib: (255 - rgb.g) / 255,
-                        yContrib: (255 - rgb.b) / 255
-                    });
-                }
-            }
-        }
-
-        const totalPixels = srcWidth * srcHeight;
-        const hasActiveSpots = hasSpotData && activeSpots.length > 0;
-
-        // Japan Color 변환 테이블 — 픽셀당 함수 호출을 피하려고 루프에 인라인한다
-        const { cmy, kCurve, idxC, idxCT, idxM, idxY, STRIDE_C } = getColorTables();
-
-        for (let i = 0; i < totalPixels; i++) {
-            let c = showC ? cyan[i] : 0;
-            let m = showM ? magenta[i] : 0;
-            let y = showY ? yellow[i] : 0;
-            let k = showK ? black[i] : 0;
-
-            const idx = i * 4;
-
-            if (hasActiveSpots) {
-                // CMY에서 별색 기여분 제거
-                for (let s = 0; s < activeSpots.length; s++) {
-                    const spot = activeSpots[s];
-                    const sv = spot.data[i];
-                    if (sv > 0) {
-                        c = c - spot.cContrib * sv > 0 ? c - spot.cContrib * sv : 0;
-                        m = m - spot.mContrib * sv > 0 ? m - spot.mContrib * sv : 0;
-                        y = y - spot.yContrib * sv > 0 ? y - spot.yContrib * sv : 0;
-                    }
-                }
-
-                // Japan Color 2001 Coated 기준 변환 (메인 뷰와 동일).
-                // 별색 감산 결과는 소수라 정수로 내림 — 인덱스 표는 0-255 정수만 받는다.
-                const ci = c | 0, mi = m | 0, yi = y | 0;
-                const lo = idxC[ci] + idxM[mi] + idxY[yi];
-                const hi = lo + STRIDE_C;
-                const ct = idxCT[ci];
-                const ko = k * 3;
-
-                let r = (cmy[lo] + (cmy[hi] - cmy[lo]) * ct) * kCurve[ko];
-                let g = (cmy[lo + 1] + (cmy[hi + 1] - cmy[lo + 1]) * ct) * kCurve[ko + 1];
-                let b = (cmy[lo + 2] + (cmy[hi + 2] - cmy[lo + 2]) * ct) * kCurve[ko + 2];
-
-                // 별색 RGB 블렌딩 (같은 순회 데이터 재사용)
-                for (let s = 0; s < activeSpots.length; s++) {
-                    const spot = activeSpots[s];
-                    const sv = spot.data[i];
-                    if (sv > 0) {
-                        const sk = sv / 255;
-                        const isk = 1 - sk;
-                        r = r * isk + spot.r * sk;
-                        g = g * isk + spot.g * sk;
-                        b = b * isk + spot.b * sk;
-                    }
-                }
-
-                pixels[idx] = r > 255 ? 255 : r < 0 ? 0 : r;
-                pixels[idx + 1] = g > 255 ? 255 : g < 0 ? 0 : g;
-                pixels[idx + 2] = b > 255 ? 255 : b < 0 ? 0 : b;
-                pixels[idx + 3] = 255;
-            } else {
-                const lo = idxC[c] + idxM[m] + idxY[y];
-                const hi = lo + STRIDE_C;
-                const ct = idxCT[c];
-                const ko = k * 3;
-
-                pixels[idx] = (cmy[lo] + (cmy[hi] - cmy[lo]) * ct) * kCurve[ko];
-                pixels[idx + 1] = (cmy[lo + 1] + (cmy[hi + 1] - cmy[lo + 1]) * ct) * kCurve[ko + 1];
-                pixels[idx + 2] = (cmy[lo + 2] + (cmy[hi + 2] - cmy[lo + 2]) * ct) * kCurve[ko + 2];
-                pixels[idx + 3] = 255;
-            }
-        }
+        compositeSeparations(imageData, spotColorData, separations, tempImageData.data);
 
         // 크기가 같으면 임시 캔버스를 거치지 않고 바로 출력 (전체 픽셀 복사 1회 절약)
         if (dstWidth === srcWidth && dstHeight === srcHeight) {
@@ -675,14 +586,26 @@ export class VirtualScrollManager {
 
     // 모든 보이는 페이지 리렌더링 (분판 변경 또는 화질 변경 시)
     updateAllVisiblePages(forceGsRender = false) {
+        if (forceGsRender) {
+            this.deferredComposites.clear();
+            this.pageElements.forEach((el, pageNum) => {
+                if (el.status !== 'placeholder') {
+                    // 설정 전환 전에 시작된 렌더가 끝나도 새 화면/캐시를 덮지 못하게 한다.
+                    el.renderToken = null;
+                    el.status = 'placeholder';
+                    el.canvas = null;
+                    el.pageData = null;
+                    el.wrapper.innerHTML = '';
+                    el.wrapper.classList.add('loading');
+                    this.renderQueue.add(pageNum);
+                }
+            });
+            this.processRenderQueue();
+            return;
+        }
         this.pageElements.forEach((el, pageNum) => {
             if (el.status === 'rendered') {
-                if (forceGsRender) {
-                    // Ghostscript 재렌더링 필요 시 상태 초기화 후 큐에 추가
-                    el.status = 'placeholder';
-                    el.wrapper.classList.add('loading');
-                    this.queuePageRender(pageNum);
-                } else if (el.canvas && el.pageData) {
+                if (el.canvas && el.pageData) {
                     // 분판 변경: 화면에 보이는 페이지만 즉시 재합성.
                     // 버퍼에만 있는 페이지까지 동기로 돌리면 페이지당 수백만 픽셀 연산이
                     // 겹쳐 토글이 수 초씩 걸리므로, 화면 밖 페이지는 유휴 시간에 처리.

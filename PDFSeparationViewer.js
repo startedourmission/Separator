@@ -1,3 +1,5 @@
+import { compositeSeparations } from './separation-renderer.js';
+import { overprintArgs } from './render-settings.js';
 import { WorkerPool } from './worker-pool.js';
 import { VirtualScrollManager } from './VirtualScrollManager.js';
 import { getSpotColorRGB, hasSpotColorRGB, registerSpotColorRGB } from './constants.js';
@@ -32,12 +34,10 @@ export class PDFSeparationViewer {
         // 재단선 제외와 달리 Ghostscript 렌더 단계에서 걸러야 하므로 켜고 끌 때 재렌더가 필요함.
         this.excludeAnnotations = true;
 
-        // 주석 제외 on/off 각각의 측정 결과를 따로 보관해서 토글 시 재사용.
-        // 저장하는 값은 페이지당 카운트 숫자 몇 개뿐(비트맵 아님)이라 두 벌을 들고 있어도 부담 없음.
-        this.scanVariants = {
-            annots: { channel: {}, spot: {}, scanned: false },   // 주석 포함
-            noAnnots: { channel: {}, spot: {}, scanned: false }  // 주석 제외
-        };
+        this.overprintPreview = true;
+        // 주석 × 오버프린트 조합별 측정값. 비트맵은 현재 설정만 보관한다.
+        this.scanVariants = {};
+        this.renderGeneration = 0;
 
         // 스캔 세대 번호 — 스캔 중 설정이 바뀌면 증가시켜 이전 스캔을 무효화
         this.scanGeneration = 0;
@@ -141,6 +141,7 @@ export class PDFSeparationViewer {
         };
         this.excludeTrimCheckbox = document.getElementById('exclude-trim-area');
         this.excludeAnnotationsCheckbox = document.getElementById('exclude-annotations');
+        this.overprintCheckbox = document.getElementById('overprint-preview');
         this.tacValueElement = document.getElementById('tac-value');
         this.cursorCoordsElement = document.getElementById('cursor-coords');
 
@@ -355,35 +356,13 @@ export class PDFSeparationViewer {
             });
         }
 
-        // 주석 제외 토글 — 주석 제거는 Ghostscript 렌더 단계에서만 가능해서 재렌더가 필요하지만,
-        // on/off 각각의 측정 결과를 따로 들고 있으므로 한 번 스캔한 쪽으로 되돌아올 때는 즉시 반영된다.
-        if (this.excludeAnnotationsCheckbox) {
-            this.excludeAnnotationsCheckbox.addEventListener('change', (e) => {
-                this.excludeAnnotations = e.target.checked;
-
-                if (!this.currentPDFData) return;
-
-                // 활성 슬롯 전환 — 이전 설정의 측정값은 버리지 않고 그대로 보존
-                const variant = this.switchScanVariant();
-
-                // 화면 렌더는 주석 포함 여부에 따라 픽셀이 달라지므로 항상 다시 그린다
-                this.clearPageCache();
-                if (this.scrollManager) {
-                    this.scrollManager.updateAllVisiblePages(true); // Ghostscript 재렌더링 강제
-                }
-
-                if (variant.scanned) {
-                    // 이미 측정해둔 변형 — 재스캔 없이 수치만 즉시 갱신
-                    this.updateChannelRatios(this.calculateTotalChannelRatios());
-                    this.updateSpotColorRatios(this.calculateSpotColorRatios());
-                } else {
-                    // 아직 측정 안 된 변형 — 재스캔.
-                    // 진행률 바를 누른 즉시 띄워서 "아무 일도 안 일어나다가 결과가 툭 튀어나오는" 느낌을 없앤다.
-                    // (이전 스캔이 부분적으로 남아 있으면 그 진행분부터 이어서 표시됨)
-                    this.updateChannelRatios(null);
-                    this.updateScanProgress(0, this.totalPages);
-                    this.scanAllPagesInBackground();
-                }
+        for (const [checkbox, setting] of [
+            [this.excludeAnnotationsCheckbox, 'excludeAnnotations'],
+            [this.overprintCheckbox, 'overprintPreview']
+        ]) {
+            checkbox?.addEventListener('change', (e) => {
+                this[setting] = e.target.checked;
+                this.refreshRenderSettings();
             });
         }
 
@@ -409,7 +388,7 @@ export class PDFSeparationViewer {
                 this.updatePageCacheSize(); // DPI에 맞춰 캐시 페이지 수 재계산
 
                 // 설정 변경 시 캐시 비우고 재렌더링
-                this.pageCache.clear();
+                this.clearPageCache();
                 if (this.scrollManager) {
                     this.scrollManager.updateAllVisiblePages(true); // Ghostscript 재렌더링 강제
                 }
@@ -788,7 +767,7 @@ export class PDFSeparationViewer {
                         throw new Error('PDF가 로딩되지 않았습니다');
                     }
 
-                    const payloadOptions = { ...options, pageNum, excludeAnnots: this.excludeAnnotations };
+                    const payloadOptions = { ...this.getRenderSettings(), ...options, pageNum };
                     const taskData = { options: payloadOptions, pageNum };
 
                     // 워커 풀에 우선순위로 배정 — 풀이 비면 최대 3페이지 동시 렌더.
@@ -877,7 +856,7 @@ export class PDFSeparationViewer {
                     });
                 },
 
-                processTiffsep: async (pdfData, pageNum, dpi) => {
+                processTiffsep: async (pdfData, pageNum, dpi, settings = this.getRenderSettings()) => {
                     const dataToUse = pdfData || this.currentPDFData;
                     if (!dataToUse) {
                         throw new Error('PDF 데이터가 없습니다');
@@ -889,7 +868,7 @@ export class PDFSeparationViewer {
                         pdfData: explicitPdf,
                         pageNum: pageNum || 1,
                         dpi: dpi || 72,
-                        excludeAnnots: this.excludeAnnotations
+                        ...settings
                     };
 
                     // 워커 풀에 우선순위로 배정 (별색 문서의 열람 렌더 병렬화)
@@ -1130,10 +1109,7 @@ export class PDFSeparationViewer {
         }
 
         // 오버프린트 시뮬레이션
-        if (options.overprint) {
-            args.push('-dOverprint=true');
-            args.push('-dOverprintMode=1');
-        }
+        args.push(...overprintArgs(options.overprint ?? this.overprintPreview, true));
 
         // PDF 파일 입력
         args.push('input.pdf');
@@ -1368,11 +1344,17 @@ export class PDFSeparationViewer {
     }
 
     async scanAllPagesInBackground() {
+        const scanToken = ++this.scanGeneration;
+        const isStale = () => this.scanGeneration !== scanToken;
+        const scanSettings = this.getRenderSettings();
+        const targetVariant = this.currentVariant();
         // 별색 프로브가 아직 진행 중이면 완료를 기다린다 — 별색 유무가 스캔 방식을 결정하므로
         // 프로브 전에 스캔하면 별색 문서를 CMYK 전용으로 잘못 측정해 캐시할 수 있다.
         if (this.spotProbePromise) {
             await this.spotProbePromise.catch(() => { });
         }
+
+        if (isStale()) return;
 
         // 별색 문서는 처음부터 tiffsep으로 스캔 (별색이 분리된 깨끗한 CMYK + 별색 채널을 한 번에 수집).
         // 예전처럼 tiff32nc로 먼저 스캔한 뒤 tiffsep으로 재교정하면 렌더링이 2배로 들고,
@@ -1384,10 +1366,7 @@ export class PDFSeparationViewer {
         // 이 스캔이 어떤 주석 설정으로 도는지 시작 시점에 고정.
         // 스캔 도중 사용자가 토글해도 이미 발주된 렌더 결과는 원래 변형에 들어가야 하고,
         // 늦게 도착한 결과가 다른 변형을 오염시키면 안 된다.
-        const scanExcludeAnnots = this.excludeAnnotations;
-        const targetVariant = this.currentVariant();
-        const scanToken = ++this.scanGeneration;
-        const isStale = () => this.scanGeneration !== scanToken;
+        const scanExcludeAnnots = scanSettings.excludeAnnots;
 
         // WorkerPool에 PDF 데이터 설정
         if (this.workerPool && this.currentPDFData) {
@@ -1471,8 +1450,8 @@ export class PDFSeparationViewer {
                         const { first, last } = takeNearestChunk();
                         try {
                             const res = await (hasSpots
-                                ? this.workerPool.processTiffsepChunk(first, last, scanDpi, onPage, scanExcludeAnnots)
-                                : this.workerPool.renderPagesChunk(first, last, scanDpi, onPage, scanExcludeAnnots));
+                                ? this.workerPool.processTiffsepChunk(first, last, scanDpi, onPage, scanExcludeAnnots, scanSettings.overprint)
+                                : this.workerPool.renderPagesChunk(first, last, scanDpi, onPage, scanExcludeAnnots, scanSettings.overprint));
                             if (res && res.cancelled) break; // 새 스캔이 시작돼 취소됨
                         } catch (err) {
                             console.error(`청크 스캔 실패 (${first}-${last}쪽):`, err);
@@ -1488,10 +1467,10 @@ export class PDFSeparationViewer {
                 await Promise.all(pagePromises);
             } else {
                 // Fallback: 단일 워커 순차 처리
-                for (let pageNum = 1; pageNum <= this.totalPages; pageNum++) {
+                for (let pageNum = 1; pageNum <= this.totalPages && !isStale(); pageNum++) {
                     try {
                         if (hasSpots) {
-                            const result = await this.ghostscript.processTiffsep(this.currentPDFData, pageNum, scanDpi);
+                            const result = await this.ghostscript.processTiffsep(this.currentPDFData, pageNum, scanDpi, scanSettings);
                             await this.ingestTiffsepPageData({
                                 success: true,
                                 pageNum,
@@ -1500,7 +1479,7 @@ export class PDFSeparationViewer {
                             }, targetVariant);
                         } else {
                             const imageData = await this.ghostscript.renderPage(pageNum, {
-                                useCMYK: true, dpi: scanDpi, pageNum,
+                                ...scanSettings, useCMYK: true, dpi: scanDpi, pageNum,
                                 width: 800, height: 600, separations: []
                             });
                             if (imageData && imageData.type === 'cmyk') {
@@ -1549,7 +1528,8 @@ export class PDFSeparationViewer {
     // 스캔 데이터(72dpi)를 축소해 페이지 미리보기로 보관.
     // 먼 페이지로 점프 시 GS 렌더를 기다리는 동안 즉시 표시하는 용도 —
     // renderToCanvas가 그대로 그릴 수 있도록 {imageData, spotColorData} 형태로 저장한다.
-    storePagePreview(pageNum, cmykData, spotColorData = null) {
+    storePagePreview(pageNum, cmykData, spotColorData = null, variant = this.currentVariant()) {
+        if (variant !== this.currentVariant()) return;
         if (!cmykData || cmykData.type !== 'cmyk' || !cmykData.width || !cmykData.height) return;
 
         // 대형 문서는 더 작게 (544p × 144px ≈ 70MB, 800p 초과 시 96px ≈ 절반)
@@ -1604,7 +1584,7 @@ export class PDFSeparationViewer {
         const imageData = await this.convertTIFFToCMYK(page.data);
         if (imageData && imageData.type === 'cmyk') {
             this.accumulateChannelData(imageData, page.pageNum, 72, variant);
-            this.storePagePreview(page.pageNum, imageData);
+            this.storePagePreview(page.pageNum, imageData, null, variant || this.currentVariant());
         }
     }
 
@@ -1655,7 +1635,7 @@ export class PDFSeparationViewer {
             }
         }
         this.accumulateSpotColorData(spotColorData, pageNum, cleanCmyk.width, cleanCmyk.height, dpi, variant);
-        this.storePagePreview(pageNum, cleanCmyk, spotColorData);
+        this.storePagePreview(pageNum, cleanCmyk, spotColorData, variant || this.currentVariant());
     }
 
 
@@ -2174,6 +2154,7 @@ export class PDFSeparationViewer {
         try {
             // 페이지 렌더링 및 캐싱
             const pageData = await this.renderPageData(this.currentPage);
+            if (!this.isCurrentPageData(pageData)) return;
 
             this.baseImageData = pageData.imageData;
             this.baseWidth = pageData.baseWidth;
@@ -2198,6 +2179,9 @@ export class PDFSeparationViewer {
 
     // 페이지 데이터 렌더링 (캐시/프리로드용)
     async renderPageData(pageNum) {
+        const renderGeneration = this.renderGeneration;
+        const renderSettings = this.getRenderSettings();
+        const renderVariant = this.currentVariant();
         // 이미지 모드인 경우
         if (this.currentFileType === 'image' && this.imgObject) {
             // 컨테이너 크기 확인
@@ -2222,7 +2206,7 @@ export class PDFSeparationViewer {
             ctx.drawImage(this.imgObject, 0, 0, baseWidth, baseHeight);
             const imageData = ctx.getImageData(0, 0, baseWidth, baseHeight);
 
-            return { imageData, baseWidth, baseHeight, spotColorData: {} };
+            return { imageData, baseWidth, baseHeight, spotColorData: {}, renderGeneration };
         }
 
         // PDF 페이지의 실제 크기 가져오기 (포인트 단위)
@@ -2263,11 +2247,11 @@ export class PDFSeparationViewer {
             try {
                 // 렌더 시작 시점의 주석 설정에 해당하는 변형을 고정.
                 // 렌더 도중 토글되면 이 결과는 원래 변형에 들어가야 한다.
-                const renderVariant = this.currentVariant();
                 const result = await this.ghostscript.processTiffsep(
                     this.currentPDFData,
                     pageNum,
-                    this.renderDPI
+                    this.renderDPI,
+                    renderSettings
                 );
 
                 if (result && result.channels && Object.keys(result.channels).length > 0) {
@@ -2307,8 +2291,8 @@ export class PDFSeparationViewer {
 
                     // 스캔이 아직 안 지나간 페이지면 이 고해상도 렌더로 미리보기 생성
                     // (다음에 다시 방문할 때 캐시가 밀려났어도 즉시 표시 가능)
-                    if (!this.pagePreviews.has(pageNum)) {
-                        this.storePagePreview(pageNum, imageData, spotColorData);
+                    if (renderGeneration === this.renderGeneration && !this.pagePreviews.has(pageNum)) {
+                        this.storePagePreview(pageNum, imageData, spotColorData, renderVariant);
                     }
 
                     if (!alreadyMeasured) {
@@ -2337,7 +2321,7 @@ export class PDFSeparationViewer {
         }
 
         if (!tiffsepSuccessful) {
-            const renderOptions = this.buildRenderOptions();
+            const renderOptions = { ...this.buildRenderOptions(), ...renderSettings };
             renderOptions.width = renderWidth;
             renderOptions.height = renderHeight;
             renderOptions.pdfWidth = pageSize?.width || renderWidth;
@@ -2349,16 +2333,21 @@ export class PDFSeparationViewer {
             imageData = await this.ghostscript.renderPage(pageNum, renderOptions);
 
             // 스캔이 아직 안 지나간 페이지면 이 렌더로 미리보기 생성
-            if (imageData && imageData.type === 'cmyk' && !this.pagePreviews.has(pageNum)) {
-                this.storePagePreview(pageNum, imageData);
+            if (renderGeneration === this.renderGeneration && imageData && imageData.type === 'cmyk' && !this.pagePreviews.has(pageNum)) {
+                this.storePagePreview(pageNum, imageData, null, renderVariant);
             }
         }
 
-        return { imageData, baseWidth, baseHeight, spotColorData };
+        return { imageData, baseWidth, baseHeight, spotColorData, renderGeneration };
     }
 
     // 캐시에 페이지 추가
+    isCurrentPageData(pageData) {
+        return pageData?.renderGeneration === this.renderGeneration;
+    }
+
     addToCache(pageNum, pageData) {
+        if (!this.isCurrentPageData(pageData)) return;
         // 캐시가 가득 차면 가장 오래된 항목 제거
         if (this.pageCache.size >= this.pageCacheSize) {
             const firstKey = this.pageCache.keys().next().value;
@@ -2404,6 +2393,7 @@ export class PDFSeparationViewer {
 
     // PDF 로드 시 캐시 클리어
     clearPageCache() {
+        this.renderGeneration++;
         this.pageCache.clear();
         this.preloadingPages.clear();
     }
@@ -2968,6 +2958,7 @@ export class PDFSeparationViewer {
 
     buildRenderOptions() {
         const options = {
+            ...this.getRenderSettings(),
             width: 800,
             height: 600,
             separations: []
@@ -3055,74 +3046,9 @@ export class PDFSeparationViewer {
 
 
     renderWithSpotColors(cmykData, targetWidth, targetHeight) {
-        const { width, height, channels } = cmykData;
-        const { cyan, magenta, yellow, black } = channels;
-
-        // 현재 선택된 분판 옵션 가져오기
-        const renderOptions = this.buildRenderOptions();
-        const separations = renderOptions.separations || [];
-
-        // 선택된 별색 필터링
-        const selectedSpotColors = this.spotColors.filter(colorName => {
-            const checkbox = this.spotColorCheckboxes[colorName];
-            return checkbox && checkbox.checked;
-        });
-
-
-        // RGB 이미지로 변환 (CMYK + 별색 합성)
-        const pixelCount = width * height;
-        const rgbData = new Uint8ClampedArray(pixelCount * 4);
-
-        // 채널 포함 여부와 별색 RGB를 루프 밖에서 미리 확정
-        const useC = separations.includes('cyan');
-        const useM = separations.includes('magenta');
-        const useY = separations.includes('yellow');
-        const useK = separations.includes('black');
-
-        const spotLayers = selectedSpotColors
-            .map(name => ({ data: this.spotColorData[name], rgb: getSpotColorRGB(name) }))
-            .filter(layer => layer.data);
-
-        // 렌더 루프에 인라인 (renderCMYKWithSeparation과 동일한 이유)
-        const { cmy, kCurve, idxC, idxCT, idxM, idxY, STRIDE_C } = getColorTables();
-
-        for (let i = 0; i < pixelCount; i++) {
-            // 1. Japan Color 기준 CMYK → sRGB (선택된 채널만)
-            const c = useC ? cyan[i] : 0;
-            const m = useM ? magenta[i] : 0;
-            const y = useY ? yellow[i] : 0;
-            const k = useK ? black[i] : 0;
-
-            const lo = idxC[c] + idxM[m] + idxY[y];
-            const hi = lo + STRIDE_C;
-            const ct = idxCT[c];
-            const ko = k * 3;
-
-            let r = (cmy[lo] + (cmy[hi] - cmy[lo]) * ct) * kCurve[ko];
-            let g = (cmy[lo + 1] + (cmy[hi + 1] - cmy[lo + 1]) * ct) * kCurve[ko + 1];
-            let b = (cmy[lo + 2] + (cmy[hi + 2] - cmy[lo + 2]) * ct) * kCurve[ko + 2];
-
-            // 2. 각 별색 적용 (곱셈 블렌딩으로 오버프린트 효과 시뮬레이션)
-            for (let s = 0; s < spotLayers.length; s++) {
-                // 별색의 그레이스케일 강도 (0-255) → 0-1 정규화
-                const intensity = spotLayers[s].data[i] / 255;
-
-                if (intensity > 0) {
-                    const spotRGB = spotLayers[s].rgb;
-
-                    // 곱셈 블렌딩: 별색이 있는 부분은 해당 색상으로 어둡게
-                    // intensity가 1이면 완전히 별색, 0이면 영향 없음
-                    r *= (1 - intensity) + intensity * (spotRGB.r / 255);
-                    g *= (1 - intensity) + intensity * (spotRGB.g / 255);
-                    b *= (1 - intensity) + intensity * (spotRGB.b / 255);
-                }
-            }
-
-            rgbData[i * 4 + 0] = r; // R (Uint8ClampedArray가 반올림·클램프 처리)
-            rgbData[i * 4 + 1] = g; // G
-            rgbData[i * 4 + 2] = b; // B
-            rgbData[i * 4 + 3] = 255; // Alpha
-        }
+        const { width, height } = cmykData;
+        const rgbData = new Uint8ClampedArray(width * height * 4);
+        compositeSeparations(cmykData, this.spotColorData, this.getCurrentSeparations(), rgbData);
 
         // ImageData 생성
         const imageData = new ImageData(rgbData, width, height);
@@ -3314,32 +3240,53 @@ export class PDFSeparationViewer {
         return counts;
     }
 
-    // 현재 주석 설정에 해당하는 변형 슬롯
+    getRenderSettings() {
+        return { excludeAnnots: this.excludeAnnotations, overprint: this.overprintPreview };
+    }
+
     currentVariant() {
-        return this.excludeAnnotations ? this.scanVariants.noAnnots : this.scanVariants.annots;
+        const key = `${this.excludeAnnotations ? 'noAnnots' : 'annots'}:${this.overprintPreview ? 'overprint' : 'knockout'}`;
+        return this.scanVariants[key] ||= { channel: {}, spot: {}, scanned: false };
     }
 
-    // 모든 변형의 측정 결과를 버림 (새 문서 로딩 시)
     resetScanVariants() {
-        this.scanVariants = {
-            annots: { channel: {}, spot: {}, scanned: false },
-            noAnnots: { channel: {}, spot: {}, scanned: false }
-        };
-        this.pageChannelData = this.currentVariant().channel;
-        this.pageSpotColorData = this.currentVariant().spot;
-        // 미리보기도 문서 단위 데이터 — 함께 초기화
-        // (주석 토글은 switchScanVariant만 타므로 미리보기가 유지되고, 재스캔이 서서히 갱신)
-        if (this.pagePreviews) this.pagePreviews.clear();
+        this.scanGeneration++;
+        this.scanVariants = {};
+        this.switchScanVariant();
+        this.pagePreviews?.clear();
     }
 
-    // 활성 변형을 현재 주석 설정에 맞게 전환.
-    // pageChannelData/pageSpotColorData 를 해당 슬롯의 객체로 갈아끼우기만 하므로
-    // 이후 measure/calculate 코드는 변형의 존재를 몰라도 그대로 동작한다.
     switchScanVariant() {
         const variant = this.currentVariant();
         this.pageChannelData = variant.channel;
         this.pageSpotColorData = variant.spot;
         return variant;
+    }
+
+    refreshRenderSettings() {
+        if (!this.currentPDFData) return;
+        // 이미 측정한 설정으로 돌아가더라도 이전 스캔/렌더의 늦은 응답은 무효화한다.
+        this.scanGeneration++;
+        clearTimeout(this.scanHideTimer);
+        this.scanHideTimer = null;
+        this.workerPool?.cancelQueuedTasks();
+        const variant = this.switchScanVariant();
+        this.clearPageCache();
+        this.pagePreviews.clear();
+        this._mockupPartsCache = null;
+        this.baseImageData = null;
+        this.originalCMYKData = null;
+        this.spotColorData = {};
+        this.clearMouseInfo();
+        this.scrollManager?.updateAllVisiblePages(true);
+        this.updateChannelRatios(this.calculateTotalChannelRatios());
+        this.updateSpotColorRatios(this.calculateSpotColorRatios());
+        if (variant.scanned) {
+            this.hideScanProgress();
+        } else {
+            this.updateScanProgress(0, this.totalPages);
+            this.scanAllPagesInBackground();
+        }
     }
 
     accumulateChannelData(cmykData, pageNum, dpi = 72, variant = null) {
@@ -4953,7 +4900,7 @@ export class PDFSeparationViewer {
             return;
         }
 
-        const cacheKey = `${pageNum}|${spineMm}|${coverMm}|${flapMm}`;
+        const cacheKey = `${this.renderGeneration}|${pageNum}|${spineMm}|${coverMm}|${flapMm}`;
         if (!this._mockupPartsCache || this._mockupPartsCache.key !== cacheKey) {
             this.showLoading('목업 미리보기 렌더링 중...');
             try {

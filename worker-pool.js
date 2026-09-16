@@ -285,11 +285,11 @@ class WorkerPool {
     }
 
     // 페이지 범위를 한 번의 GS 실행으로 렌더링 (tiff32nc). 페이지 결과는 onPageResult로 스트리밍.
-    renderPagesChunk(firstPage, lastPage, dpi, onPageResult, excludeAnnots = false) {
+    renderPagesChunk(firstPage, lastPage, dpi, onPageResult, excludeAnnots = false, overprint = true) {
         return new Promise((resolve, reject) => {
             const task = {
                 type: 'renderPagesChunk',
-                data: { firstPage, lastPage, dpi, excludeAnnots },
+                data: { firstPage, lastPage, dpi, excludeAnnots, overprint },
                 resolve,
                 reject,
                 onProgress: onPageResult
@@ -305,11 +305,11 @@ class WorkerPool {
     }
 
     // 페이지 범위를 한 번의 tiffsep 실행으로 분판 렌더링. 페이지 결과는 onPageResult로 스트리밍.
-    processTiffsepChunk(firstPage, lastPage, dpi, onPageResult, excludeAnnots = false) {
+    processTiffsepChunk(firstPage, lastPage, dpi, onPageResult, excludeAnnots = false, overprint = true) {
         return new Promise((resolve, reject) => {
             const task = {
                 type: 'processTiffsepChunk',
-                data: { firstPage, lastPage, dpi, excludeAnnots },
+                data: { firstPage, lastPage, dpi, excludeAnnots, overprint },
                 resolve,
                 reject,
                 onProgress: onPageResult

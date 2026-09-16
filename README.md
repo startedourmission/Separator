@@ -6,6 +6,7 @@
 
 - **CMYK 분판 분석**: C, M, Y, K 각 채널별 온/오프 및 별색(Spot Color) 감지
 - **잉크량 분석**: 마우스 위치의 실시간 TAC(Total Area Coverage) 및 채널별 비율 표시
+- **오버프린트 미리보기**: 기본 켜짐. PDF의 오버프린트 설정을 화면, 잉크량 분석 및 이미지 내보내기에 반영하며, 끄면 오버프린트를 무시하고 다시 렌더링합니다.
 - **표지 계산기**: 판형 정보를 바탕으로 책등, 날개, 펼침면 크기 자동 계산
 - **분석 도구**: 드래그 영역의 텍스트 스캔(OCR) 및 바코드/QR 분석
 - **워터마크**: 다수의 텍스트를 일괄 적용한 개별 PDF 및 압축 파일 생성
@@ -23,6 +24,12 @@
    ```
 3. 웹 브라우저에서 `localhost:5000` (또는 지정된 포트) 접속
 
+## 검증
+
+- `npm test`: 별색 합성, 분판 토글 및 설정별 캐시 회귀 테스트.
+- `npm run test:browser`: Playwright Chromium에서 실제 WASM 렌더링, 오버프린트 ON/OFF, 잉크량 및 RGB 출력 검증. 먼저 `npx playwright install chromium`을 실행하거나 `BROWSER_EXECUTABLE`로 실행 파일 경로를 지정합니다. 사이트가 사용하는 CDN 라이브러리를 읽을 수 있어야 합니다.
+- 루트에 `higs_cover.pdf`가 있으면 보고된 세 누락 영역도 검증합니다. 결과는 `_docs/overprint-verification/`에 저장합니다.
+
 ## 구현 예정
 
 - **DIC 별색 지원**: DIC 컬러 가이드 RGB 근사값 매핑 추가 (DIC 285, 717, 2193, 2228, 2925, 3534, 3538, 3556 등)
@@ -34,4 +41,3 @@
 - **PDF**: pdf.js (뷰어), pdf-lib (워터마크 수정)
 - **Processing**: Tesseract.js (OCR), ZXing (Barcode/QR)
 - **Performance**: Virtual Scrolling 기반 대용량 PDF 처리
-
