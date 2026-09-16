@@ -170,9 +170,13 @@ export class SelectionManager {
                 throw new Error('유효한 페이지 영역이 아닙니다.');
             }
 
-            // Canvas coordinate mapping
-            const scaleX = canvas.width / canvasRect.width;
-            const scaleY = canvas.height / canvasRect.height;
+            // OCR/barcodes use source DPI, independently of display resolution.
+            const pageNum = Number(canvas.closest('.page-wrapper')?.dataset.page);
+            const manager = this.viewer.scrollManager;
+            const pageEl = manager?.pageElements.get(pageNum);
+            const sourceCanvas = pageEl ? manager.getAnalysisCanvas(pageEl) : canvas;
+            const scaleX = sourceCanvas.width / canvasRect.width;
+            const scaleY = sourceCanvas.height / canvasRect.height;
 
             const sx = (intersectX - canvasRect.left) * scaleX;
             const sy = (intersectY - canvasRect.top) * scaleY;
@@ -185,7 +189,7 @@ export class SelectionManager {
             tempCanvas.height = sHeight;
 
             const ctx = tempCanvas.getContext('2d');
-            ctx.drawImage(canvas, sx, sy, sWidth, sHeight, 0, 0, sWidth, sHeight);
+            ctx.drawImage(sourceCanvas, sx, sy, sWidth, sHeight, 0, 0, sWidth, sHeight);
 
             // DEBUG: Display captured image (Feature)
             const debugContainer = document.createElement('div');

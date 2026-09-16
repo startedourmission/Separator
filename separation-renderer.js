@@ -1,41 +1,46 @@
 import { getSpotColorRGB } from './constants.js';
-import { getColorTables } from './color-profile.js';
+import { transformCMYK } from './color-profile.js';
 
-// 입력은 Ghostscript가 knockout/overprint를 이미 반영한 독립 잉크판이다.
-// 별색 대체 CMY를 감산하거나 별색을 불투명 RGB로 덮으면 실제 잉크가 사라진다.
-// 화면과 미리보기에서 동일한 근사 잉크 합성을 사용한다.
-export function compositeSeparations(cmykData, spotColorData, separations, pixels) {
-    const { width, height, channels } = cmykData;
-    const { cyan, magenta, yellow, black } = channels;
-    const spots = Object.entries(spotColorData || {})
-        .filter(([name, data]) => data && separations.spotColors?.[name])
-        .map(([name, data]) => ({ data, ...getSpotColorRGB(name) }));
-    const { cmy, kCurve, idxC, idxCT, idxM, idxY, STRIDE_C } = getColorTables();
+// Document-provided equivalent CMYK values take precedence over name-based RGB.
+// Additive ink equivalents match Ghostscript's tiffsep composite calculation;
+// original process/spot plates remain untouched for ink measurement.
+export function selectedSpots(spotColorData, separations, spotCMYK = {}) {
+    return Object.entries(spotColorData || {})
+        .filter(([name,data]) => data && separations.spotColors?.[name])
+        .map(([name,data]) => ({name, data, cmyk: spotCMYK[name], rgb: getSpotColorRGB(name)}));
+}
 
-    for (let i = 0; i < width * height; i++) {
-        const c = separations.cyan ? cyan[i] : 0;
-        const m = separations.magenta ? magenta[i] : 0;
-        const y = separations.yellow ? yellow[i] : 0;
-        const k = separations.black ? black[i] : 0;
-        const lo = idxC[c] + idxM[m] + idxY[y];
-        const hi = lo + STRIDE_C;
-        const ct = idxCT[c];
-        const ko = k * 3;
-        let r = (cmy[lo] + (cmy[hi] - cmy[lo]) * ct) * kCurve[ko];
-        let g = (cmy[lo + 1] + (cmy[hi + 1] - cmy[lo + 1]) * ct) * kCurve[ko + 1];
-        let b = (cmy[lo + 2] + (cmy[hi + 2] - cmy[lo + 2]) * ct) * kCurve[ko + 2];
-
-        for (const spot of spots) {
-            const tint = spot.data[i] / 255;
-            r *= 1 - tint + tint * spot.r / 255;
-            g *= 1 - tint + tint * spot.g / 255;
-            b *= 1 - tint + tint * spot.b / 255;
+export function compositeSeparations(cmykData, spotColorData, separations, pixels, spotCMYK = {}) {
+    const {width,height,channels} = cmykData;
+    const spots = selectedSpots(spotColorData,separations,spotCMYK);
+    const planes = ['cyan','magenta','yellow','black'];
+    const count = width*height;
+    // Bound WASM scratch memory even for large pages / GPU fallback.
+    const block = new Uint8Array(Math.min(count,65536)*4);
+    for(let start=0;start<count;start+=65536) {
+        const length=Math.min(65536,count-start),input=block.subarray(0,length*4);
+        for(let ch=0;ch<4;ch++) {
+            const plane=channels[planes[ch]],enabled=separations[planes[ch]];
+            for(let j=0;j<length;j++) {
+                const i=start+j;
+                let ink=enabled ? plane[i] : 0;
+                for(const spot of spots) if(spot.cmyk) ink+=spot.data[i]*spot.cmyk[ch];
+                input[j*4+ch]=Math.min(255,Math.round(ink));
+            }
         }
-        const offset = i * 4;
-        pixels[offset] = r;
-        pixels[offset + 1] = g;
-        pixels[offset + 2] = b;
-        pixels[offset + 3] = 255;
+        const rgb=transformCMYK(input);
+        for(let j=0;j<length;j++) {
+            const i=start+j;
+            let r=rgb[j*3],g=rgb[j*3+1],b=rgb[j*3+2];
+            // Only missing document equivalents use the legacy display fallback.
+            for(const spot of spots) if(!spot.cmyk) {
+                const tint=spot.data[i]/255;
+                r*=1-tint+tint*spot.rgb.r/255;
+                g*=1-tint+tint*spot.rgb.g/255;
+                b*=1-tint+tint*spot.rgb.b/255;
+            }
+            pixels[i*4]=r;pixels[i*4+1]=g;pixels[i*4+2]=b;pixels[i*4+3]=255;
+        }
     }
     return pixels;
 }

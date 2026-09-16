@@ -48,7 +48,7 @@ try {
         const x=Math.round(data.width/2),y=Math.round(data.height/2),i=y*data.width+x;
         return {ink:Object.fromEntries(Object.entries(data.channels).map(([n,a])=>[n,a[i]])),
             spots:Object.fromEntries(Object.entries(el.pageData.spotColorData).map(([n,a])=>[n,a[i]])),
-            rgb:[...el.canvas.getContext('2d').getImageData(x,y,1,1).data],
+            rgb:[...el.canvas.getContext('2d').getImageData(Math.floor(el.canvas.width/2),Math.floor(el.canvas.height/2),1,1).data],
             ratios:v.calculateTotalChannelRatios(),spotRatios:v.calculateSpotColorRatios()};
     });}
     async function exportPixel(){return page.evaluate(async()=>{
@@ -150,12 +150,107 @@ try {
         console.log(`PASS instant checkbox: 20 synchronous switches in ${timing.elapsed.toFixed(1)} ms, zero renders/composites`);
         return timing;
     }
+    async function verifyICC() {
+        return page.evaluate(async () => {
+            await viewer.colorProfileReady;
+            const {compositeSeparations}=await import('./separation-renderer.js');
+            const n=1024, channels=Object.fromEntries(['cyan','magenta','yellow','black'].map(n=>[n,new Uint8Array(1024)]));
+            let seed=2312;
+            for(let i=0;i<n;i++) for(const a of Object.values(channels)) {
+                seed=(Math.imul(seed,1664525)+1013904223)>>>0;a[i]=seed>>>24;
+            }
+            const data={type:'cmyk',width:32,height:32,channels};
+            const settings={cyan:true,magenta:true,yellow:true,black:true,spotColors:{}};
+            const canvas=document.createElement('canvas');canvas.width=canvas.height=32;
+            const {SeparationGPU}=await import('./separation-gpu.js');
+            const gpu=new SeparationGPU();
+            if(!gpu.render(canvas,data,{},settings)) throw new Error('GPU color path unavailable');
+            const actual=canvas.getContext('2d').getImageData(0,0,32,32).data;
+            const expected=compositeSeparations(data,{},settings,new Uint8ClampedArray(n*4));
+            const errors=[];
+            for(let i=0;i<actual.length;i++) if(i%4!==3) errors.push(Math.abs(actual[i]-expected[i]));
+            gpu.clear();
+            // A missing/lost GPU must still use the real ICC transform.
+            const manager=viewer.scrollManager, savedGPU=manager.gpu;
+            manager.gpu=null;
+            const cpuCanvas=document.createElement('canvas');
+            manager.renderToCanvas(cpuCanvas,{imageData:data,spotColorData:{}},true);
+            manager.gpu=savedGPU;
+            const fallback=cpuCanvas.getContext('2d').getImageData(0,0,32,32).data;
+            if(fallback.some((v,i)=>v!==expected[i])) throw new Error('CPU ICC fallback mismatch');
+            errors.sort((a,b)=>a-b);
+            return {max:errors.at(-1),mean:errors.reduce((a,b)=>a+b,0)/errors.length,p99:errors[Math.floor(errors.length*.99)]};
+        });
+    }
+    async function benchmarkSeparations() {
+        const baselineExists=!!await fs.stat(path.join(artifacts,'baseline/separation-renderer.js')).catch(()=>null);
+        return page.evaluate(async baselineExists => {
+            const m=viewer.scrollManager;
+            const visible=[...m.pageElements.values()].filter(el=>el.status==='rendered' && m.isWrapperInViewport(el.wrapper));
+            const cb=viewer.cyanCheckbox || document.getElementById('cyan');
+            const original=viewer.getCurrentSeparations();
+            const durations=[], callsPerClick=[];
+            let syncCalls=0;
+            const render=m.renderToCanvas;
+            m.renderToCanvas=function(...args){syncCalls++;return render.apply(this,args);};
+            // Time the actual checkbox handler, not just a shader invocation.
+            for(const enabled of [false,true,false,true]) {
+                const start=performance.now();
+                const before=syncCalls;
+                cb.checked=enabled;cb.dispatchEvent(new Event('change'));
+                callsPerClick.push(syncCalls-before);
+                durations.push(performance.now()-start);
+                await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+            }
+            m.renderToCanvas=render;
+            let baseline=null;
+            // Optional local baseline from the committed pre-change compositor.
+            const url='./_docs/overprint-verification/baseline/separation-renderer.js';
+            if(baselineExists) {
+                const {compositeSeparations}=await import(url);
+                const targets=visible.flatMap(el=>[el.pageData,el.comparison?.data].filter(Boolean)).map(data=>{
+                    const canvas=document.createElement('canvas');
+                    canvas.width=data.imageData.width;canvas.height=data.imageData.height;
+                    return {data,ctx:canvas.getContext('2d')};
+                });
+                const buffers=new Map();
+                for(const {data,ctx} of targets) {
+                    const im=data.imageData,key=`${im.width}x${im.height}`;
+                    if(!buffers.has(key)) buffers.set(key,ctx.createImageData(im.width,im.height));
+                }
+                // Warm the old color table outside the timed runs, as at app startup.
+                const {warmUpColorProfile}=await import('./_docs/overprint-verification/baseline/color-profile.js');
+                warmUpColorProfile();
+                const times=[];
+                for(const enabled of [false,true]) {
+                    const start=performance.now();
+                    for(const {data,ctx} of targets) {
+                        const im=data.imageData;
+                        const pixels=buffers.get(`${im.width}x${im.height}`);
+                        compositeSeparations(im,data.spotColorData,{...original,cyan:enabled},pixels.data);
+                        ctx.putImageData(pixels,0,0);
+                    }
+                    times.push(performance.now()-start);
+                }
+                baseline=times;
+            }
+            return {gpu:!!m.gpu&&!m.gpu.lost,visiblePages:visible.length,handlerMs:durations,baselineMs:baseline,syncCalls,callsPerClick};
+        }, baselineExists);
+    }
     const results={};
+    results.colorAccuracy=await verifyICC();
+    assert.ok(results.colorAccuracy.mean<1,JSON.stringify(results.colorAccuracy));
+    assert.ok(results.colorAccuracy.p99<=2 && results.colorAccuracy.max<=5,JSON.stringify(results.colorAccuracy));
+    console.log('PASS ICC GPU vs exact LittleCMS:',results.colorAccuracy);
     for(const spot of [true,false]) {
         await page.locator('#overprint-preview').setChecked(true);
         await loadDocument({name:`${spot?'spot':'process'}.pdf`,mimeType:'application/pdf',buffer:overprintPDF(spot)});
         await settled();
         const on=await sample(),rgbOn=await exportPixel();
+        if(spot) {
+            const equivalents=await page.evaluate(()=>viewer.scrollManager.pageElements.get(1).pageData.spotCMYK);
+            assert.deepEqual(equivalents.TestGreen,[0.5,0,1,0],'PDF spot alternate must be used');
+        }
         assert.equal(on.ink.black,255);
         assert.equal(spot?on.spots.TestGreen:on.ink.cyan,255);
         assert.ok(Math.max(...on.rgb.slice(0,3))<60,'black should remain visible under the spot');
@@ -202,7 +297,7 @@ try {
             const el=viewer.scrollManager.pageElements.get(1),im=el.pageData.imageData;
             return [[430,188],[430,400],[1410,698]].map(([x,y])=>{
                 x=Math.round(x*im.width/2000);y=Math.round(y*im.width/2000);const i=y*im.width+x;
-                return {k:im.channels.black[i],spot:el.pageData.spotColorData['PANTONE 2285 C'][i],rgb:[...el.canvas.getContext('2d').getImageData(x,y,1,1).data]};
+                return {k:im.channels.black[i],spot:el.pageData.spotColorData['PANTONE 2285 C'][i],rgb:[...el.canvas.getContext('2d').getImageData(Math.round(x*el.canvas.width/im.width),Math.round(y*el.canvas.height/im.height),1,1).data]};
             });
         });
         for(const p of coverSamples){assert.equal(p.k,255);assert.equal(p.spot,255);assert.ok(Math.max(...p.rgb.slice(0,3))<65);}
@@ -216,6 +311,18 @@ try {
         await page.screenshot({path:path.join(artifacts,'higs-comparison.png')});
         await page.locator('#overprint-compare-toggle').click();
         results.coverSamples=coverSamples;
+        results.separationPerformance=await benchmarkSeparations();
+        assert.equal(results.separationPerformance.gpu,true);
+        assert.ok(results.separationPerformance.callsPerClick.every(n=>n===results.separationPerformance.visiblePages),
+            'separation handler must only redraw visible selected canvases, not hidden alternates');
+        results.analysisResolution=await page.evaluate(()=>{
+            const manager=viewer.scrollManager,el=manager.pageElements.get(1);
+            const source=manager.getAnalysisCanvas(el);
+            return {display:el.canvas.width,analysis:source.width,plate:el.pageData.imageData.width};
+        });
+        assert.equal(results.analysisResolution.analysis,results.analysisResolution.plate);
+        assert.ok(results.analysisResolution.display<results.analysisResolution.plate);
+        console.log('PASS separation performance:',results.separationPerformance);
         const coverOff=await sample();
         await toggle(true);
         results.coverTogglePerformance=await testInstantToggle(await sample(),coverOff);

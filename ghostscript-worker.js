@@ -1,3 +1,4 @@
+import { parseSpotCMYK } from './spot-color.js';
 // Ghostscript WebWorker
 import Module from './gs.mjs';
 import { overprintArgs } from './render-settings.js';
@@ -35,6 +36,14 @@ function getCMYKProfile() {
             });
     }
     return cmykProfilePromise;
+}
+
+// Keep the plate output space and its screen ICC transform in agreement.
+async function installPlateProfile(moduleInstance) {
+    const bytes = await getCMYKProfile();
+    if (!bytes) throw new Error('분판용 ICC 프로파일 로드 실패');
+    moduleInstance.FS.writeFile('cmyk.icc', bytes);
+    return ['-sDefaultCMYKProfile=/cmyk.icc', '-sOutputICCProfile=/cmyk.icc'];
 }
 
 async function getCompiledWasm() {
@@ -269,7 +278,9 @@ async function processPDF(pdfData, options, pageNum = 1) {
 
         if (useCMYK) {
             // CMYK TIFF 생성 (정확한 분판용)
+            const profileArgs = await installPlateProfile(moduleInstance);
             const tiffArgs = buildTiffCMYKArgs(options, outputWidth, outputHeight, targetPage);
+            tiffArgs.splice(3, 0, ...profileArgs);
 
             try {
                 moduleInstance.callMain(tiffArgs);
@@ -388,10 +399,18 @@ self.addEventListener('message', async function (e) {
                 const { pageNum, dpi, excludeAnnots, overprint } = data;
                 const pdfData = resolvePdfData(data.pdfData);
                 const gsOutput = [];
+                const lineBytes = [];
+                const captureByte = byte => {
+                    if (byte === null || byte === 10) {
+                        gsOutput.push(new TextDecoder().decode(Uint8Array.from(lineBytes)));
+                        lineBytes.length = 0;
+                    } else lineBytes.push(byte);
+                };
                 const moduleInstance = await Module(createModuleConfig({
                     noExitRuntime: false,
                     print: (text) => { gsOutput.push('[stdout] ' + text); },
-                    printErr: (text) => { gsOutput.push('[stderr] ' + text); }
+                    printErr: (text) => { gsOutput.push('[stderr] ' + text); },
+                    stdout: captureByte, stderr: captureByte
                 }));
 
                 // PDF 파일 작성
@@ -404,10 +423,12 @@ self.addEventListener('message', async function (e) {
                     '-dBATCH',
                     '-dNOSAFER',
                     '-sDEVICE=tiffsep',
+                    ...await installPlateProfile(moduleInstance),
                     `-r${tiffsepDpi}`,
                     `-dFirstPage=${pageNum || 1}`,
                     `-dLastPage=${pageNum || 1}`,
                     '-dMaxSpots=10',
+                    '-dPrintSpotCMYK=true',
                     ...annotArgs(excludeAnnots),
                     ...overprintArgs(overprint),
                     '-sOutputFile=plate%d.tif',
@@ -520,6 +541,7 @@ self.addEventListener('message', async function (e) {
                     channels: channels,
                     spotColors: spotColors,
                     composite: composite,
+                    spotCMYK: parseSpotCMYK(gsOutput),
                     dpi: tiffsepDpi
                 }, tiffsepTransfers);
             } catch (error) {
@@ -704,6 +726,7 @@ self.addEventListener('message', async function (e) {
                     '-dBATCH',
                     '-dSAFER',
                     '-sDEVICE=tiff32nc',
+                    ...await installPlateProfile(moduleInstance),
                     `-r${dpi || 72}`,
                     `-dFirstPage=${firstPage}`,
                     `-dLastPage=${lastPage}`,
@@ -778,6 +801,7 @@ self.addEventListener('message', async function (e) {
                     '-dBATCH',
                     '-dNOSAFER',
                     '-sDEVICE=tiffsep',
+                    ...await installPlateProfile(moduleInstance),
                     '-r4',
                     '-dMaxSpots=10'
                 ];
@@ -845,6 +869,7 @@ self.addEventListener('message', async function (e) {
                     '-dBATCH',
                     '-dNOSAFER',
                     '-sDEVICE=tiffsep',
+                    ...await installPlateProfile(moduleInstance),
                     `-r${tiffsepDpi}`,
                     `-dFirstPage=${firstPage}`,
                     `-dLastPage=${lastPage}`,

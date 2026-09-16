@@ -1,3 +1,4 @@
+import { warmUpColorProfile } from '../color-profile.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { compositeSeparations } from '../separation-renderer.js';
@@ -5,6 +6,7 @@ import { registerSpotColorRGB } from '../constants.js';
 import { PDFSeparationViewer } from '../PDFSeparationViewer.js';
 import { VirtualScrollManager } from '../VirtualScrollManager.js';
 
+await warmUpColorProfile();
 registerSpotColorRGB('TestGreen', {r: 150, g: 180, b: 70});
 const all = {cyan: true, magenta: true, yellow: true, black: true, spotColors: {TestGreen: true}};
 function pixel([c, m, y, k], tint, settings = all) {

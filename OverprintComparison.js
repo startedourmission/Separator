@@ -44,6 +44,7 @@ export class OverprintComparison {
     async prepare(pageNum, el) {
         if (this.toggle.disabled || !el.pageData || el.comparisonPending) return;
         if (el.comparison) {
+            if (this.enabled) this.refreshAlternate(el);
             this.selectMode(pageNum, el);
             return;
         }
@@ -120,6 +121,7 @@ export class OverprintComparison {
     // 완성된 두 캔버스의 역할만 교환한다. 픽셀 합성/복사나 PDF 렌더는 하지 않는다.
     selectMode(pageNum, el) {
         if (!el.comparison || el.pageData.renderSettings.overprint === this.viewer.overprintPreview) return;
+        this.refreshAlternate(el);
         const alternate = el.comparison;
         [el.canvas, alternate.canvas] = [alternate.canvas, el.canvas];
         [el.pageData, alternate.data] = [alternate.data, el.pageData];
@@ -141,9 +143,26 @@ export class OverprintComparison {
         this.updateStatus();
     }
 
-    recompose(el) {
-        if (!el.comparison) return;
+    refreshAlternate(el) {
+        if (!el.comparison?.dirty) return;
         this.manager.renderToCanvas(el.comparison.canvas, el.comparison.data);
+        el.comparison.dirty = false;
+    }
+
+    recompose(el) {
+        const alternate = el.comparison;
+        if (!alternate) return;
+        alternate.dirty = true;
+        if (this.enabled) { this.refreshAlternate(el); return; }
+        // 먼저 선택한 화면을 보여준다. 숨겨진 화면은 최신 체크 상태로 한 번만 갱신한다.
+        if (alternate.scheduled) return;
+        alternate.scheduled = true;
+        const refresh = () => {
+            alternate.scheduled = false;
+            if (el.comparison === alternate) this.refreshAlternate(el);
+        };
+        if (typeof requestIdleCallback === 'function') requestIdleCallback(refresh, {timeout: 1000});
+        else setTimeout(refresh, 50);
     }
 
     dataAtPointer(el, event) {

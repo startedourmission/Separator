@@ -3,9 +3,9 @@ import { compositeSeparations } from './separation-renderer.js';
 import { overprintArgs } from './render-settings.js';
 import { WorkerPool } from './worker-pool.js';
 import { VirtualScrollManager } from './VirtualScrollManager.js';
-import { getSpotColorRGB, hasSpotColorRGB, registerSpotColorRGB } from './constants.js';
+import { getSpotColorRGB, registerSpotColorRGB } from './constants.js';
 import { renderBookMockup } from './BookMockupGenerator.js';
-import { cmykToRGB255, getColorTables, warmUpColorProfile } from './color-profile.js';
+import { cmykToRGB255, warmUpColorProfile } from './color-profile.js';
 
 export class PDFSeparationViewer {
     constructor() {
@@ -14,8 +14,9 @@ export class PDFSeparationViewer {
         this.canvas = document.createElement('canvas');
         this.ctx = this.canvas.getContext('2d');
 
-        // Japan Color 룩업 테이블을 미리 만들어 첫 렌더가 끊기지 않게 한다 (약 100ms)
-        warmUpColorProfile();
+        // 실제 ICC 엔진을 문서 로드와 병렬로 준비한다.
+        this.colorProfileReady = warmUpColorProfile();
+        this.colorProfileReady.catch(error => this.showError(error.message));
         this.currentPDF = null;
         this.currentFileType = 'pdf'; // 'pdf' | 'image'
         this.ghostscript = null;
@@ -590,7 +591,7 @@ export class PDFSeparationViewer {
                     const pending = this.pendingRequests.get(requestId);
                     if (pending) {
                         if (success) {
-                            pending.resolve({ channels, spotColors, composite, width, height, dpi });
+                            pending.resolve({ channels, spotColors, composite, spotCMYK: e.data.spotCMYK, width, height, dpi });
                         } else {
                             pending.reject(new Error(message || 'tiffsep 처리 실패'));
                         }
@@ -883,6 +884,7 @@ export class PDFSeparationViewer {
                             channels: result.channels,
                             spotColors: result.spotColors,
                             composite: result.composite,
+                            spotCMYK: result.spotCMYK,
                             width: result.width,
                             height: result.height,
                             dpi: result.dpi
@@ -1272,6 +1274,7 @@ export class PDFSeparationViewer {
         }
 
         try {
+            await this.colorProfileReady;
             // 1단계: PDF 로딩 (33%)
             this.showLoading('PDF 로딩 중...', '33%');
 
@@ -1530,7 +1533,7 @@ export class PDFSeparationViewer {
     // 스캔 데이터(72dpi)를 축소해 페이지 미리보기로 보관.
     // 먼 페이지로 점프 시 GS 렌더를 기다리는 동안 즉시 표시하는 용도 —
     // renderToCanvas가 그대로 그릴 수 있도록 {imageData, spotColorData} 형태로 저장한다.
-    storePagePreview(pageNum, cmykData, spotColorData = null, variant = this.currentVariant()) {
+    storePagePreview(pageNum, cmykData, spotColorData = null, variant = this.currentVariant(), spotCMYK = {}) {
         if (variant !== this.currentVariant()) return;
         if (!cmykData || cmykData.type !== 'cmyk' || !cmykData.width || !cmykData.height) return;
 
@@ -1565,7 +1568,8 @@ export class PDFSeparationViewer {
                     black: sample(cmykData.channels.black)
                 }
             },
-            spotColorData: {}
+            spotColorData: {},
+            spotCMYK
         };
         if (spotColorData) {
             for (const [name, data] of Object.entries(spotColorData)) {
@@ -1688,7 +1692,7 @@ export class PDFSeparationViewer {
             this.updateSpotColorControls();
 
             // 팬톤 테이블에 없는 이름("변경색상" 등)은 문서 데이터에서 표시색 추정 (비동기)
-            this.estimateUnknownSpotColors();
+            // 별색 대체색은 페이지 렌더의 PrintSpotCMYK 결과에서 받는다.
             return;
         } catch (error) {
             console.warn('별색 프로브 실패, 정규식 검색으로 대체:', error.message);
@@ -1845,71 +1849,10 @@ export class PDFSeparationViewer {
 
     }
 
-    /**
-     * 팬톤 테이블에 없는 별색의 화면 표시색을 문서 데이터에서 추정.
-     * 해당 별색이 쓰인 페이지를 tiffsep으로 렌더해, 별색 잉크가 진하고 다른 잉크가 없는
-     * 픽셀들의 합성판(CMYK composite) 평균색 = 별색의 대체색(Alternate) 근사값.
-     * Acrobat이 별색을 제대로 표시하는 것과 같은 원리 (대체 색공간 기반).
-     */
-    async estimateUnknownSpotColors() {
-        for (const colorName of this.spotColors || []) {
-            if (hasSpotColorRGB(colorName)) continue;
-
-            const samplePage = this.spotColorSamplePages && this.spotColorSamplePages[colorName];
-            if (!samplePage) continue;
-
-            try {
-                const result = await this.ghostscript.processTiffsep(this.currentPDFData, samplePage, 72);
-                if (!result || !result.channels || !result.channels[colorName] || !result.composite) continue;
-
-                const spotParsed = await this.parseSpotColorTIFF(result.channels[colorName], colorName);
-                const comp = await this.convertTIFFToCMYK(result.composite);
-                if (!comp || comp.width !== spotParsed.width || comp.height !== spotParsed.height) continue;
-
-                const cyanP = await this.parseSpotColorTIFF(result.channels['Cyan'], 'Cyan');
-                const magentaP = await this.parseSpotColorTIFF(result.channels['Magenta'], 'Magenta');
-                const yellowP = await this.parseSpotColorTIFF(result.channels['Yellow'], 'Yellow');
-                const blackP = await this.parseSpotColorTIFF(result.channels['Black'], 'Black');
-
-                const n = spotParsed.width * spotParsed.height;
-                const sd = spotParsed.data;
-                const sameSize = cyanP.data.length === n;
-
-                // 별색이 진하게(78%+) 찍혔고 프로세스 잉크가 겹치지 않은 "순수" 픽셀 수집
-                const sample = (pure) => {
-                    let c = 0, m = 0, y = 0, k = 0, cnt = 0;
-                    for (let i = 0; i < n; i++) {
-                        if (sd[i] < 200) continue;
-                        if (pure && sameSize &&
-                            (cyanP.data[i] > 20 || magentaP.data[i] > 20 ||
-                             yellowP.data[i] > 20 || blackP.data[i] > 20)) continue;
-                        c += comp.channels.cyan[i];
-                        m += comp.channels.magenta[i];
-                        y += comp.channels.yellow[i];
-                        k += comp.channels.black[i];
-                        cnt++;
-                    }
-                    return cnt >= 10 ? { c: c / cnt, m: m / cnt, y: y / cnt, k: k / cnt, cnt } : null;
-                };
-
-                const avg = sample(true) || sample(false);
-                if (!avg) continue;
-
-                // 화면 표시색이므로 렌더링과 동일하게 Japan Color 기준으로 변환
-                const est = cmykToRGB255(avg.c, avg.m, avg.y, avg.k);
-                const rgb = {
-                    r: Math.round(est.r),
-                    g: Math.round(est.g),
-                    b: Math.round(est.b)
-                };
-                registerSpotColorRGB(colorName, rgb);
-
-                // 라벨 색상칩 갱신 + 현재 화면 재렌더
-                this.refreshSpotColorSwatch(colorName);
-                this.updateSeparation();
-            } catch (error) {
-                console.warn(`별색 "${colorName}" 표시색 추정 실패:`, error.message);
-            }
+    registerDocumentSpotColors(spotCMYK) {
+        for (const [name, values] of Object.entries(spotCMYK)) {
+            registerSpotColorRGB(name, cmykToRGB255(...values.map(v => v * 255)));
+            this.refreshSpotColorSwatch(name);
         }
     }
 
@@ -2090,7 +2033,7 @@ export class PDFSeparationViewer {
             // x 변환 비율 재계산 (최신 캔버스/메타데이터 기준)
             const pageObj = this.scrollManager.pageElements.get(pageNum);
             if (!pageObj || !pageObj.canvas || !metadata) return;
-            const pxToMm = (metadata.mediaBox.width * (25.4 / 72)) / pageObj.canvas.width;
+            const pxToMm = (metadata.mediaBox.width * (25.4 / 72)) / pageObj.pageData.imageData.width;
 
             const sortedMarks = [...this.finalMarks].sort((a, b) => a - b);
             const dists = [];
@@ -2162,6 +2105,7 @@ export class PDFSeparationViewer {
             this.baseWidth = pageData.baseWidth;
             this.baseHeight = pageData.baseHeight;
             this.spotColorData = pageData.spotColorData || {};
+            this.spotCMYK = pageData.spotCMYK || {};
 
             // 캐시에 저장
             this.addToCache(this.currentPage, pageData);
@@ -2248,6 +2192,7 @@ export class PDFSeparationViewer {
 
         let imageData = null;
         let spotColorData = {};
+        let spotCMYK = {};
 
         // 별색이 있으면 tiffsep으로 렌더링 시도
         const hasSpotColors = this.spotColors && this.spotColors.length > 0;
@@ -2266,6 +2211,8 @@ export class PDFSeparationViewer {
 
                 if (result && result.channels && Object.keys(result.channels).length > 0) {
                     const { channels, width, height } = result;
+                    spotCMYK = result.spotCMYK || {};
+                    if (renderGeneration === this.renderGeneration) this.registerDocumentSpotColors(spotCMYK);
 
                     const cyanParsed = await this.parseSpotColorTIFF(channels['Cyan'], 'Cyan');
                     const magentaParsed = await this.parseSpotColorTIFF(channels['Magenta'], 'Magenta');
@@ -2302,7 +2249,7 @@ export class PDFSeparationViewer {
                     // 스캔이 아직 안 지나간 페이지면 이 고해상도 렌더로 미리보기 생성
                     // (다음에 다시 방문할 때 캐시가 밀려났어도 즉시 표시 가능)
                     if (renderGeneration === this.renderGeneration && !this.pagePreviews.has(pageNum)) {
-                        this.storePagePreview(pageNum, imageData, spotColorData, renderVariant);
+                        this.storePagePreview(pageNum, imageData, spotColorData, renderVariant, spotCMYK);
                     }
 
                     if (!alreadyMeasured) {
@@ -2348,7 +2295,7 @@ export class PDFSeparationViewer {
             }
         }
 
-        return { imageData, baseWidth, baseHeight, spotColorData, renderGeneration };
+        return { imageData, baseWidth, baseHeight, spotColorData, spotCMYK, renderGeneration };
     }
 
     // 캐시에 페이지 추가
@@ -2407,6 +2354,7 @@ export class PDFSeparationViewer {
     // PDF 로드 시 캐시 클리어
     clearPageCache(preserveRenders = false) {
         this.renderGeneration++;
+        this.scrollManager?.gpu?.clear();
         if (!preserveRenders) this.renderCache?.clear();
         this.pageCache.clear();
         this.preloadingPages.clear();
@@ -2466,8 +2414,8 @@ export class PDFSeparationViewer {
         // 메타데이터가 없는 경우(이미지 파일 등)를 위한 Fallback
         if (!this.pageMetadata.has(pageNum)) {
             if (pageObj && pageObj.canvas) {
-                const widthPt = pageObj.canvas.width * (72 / this.renderDPI);
-                const heightPt = pageObj.canvas.height * (72 / this.renderDPI);
+                const widthPt = pageObj.pageData.imageData.width * (72 / this.renderDPI);
+                const heightPt = pageObj.pageData.imageData.height * (72 / this.renderDPI);
                 this.pageMetadata.set(pageNum, {
                     mediaBox: { x: 0, y: 0, width: widthPt, height: heightPt },
                     trimBox: { x: 0, y: 0, width: widthPt, height: heightPt },
@@ -2484,7 +2432,7 @@ export class PDFSeparationViewer {
             return;
         }
 
-        const canvas = pageObj.canvas;
+        const canvas = this.scrollManager.getAnalysisCanvas(pageObj);
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         const width = canvas.width;
         const height = canvas.height;
@@ -2809,7 +2757,7 @@ export class PDFSeparationViewer {
         this.clearCropMarkers();
 
         const canvas = pageObj.canvas;
-        const scaleX = canvas.clientWidth / canvas.width;
+        const scaleX = canvas.clientWidth / pageObj.pageData.imageData.width;
         const showAll = this.showCandidatesToggle?.checked;
 
         // 체크박스가 꺼져있으면 아무것도 표시 안 함
@@ -2867,7 +2815,7 @@ export class PDFSeparationViewer {
 
         // 마커 위치 계산 (캔버스 기준 좌표를 wrapper 기준 비율 또는 픽셀로 변환)
         // wrapper는 canvas를 담고 있고, 캔버스는 스타일로 너비가 조정될 수 있음
-        const scaleX = canvas.clientWidth / canvas.width;
+        const scaleX = canvas.clientWidth / pageObj.pageData.imageData.width;
         const leftPx = x * scaleX;
 
         marker.style.left = `${leftPx}px`;
@@ -3013,28 +2961,9 @@ export class PDFSeparationViewer {
         const useY = separations.includes('yellow');
         const useK = separations.includes('black');
 
-        // Japan Color 2001 Coated 기준 CMYK → sRGB (아크로뱃 소프트프루프와 유사).
-        // 픽셀당 함수 호출이 전체 비용의 절반 이상이라 테이블을 받아 루프에 인라인한다.
-        const { cmy, kCurve, idxC, idxCT, idxM, idxY, STRIDE_C } = getColorTables();
-
-        for (let i = 0; i < pixelCount; i++) {
-            // CMYK 값 (0-255, 255 = 100% 잉크)
-            const c = useC ? cyan[i] : 0;
-            const m = useM ? magenta[i] : 0;
-            const y = useY ? yellow[i] : 0;
-            const k = useK ? black[i] : 0;
-
-            const lo = idxC[c] + idxM[m] + idxY[y];
-            const hi = lo + STRIDE_C;
-            const ct = idxCT[c];
-            const ko = k * 3;
-            const o = i * 4;
-
-            rgbData[o] = (cmy[lo] + (cmy[hi] - cmy[lo]) * ct) * kCurve[ko];
-            rgbData[o + 1] = (cmy[lo + 1] + (cmy[hi + 1] - cmy[lo + 1]) * ct) * kCurve[ko + 1];
-            rgbData[o + 2] = (cmy[lo + 2] + (cmy[hi + 2] - cmy[lo + 2]) * ct) * kCurve[ko + 2];
-            rgbData[o + 3] = 255; // Alpha
-        }
+        compositeSeparations(cmykData, {}, {
+            cyan:useC, magenta:useM, yellow:useY, black:useK, spotColors:{}
+        }, rgbData);
 
         // ImageData 생성
         const imageData = new ImageData(rgbData, width, height);
@@ -3062,7 +2991,7 @@ export class PDFSeparationViewer {
     renderWithSpotColors(cmykData, targetWidth, targetHeight) {
         const { width, height } = cmykData;
         const rgbData = new Uint8ClampedArray(width * height * 4);
-        compositeSeparations(cmykData, this.spotColorData, this.getCurrentSeparations(), rgbData);
+        compositeSeparations(cmykData, this.spotColorData, this.getCurrentSeparations(), rgbData, this.spotCMYK);
 
         // ImageData 생성
         const imageData = new ImageData(rgbData, width, height);
@@ -4041,14 +3970,14 @@ export class PDFSeparationViewer {
         const y = event.clientY - rect.top;
 
         // 캔버스 실제 크기와 표시 크기 비율 계산
-        const scaleX = canvas.width / rect.width;
-        const scaleY = canvas.height / rect.height;
+        const scaleX = pageData.imageData.width / rect.width;
+        const scaleY = pageData.imageData.height / rect.height;
 
         const canvasX = Math.floor(x * scaleX);
         const canvasY = Math.floor(y * scaleY);
 
         // 범위 체크
-        if (canvasX < 0 || canvasX >= canvas.width || canvasY < 0 || canvasY >= canvas.height) {
+        if (canvasX < 0 || canvasX >= pageData.imageData.width || canvasY < 0 || canvasY >= pageData.imageData.height) {
             return;
         }
 
@@ -4064,8 +3993,8 @@ export class PDFSeparationViewer {
                 const { width, height, channels } = imgData;
 
                 // 캔버스 좌표를 원본 CMYK 데이터 좌표로 변환
-                const origX = Math.floor((canvasX / canvas.width) * width);
-                const origY = Math.floor((canvasY / canvas.height) * height);
+                const origX = canvasX;
+                const origY = canvasY;
                 const pixelIndex = origY * width + origX;
 
                 if (pixelIndex >= 0 && pixelIndex < width * height) {
@@ -4091,8 +4020,8 @@ export class PDFSeparationViewer {
                 const imgWidth = imgData.width;
                 const imgHeight = imgData.height;
 
-                const origX = Math.floor((canvasX / canvas.width) * imgWidth);
-                const origY = Math.floor((canvasY / canvas.height) * imgHeight);
+                const origX = canvasX;
+                const origY = canvasY;
                 const pixelIndex = (origY * imgWidth + origX) * 4;
 
                 if (pixelIndex >= 0 && pixelIndex < imgData.data.length - 3) {

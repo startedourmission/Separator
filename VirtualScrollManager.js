@@ -1,3 +1,4 @@
+import { SeparationGPU } from './separation-gpu.js';
 import { OverprintComparison } from './OverprintComparison.js';
 import { compositeSeparations } from './separation-renderer.js';
 
@@ -114,6 +115,7 @@ export class VirtualScrollManager {
     createPagePlaceholders() {
         for (const el of this.pageElements.values()) this.comparison.release(el);
         this.content.innerHTML = '';
+        this.gpu?.clear();
         this.pageElements.clear();
 
         for (let i = 1; i <= this.totalPages; i++) {
@@ -295,7 +297,31 @@ export class VirtualScrollManager {
     }
 
     // 캔버스에 렌더링 (분판 적용)
-    renderToCanvas(canvas, pageData) {
+    displayDimensions(imageData) {
+        // Keep headroom for small zoom gestures; source plates retain full DPI.
+        const target = Math.max(1, this.pageWidth * (globalThis.devicePixelRatio || 1) * 1.5);
+        const width = Math.min(imageData.width, 2 ** Math.ceil(Math.log2(target)));
+        return {width, height: Math.max(1, Math.round(imageData.height * width / imageData.width))};
+    }
+
+    getAnalysisCanvas(pageEl) {
+        if (pageEl.canvas.width === pageEl.pageData.imageData.width) return pageEl.canvas;
+        const canvas = document.createElement('canvas');
+        this.renderToCanvas(canvas, pageEl.pageData, true);
+        return canvas;
+    }
+
+    refreshDisplayResolution() {
+        for (const el of this.pageElements.values()) {
+            if (el.status !== 'rendered' || !this.isWrapperInViewport(el.wrapper)) continue;
+            if (this.displayDimensions(el.pageData.imageData).width > el.canvas.width) {
+                this.renderToCanvas(el.canvas, el.pageData);
+                this.comparison.recompose(el);
+            }
+        }
+    }
+
+    renderToCanvas(canvas, pageData, fullResolution = false) {
         const ctx = canvas.getContext('2d');
         const { imageData } = pageData;
 
@@ -319,15 +345,21 @@ export class VirtualScrollManager {
             return;
         }
 
-        // 캔버스 버퍼 크기를 고해상도 이미지 데이터에 맞춤
-        if (canvas.width !== imageData.width || canvas.height !== imageData.height) {
-            canvas.width = imageData.width;
-            canvas.height = imageData.height;
+        const size = fullResolution ? imageData : this.displayDimensions(imageData);
+        if (canvas.width !== size.width || canvas.height !== size.height) {
+            canvas.width = size.width;
+            canvas.height = size.height;
         }
 
         // 현재 분판 설정 가져오기
         const separations = this.viewer.getCurrentSeparations();
         const spotColorData = pageData.spotColorData || {};
+
+        if (this.gpu === undefined) {
+            try { this.gpu = new SeparationGPU(); }
+            catch (error) { console.warn('GPU 색 변환 대신 ICC CPU 변환 사용:', error.message); this.gpu = null; }
+        }
+        if (this.gpu?.render(canvas, imageData, spotColorData, separations, pageData.spotCMYK, canvas.classList.contains('comparison-layer'))) return;
 
         // CMYK 렌더링
         const srcWidth = imageData.width;
@@ -352,7 +384,7 @@ export class VirtualScrollManager {
         }
         const tempImageData = this._tempImageData;
 
-        compositeSeparations(imageData, spotColorData, separations, tempImageData.data);
+        compositeSeparations(imageData, spotColorData, separations, tempImageData.data, pageData.spotCMYK);
 
         // 크기가 같으면 임시 캔버스를 거치지 않고 바로 출력 (전체 픽셀 복사 1회 절약)
         if (dstWidth === srcWidth && dstHeight === srcHeight) {
@@ -482,6 +514,7 @@ export class VirtualScrollManager {
         // 현재 페이지로 스크롤 복원
         requestAnimationFrame(() => {
             this.scrollToPage(currentPage);
+            this.refreshDisplayResolution();
         });
     }
 
@@ -578,6 +611,7 @@ export class VirtualScrollManager {
     // 페이지당 ~90ms만 쓰고 선명해지지 않는다. 더 선명하게 보려면 DPI를 올려야 한다.
     finalizeZoom() {
         this.zoomGestureActive = false;
+        this.refreshDisplayResolution();
         this.setupIntersectionObserver();
         this.updateCurrentPage();
 
@@ -691,6 +725,7 @@ export class VirtualScrollManager {
             this.observer.disconnect();
         }
         for (const el of this.pageElements.values()) this.comparison.release(el);
+        this.gpu?.clear();
         this.pageElements.clear();
         this.renderQueue.clear();
         this.content.innerHTML = '';
