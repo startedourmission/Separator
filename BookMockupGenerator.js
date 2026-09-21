@@ -139,10 +139,23 @@ export async function renderBookMockup(frontImg, spineImg, frontW, spineW, H, op
     const frontSrc = prepSource(frontImg);
     const spineSrc = prepSource(spineImg);
 
+    // Safari(WebKit)는 CanvasRenderingContext2D.filter를 지원하지 않는다 (조용히 무시됨).
+    const hasCanvasFilter = 'filter' in bctx;
+
     // 책등 (접합선에서 왼쪽으로, 살짝 어둡게 해 면 구분)
-    bctx.filter = `brightness(${spineBrightness})`;
-    drawFacePerspective(bctx, spineSrc, jointX, spineDestW, jointH, jointH * spineEdgeRatio, midY, -1);
-    bctx.filter = 'none';
+    if (hasCanvasFilter) {
+        bctx.filter = `brightness(${spineBrightness})`;
+        drawFacePerspective(bctx, spineSrc, jointX, spineDestW, jointH, jointH * spineEdgeRatio, midY, -1);
+        bctx.filter = 'none';
+    } else {
+        drawFacePerspective(bctx, spineSrc, jointX, spineDestW, jointH, jointH * spineEdgeRatio, midY, -1);
+        // 필터 대체: 아직 표지를 그리기 전이므로 source-atop으로 책등 픽셀만 어둡게 덮는다
+        bctx.save();
+        bctx.globalCompositeOperation = 'source-atop';
+        bctx.fillStyle = `rgba(0, 0, 0, ${Math.max(0, Math.min(1, 1 - spineBrightness))})`;
+        bctx.fillRect(0, 0, Math.ceil(jointX) + 1, bookH);
+        bctx.restore();
+    }
 
     // 표지 (접합선에서 오른쪽으로)
     drawFacePerspective(bctx, frontSrc, jointX, coverDestW, jointH, jointH * coverEdgeRatio, midY, +1);
@@ -170,18 +183,37 @@ export async function renderBookMockup(frontImg, spineImg, frontW, spineW, H, op
         const jx = bookX + spineDestW;          // 접합선
         const cx = bookX + bookW;               // 표지 오른쪽 모서리
 
+        const blurPx = Math.max(4, Math.round(canvasSize * 0.012));
+        const tracePath = () => {
+            octx.beginPath();
+            octx.moveTo(sx - bookW * 0.34, bookY + bookH * 0.80);        // 왼쪽 먼 꼭짓점
+            octx.lineTo(sx + 2, spineBotY - jointH * 0.20);              // 책등 왼쪽면 위
+            octx.lineTo(jx, jointBotY);                                  // 접합선 바닥
+            octx.lineTo(cx, coverBotY + canvasSize * 0.004);             // 표지 오른쪽 바닥
+            octx.lineTo(cx - bookW * 0.03, coverBotY + canvasSize * 0.012);
+            octx.lineTo(sx + 2, spineBotY + canvasSize * 0.010);         // 책등 바닥 아래
+            octx.closePath();
+        };
+
         octx.save();
-        octx.filter = `blur(${Math.max(4, Math.round(canvasSize * 0.012))}px)`;
-        octx.fillStyle = 'rgba(0, 0, 0, 0.30)';
-        octx.beginPath();
-        octx.moveTo(sx - bookW * 0.34, bookY + bookH * 0.80);        // 왼쪽 먼 꼭짓점
-        octx.lineTo(sx + 2, spineBotY - jointH * 0.20);              // 책등 왼쪽면 위
-        octx.lineTo(jx, jointBotY);                                  // 접합선 바닥
-        octx.lineTo(cx, coverBotY + canvasSize * 0.004);             // 표지 오른쪽 바닥
-        octx.lineTo(cx - bookW * 0.03, coverBotY + canvasSize * 0.012);
-        octx.lineTo(sx + 2, spineBotY + canvasSize * 0.010);         // 책등 바닥 아래
-        octx.closePath();
-        octx.fill();
+        if (hasCanvasFilter) {
+            octx.filter = `blur(${blurPx}px)`;
+            octx.fillStyle = 'rgba(0, 0, 0, 0.30)';
+            tracePath();
+            octx.fill();
+        } else {
+            // 필터 대체(Safari): 도형 자체는 캔버스 밖으로 밀어 두고 shadowOffset으로
+            // 그림자만 제자리에 떨어뜨린다. shadowBlur ≈ 2σ 이므로 blur(σ)의 두 배.
+            const offset = canvasSize * 2;
+            octx.shadowColor = 'rgba(0, 0, 0, 0.30)';
+            octx.shadowBlur = blurPx * 2;
+            octx.shadowOffsetX = offset;
+            octx.shadowOffsetY = 0;
+            octx.fillStyle = '#000';
+            octx.translate(-offset, 0);
+            tracePath();
+            octx.fill();
+        }
         octx.restore();
     }
 

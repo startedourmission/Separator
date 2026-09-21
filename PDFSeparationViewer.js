@@ -474,6 +474,10 @@ export class PDFSeparationViewer {
         if (exportSeparatedBtn) {
             exportSeparatedBtn.addEventListener('click', () => this.exportSeparatedImages());
         }
+        const exportSeparatedFirstBtn = document.getElementById('export-separated-first');
+        if (exportSeparatedFirstBtn) {
+            exportSeparatedFirstBtn.addEventListener('click', () => this.exportSeparatedImages(1));
+        }
 
         const exportABTestBtn = document.getElementById('export-ab-test');
         if (exportABTestBtn) {
@@ -4572,8 +4576,7 @@ export class PDFSeparationViewer {
     /**
      * 내부용: 분판 저장을 위해 고화질 펼침면 이미지를 생성합니다 (PNG)
      */
-    async renderHighResSpread() {
-        const pageNum = this.currentPage;
+    async renderHighResSpread(pageNum = this.currentPage) {
         const metadata = this.pageMetadata.get(pageNum);
 
         if (!this.currentPDFData) {
@@ -4635,7 +4638,12 @@ export class PDFSeparationViewer {
 
             this.hideLoading();
 
-            return new Promise(r => cropCanvas.toBlob(b => r({ blob: b, width: cropW, height: cropH }), 'image/png'));
+            // width/height는 실제 픽셀 크기(정수)로 반환한다. 소수점 값을 그대로 돌려주면
+            // 호출부의 drawImage 소스 영역이 ImageBitmap 경계를 넘게 되는데, Safari(WebKit)는
+            // 이 경우 클리핑하지 않고 아무것도 그리지 않아 결과물이 흰 이미지가 된다.
+            const outW = cropCanvas.width;
+            const outH = cropCanvas.height;
+            return new Promise(r => cropCanvas.toBlob(b => r({ blob: b, width: outW, height: outH }), 'image/png'));
 
         } catch (error) {
             console.error('내보내기 실패:', error);
@@ -4645,9 +4653,8 @@ export class PDFSeparationViewer {
         }
     }
 
-    async exportSeparatedImages() {
+    async exportSeparatedImages(pageNum = this.currentPage) {
         // 1. Get Inputs & Metadata
-        const pageNum = this.currentPage;
         const metadata = this.pageMetadata.get(pageNum);
 
         // 최신 입력값으로 강제 업데이트 (수동 입력 반영용)
@@ -4735,7 +4742,7 @@ export class PDFSeparationViewer {
             let spreadResult = null;
             let fullImage = null;
             if (exportFormat === 'jpg') {
-                spreadResult = await this.renderHighResSpread();
+                spreadResult = await this.renderHighResSpread(pageNum);
                 if (!spreadResult || !spreadResult.blob) {
                     throw new Error('고화질 펼침면 렌더링에 실패했습니다.');
                 }
@@ -4793,7 +4800,7 @@ export class PDFSeparationViewer {
                 // 1. 고화질 펼침면 이미지 (TrimBox 영역) — JPG 내보내기와 렌더 공유,
                 //    PDF 모드였으면 여기서 생성
                 if (!spreadResult) {
-                    spreadResult = await this.renderHighResSpread();
+                    spreadResult = await this.renderHighResSpread(pageNum);
                     if (spreadResult && spreadResult.blob) {
                         fullImage = await createImageBitmap(spreadResult.blob);
                     }
@@ -4878,7 +4885,7 @@ export class PDFSeparationViewer {
 
             // ZIP 다운로드
             const content = await zip.generateAsync({ type: "blob" });
-            this.downloadBlob(content, `separated_parts_${this.currentPage}.zip`);
+            this.downloadBlob(content, `separated_parts_${pageNum}.zip`);
 
             this.hideLoading();
 
