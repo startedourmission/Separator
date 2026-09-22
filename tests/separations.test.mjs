@@ -149,6 +149,53 @@ test('cover auto calculation waits for metadata and render, then runs once', asy
     assert.equal(calls,1,'a replaced document must cancel scheduled analysis');
 });
 
+test('a later PDF replaces the wide page ratio, including pages of a different size', () => {
+    const boxes = new Map();
+    const wrapper = (page) => {
+        const el = { style: {} };
+        boxes.set(page, el);
+        return el;
+    };
+    const manager = Object.assign(Object.create(VirtualScrollManager.prototype), {
+        viewer: { zoomLevel: 1 },
+        viewport: { clientWidth: 840 },
+        pageElements: new Map([[1, { wrapper: wrapper(1) }], [2, { wrapper: wrapper(2) }]]),
+        pageAspectRatio: 2,
+        pageAspectRatios: new Map([[1, 2], [2, 2]]),
+        pageWidth: 800,
+        pageHeight: 400,
+        displayMode: 'single',
+        setupIntersectionObserver() {}
+    });
+    manager.setPageAspects([[1, 210 / 297], [2, 0.5]]);
+    assert.equal(boxes.get(1).style.width, '800px');
+    assert.equal(boxes.get(1).style.height, `${Math.floor(800 / (210 / 297))}px`);
+    assert.equal(boxes.get(2).style.height, '1600px');
+
+    // 2쪽 비트맵이 가로로 도착하면 그 페이지만 비율을 바꾼다
+    manager.syncPageAspect(2, { width: 2000, height: 1000 });
+    assert.equal(boxes.get(2).style.height, '400px');
+    assert.equal(boxes.get(1).style.height, `${Math.floor(800 / (210 / 297))}px`);
+});
+
+test('metadata from a replaced PDF cannot resize the page boxes', () => {
+    const v = viewer();
+    v.documentLoadId = 2;
+    v.pageMetadata = new Map([
+        [1, { mediaBox: { width: 842, height: 595 }, rotate: 0 }],
+        [2, { mediaBox: { width: 595, height: 842 }, rotate: 90 }]
+    ]);
+    let applied = null;
+    v.scrollManager = { setPageAspects(aspects) { applied = aspects; } };
+    v.applyLoadedPageAspects(1);
+    assert.equal(applied, null);
+    v.applyLoadedPageAspects(2);
+    assert.equal(applied[0][0], 1);
+    assert.ok(Math.abs(applied[0][1] - 842 / 595) < 1e-9);
+    assert.equal(applied[1][0], 2);
+    assert.ok(Math.abs(applied[1][1] - 842 / 595) < 1e-9);
+});
+
 test('a PDF without crop marks shows its TrimBox dimensions without guessed book parts', () => {
     const v=viewer();
     Object.assign(v,{currentPage:1,finalMarks:[],calcResultElement:{textContent:''},

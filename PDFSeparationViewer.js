@@ -87,6 +87,8 @@ export class PDFSeparationViewer {
 
         // 페이지 메타데이터 (MediaBox, TrimBox)
         this.pageMetadata = new Map(); // pageNum -> { mediaBox, trimBox }
+        this.pageMetadataOwner = null; // 이 메타데이터가 속한 currentPDFData. 문서가 바뀌면 무효
+        this.documentLoadId = 0; // 올려치기 업로드가 이전 문서 비율로 init하지 못하게 하는 세대
         this.coverCalculatorInputs = { spine: 0, flap: 0, cover: 0, margin: 0 };
         this.renderDPI = 300; // 기본 DPI (300으로 상향)
 
@@ -766,22 +768,24 @@ export class PDFSeparationViewer {
                         throw new Error('PDF가 로딩되지 않았습니다');
                     }
 
-                    // Fast path: 로딩 시 추출한 메타데이터에서 즉시 반환.
-                    // 워커 프로브는 페이지 전체를 렌더해서 크기를 읽으므로 페이지당 ~300ms를 낭비한다.
+                    // Fast path: 지금 문서에서 추출한 메타데이터만 쓴다.
+                    // 이전 문서 크기가 남아 있으면 다음 PDF가 그 비율로 찌그러진다.
                     // gs는 /Rotate 를 적용해 렌더하므로 90/270도 페이지는 가로세로를 맞바꾼다.
-                    const meta = this.pageMetadata.get(pageNum);
-                    if (meta && meta.mediaBox &&
-                        typeof meta.mediaBox.width === 'number' && meta.mediaBox.width > 0 &&
-                        typeof meta.mediaBox.height === 'number' && meta.mediaBox.height > 0) {
-                        const swap = meta.rotate === 90 || meta.rotate === 270;
-                        return {
-                            width: swap ? meta.mediaBox.height : meta.mediaBox.width,
-                            height: swap ? meta.mediaBox.width : meta.mediaBox.height
-                        };
+                    const owner = this.currentPDFData;
+                    if (this.pageMetadataOwner === owner) {
+                        const meta = this.pageMetadata.get(pageNum);
+                        const ratio = this.pageAspectFromMetadata(meta);
+                        if (ratio) {
+                            const swap = meta.rotate === 90 || meta.rotate === 270;
+                            return {
+                                width: swap ? meta.mediaBox.height : meta.mediaBox.width,
+                                height: swap ? meta.mediaBox.width : meta.mediaBox.height
+                            };
+                        }
                     }
 
                     // Fallback: 메타데이터가 아직 없거나(추출 전) 실패한 경우 기존 워커 프로브
-                    return new Promise((resolve, reject) => {
+                    const pageSize = await new Promise((resolve, reject) => {
                         const reqId = ++this.requestId;
                         this.pendingRequests.set(reqId, { resolve, reject });
 
@@ -793,6 +797,8 @@ export class PDFSeparationViewer {
                             }
                         });
                     });
+                    if (this.currentPDFData !== owner) return null;
+                    return pageSize;
                 },
 
                 renderPage: async (pageNum, options) => {
@@ -1154,6 +1160,9 @@ export class PDFSeparationViewer {
     async handleFileSelect(event) {
         const file = event.target.files[0];
         if (!file) return;
+        // 넓은 PDF를 올리는 도중에 다른 크기 PDF를 올리면
+        // 먼저 시작된 로딩이 나중에 끝나며 옛 비율로 뷰어를 다시 만들지 못하게 한다.
+        const loadId = ++this.documentLoadId;
 
         // 안내 메시지 숨기기
         const welcomeMessage = document.getElementById('welcome-message');
@@ -1161,26 +1170,24 @@ export class PDFSeparationViewer {
             welcomeMessage.classList.add('hidden');
         }
 
-        if (file.type === 'application/pdf') {
-            this.currentFileType = 'pdf';
-            try {
-                const arrayBuffer = await file.arrayBuffer();
-                await this.loadPDF(arrayBuffer);
-            } catch (error) {
-                console.error('파일 로딩 실패:', error);
-                this.showError('PDF 파일을 로딩할 수 없습니다.');
+        try {
+            const arrayBuffer = await file.arrayBuffer();
+            if (loadId !== this.documentLoadId) return;
+            if (file.type === 'application/pdf') {
+                this.currentFileType = 'pdf';
+                await this.loadPDF(arrayBuffer, loadId);
+            } else if (file.type.startsWith('image/')) {
+                this.currentFileType = 'image';
+                await this.loadImage(arrayBuffer, file.type, loadId);
+            } else {
+                this.showError('지원되지 않는 파일 형식입니다.');
             }
-        } else if (file.type.startsWith('image/')) {
-            this.currentFileType = 'image';
-            try {
-                const arrayBuffer = await file.arrayBuffer();
-                await this.loadImage(arrayBuffer, file.type);
-            } catch (error) {
-                console.error('이미지 로딩 실패:', error);
-                this.showError('이미지 파일을 로딩할 수 없습니다.');
-            }
-        } else {
-            this.showError('지원되지 않는 파일 형식입니다.');
+        } catch (error) {
+            if (loadId !== this.documentLoadId) return;
+            console.error('파일 로딩 실패:', error);
+            this.showError(file.type === 'application/pdf'
+                ? 'PDF 파일을 로딩할 수 없습니다.'
+                : '이미지 파일을 로딩할 수 없습니다.');
         }
     }
 
@@ -1225,7 +1232,8 @@ export class PDFSeparationViewer {
         });
     }
 
-    async loadImage(data, mimeType) {
+    async loadImage(data, mimeType, loadId = ++this.documentLoadId) {
+        const current = () => loadId === this.documentLoadId;
         try {
             this.showLoading('이미지 로딩 중...', '50%');
 
@@ -1238,6 +1246,10 @@ export class PDFSeparationViewer {
                 img.onerror = reject;
                 img.src = url;
             });
+            if (!current()) {
+                URL.revokeObjectURL(url);
+                return;
+            }
 
             this.currentPDF = data; // 이미지 데이터 저장 (PDF 변수 재사용)
             this.totalPages = 1;
@@ -1256,6 +1268,7 @@ export class PDFSeparationViewer {
             const height = img.height;
 
             this.pageMetadata.clear();
+            this.pageMetadataOwner = null;
             this.pageMetadata.set(1, {
                 mediaBox: { width, height },
                 trimBox: { width, height }
@@ -1278,6 +1291,7 @@ export class PDFSeparationViewer {
             this.hideLoading();
 
         } catch (error) {
+            if (!current()) return;
             console.error('이미지 처리 오류:', error);
             this.hideLoading();
             this.showError('이미지를 처리할 수 없습니다.');
@@ -1297,7 +1311,8 @@ export class PDFSeparationViewer {
         // 현재는 생략하거나 빈 데이터로 둠
     }
 
-    async loadPDF(data) {
+    async loadPDF(data, loadId = ++this.documentLoadId) {
+        const current = () => loadId === this.documentLoadId;
         if (!this.ghostscript) {
             this.showError('Ghostscript가 준비되지 않았습니다.');
             return;
@@ -1305,11 +1320,12 @@ export class PDFSeparationViewer {
 
         try {
             await this.colorProfileReady;
+            if (!current()) return;
             // 1단계: PDF 로딩 (33%)
             this.showLoading('PDF 로딩 중...', '33%');
 
             const result = await this.ghostscript.loadPDF(data);
-            if (result.cancelled) return;
+            if (!current() || result.cancelled) return;
             if (result.success) {
                 this.currentPDF = data;
                 this.resetCoverCalculation();
@@ -1349,12 +1365,16 @@ export class PDFSeparationViewer {
                 // 3단계: 스크롤 뷰어 초기화 (100%)
                 this.showLoading('뷰어 초기화 중...', '100%');
 
-                // 첫 페이지 크기 가져오기
+                // 첫 페이지 크기 가져오기. 기다리는 동안 다음 파일이 올라왔으면 옛 비율로 초기화하지 않는다.
                 let aspectRatio = 1 / 1.414; // A4 기본값
                 try {
                     const pageSize = await this.ghostscript.getPageSize(1);
-                    aspectRatio = pageSize.width / pageSize.height;
+                    if (!current()) return;
+                    if (pageSize?.width > 0 && pageSize?.height > 0) {
+                        aspectRatio = pageSize.width / pageSize.height;
+                    }
                 } catch (e) {
+                    if (!current()) return;
                 }
 
                 // 스크롤 뷰어 초기화
@@ -1379,6 +1399,7 @@ export class PDFSeparationViewer {
                 throw new Error('PDF 로딩 실패');
             }
         } catch (error) {
+            if (!current()) return;
             console.error('PDF 로딩 오류:', error);
             this.hideLoading();
             this.showError('PDF를 로딩할 수 없습니다.');
@@ -1917,18 +1938,41 @@ export class PDFSeparationViewer {
 
 
 
+    // 회전이 적용된 표시 비율. gs 렌더와 같은 방향으로 맞춘다.
+    pageAspectFromMetadata(meta) {
+        const box = meta?.mediaBox;
+        if (!box || !(box.width > 0) || !(box.height > 0)) return null;
+        const swap = meta.rotate === 90 || meta.rotate === 270;
+        const width = swap ? box.height : box.width;
+        const height = swap ? box.width : box.height;
+        return height > 0 ? width / height : null;
+    }
+
+    // 지금 로딩 세대의 메타데이터만 페이지 박스에 반영한다.
+    applyLoadedPageAspects(loadId = this.documentLoadId) {
+        if (loadId !== this.documentLoadId || !this.scrollManager) return;
+        const aspects = [];
+        for (const [pageNum, meta] of this.pageMetadata) {
+            const ratio = this.pageAspectFromMetadata(meta);
+            if (ratio) aspects.push([pageNum, ratio]);
+        }
+        if (aspects.length) this.scrollManager.setPageAspects(aspects);
+    }
+
     // PDF 메타데이터 추출 (MediaBox, TrimBox)
     async extractPDFMetadata() {
         if (!this.currentPDF) return;
+        const loadId = this.documentLoadId;
 
         try {
             const { PDFDocument } = PDFLib;
             const document = this.currentPDF;
             const pdfDoc = await PDFDocument.load(document);
-            if (this.currentPDF !== document) return;
+            if (this.currentPDF !== document || loadId !== this.documentLoadId) return;
             const pages = pdfDoc.getPages();
 
             this.pageMetadata.clear();
+            this.pageMetadataOwner = null;
 
             pages.forEach((page, index) => {
                 const pageNum = index + 1;
@@ -1991,7 +2035,11 @@ export class PDFSeparationViewer {
                     rotate: rotate
                 });
             });
+            if (loadId !== this.documentLoadId) return;
+            this.pageMetadataOwner = this.currentPDFData;
 
+            // 페이지마다 비율이 다르면 첫 페이지 박스로 늘리지 않도록 여기서 다시 맞춘다.
+            this.applyLoadedPageAspects(loadId);
 
             // 현재 페이지 정보 업데이트
             this.updatePageDimensionInfo();
@@ -2049,6 +2097,7 @@ export class PDFSeparationViewer {
         this.finalMarks = [];
         this.allCandidates = [];
         this.pageMetadata.clear();
+        this.pageMetadataOwner = null;
         this.coverCalculatorInputs = {spine:0, flap:0, cover:0, margin:0};
         for (const input of [this.spineInput,this.flapInput,this.coverInput]) input.value = '0';
         this.calcResultElement.textContent = '펼침면 크기 계산 대기 중…';
@@ -2250,8 +2299,12 @@ export class PDFSeparationViewer {
 
         try {
             pageSize = await this.ghostscript.getPageSize(pageNum);
+            if (!pageSize?.width || !pageSize?.height) {
+                throw new Error('페이지 크기를 알 수 없습니다');
+            }
             pdfAspectRatio = pageSize.width / pageSize.height;
         } catch (error) {
+            if (renderGeneration !== this.renderGeneration) throw error;
             pdfAspectRatio = 1 / 1.414;
         }
 
@@ -5228,9 +5281,12 @@ export class PDFSeparationViewer {
 
                 // GS로 렌더 (pdf.js는 CMYK 색이 틀어짐 — 뷰어와 동일 경로 사용)
                 const metadata = this.pageMetadata.get(pageNum);
-                const pageSize = (metadata && metadata.mediaBox)
+                const pageSize = (this.pageMetadataOwner === this.currentPDFData && metadata && metadata.mediaBox)
                     ? { width: metadata.mediaBox.width, height: metadata.mediaBox.height }
                     : await this.ghostscript.getPageSize(pageNum);
+                if (!pageSize?.width || !pageSize?.height) {
+                    throw new Error(`페이지 ${pageNum} 크기를 알 수 없습니다`);
+                }
 
                 const renderWidth = Math.floor(pageSize.width * scaleFactor);
                 const renderHeight = Math.floor(pageSize.height * scaleFactor);

@@ -15,7 +15,8 @@ export class VirtualScrollManager {
         this.pageGap = 20;
         this.bufferPages = 2;
         this.totalPages = 0;
-        this.pageAspectRatio = 1 / 1.414; // A4 기본값
+        this.pageAspectRatio = 1 / 1.414; // A4 기본값. 개별 페이지 비율이 없을 때의 폴백
+        this.pageAspectRatios = new Map(); // pageNum -> width/height. 문서·페이지마다 따로 둔다
         this.renderQueue = new Set(); // 렌더링 대기 큐
         this.isRendering = false;
         // 워커 풀 크기에 맞춰 동시 렌더 수 결정 (풀 워커 수만큼 병렬 GS 렌더 가능)
@@ -28,11 +29,13 @@ export class VirtualScrollManager {
         this.comparison = new OverprintComparison(this);
     }
 
-    // 초기화
+    // 초기화. 문서를 바꿀 때마다 호출되므로 이전 문서의 비율과 이벤트는 버린다.
     init(totalPages, aspectRatio) {
         this.comparison.syncAvailability();
+        this.unbindViewportEvents();
         this.totalPages = totalPages;
-        this.pageAspectRatio = aspectRatio || 1 / 1.414;
+        this.pageAspectRatios = new Map();
+        this.pageAspectRatio = aspectRatio > 0 ? aspectRatio : 1 / 1.414;
 
         // 페이지 크기 계산
         this.recalculatePageDimensions();
@@ -44,19 +47,75 @@ export class VirtualScrollManager {
         this.setupIntersectionObserver();
 
         // 스크롤 이벤트 (현재 페이지 추적)
-        this.viewport.addEventListener('scroll', this.debounce(() => {
+        this.onViewportScroll = this.debounce(() => {
             this.updateCurrentPage();
             this.comparison.prepareVisiblePages();
-        }, 100));
+        }, 100);
+        this.viewport.addEventListener('scroll', this.onViewportScroll);
 
         // 창 크기 변경 시 리사이징
-        window.addEventListener('resize', this.debounce(() => {
+        this.onWindowResize = this.debounce(() => {
             this.updateZoom(this.viewer.zoomLevel);
-        }, 200));
+        }, 200);
+        window.addEventListener('resize', this.onWindowResize);
 
         // 초기 첫 페이지 즉시 렌더링 (로딩 완료 직후 바로 표시)
         this.priorityRenderFirstPages();
 
+    }
+
+    unbindViewportEvents() {
+        if (this.onViewportScroll) {
+            this.viewport.removeEventListener('scroll', this.onViewportScroll);
+            this.onViewportScroll = null;
+        }
+        if (this.onWindowResize) {
+            window.removeEventListener('resize', this.onWindowResize);
+            this.onWindowResize = null;
+        }
+    }
+
+    aspectFor(pageNum) {
+        const ratio = this.pageAspectRatios.get(pageNum);
+        return ratio > 0 ? ratio : this.pageAspectRatio;
+    }
+
+    applyPageBox(wrapper, pageNum) {
+        const width = this.pageWidth;
+        const height = Math.max(1, Math.floor(width / this.aspectFor(pageNum)));
+        wrapper.style.width = `${width}px`;
+        wrapper.style.height = `${height}px`;
+    }
+
+    // 렌더된 비트맵 비율이 박스와 다르면 그 페이지만 다시 맞춘다.
+    // 넓은 페이지 뒤에 다른 크기 페이지가 와도 이전 비율로 늘리지 않기 위함.
+    syncPageAspect(pageNum, imageData) {
+        const width = imageData?.width;
+        const height = imageData?.height;
+        if (!(width > 0) || !(height > 0)) return;
+        const ratio = width / height;
+        if (!(ratio > 0) || Math.abs(ratio - this.aspectFor(pageNum)) < 0.005) return;
+        this.pageAspectRatios.set(pageNum, ratio);
+        if (pageNum === 1) this.pageAspectRatio = ratio;
+        const el = this.pageElements.get(pageNum);
+        if (el?.wrapper) this.applyPageBox(el.wrapper, pageNum);
+    }
+
+    // 메타데이터로 알아낸 페이지별 비율을 한 번에 반영한다.
+    setPageAspects(entries) {
+        let changed = false;
+        for (const [pageNum, ratio] of entries) {
+            if (!(ratio > 0) || !Number.isFinite(ratio)) continue;
+            const prev = this.pageAspectRatios.get(pageNum);
+            if (prev !== undefined && Math.abs(prev - ratio) < 0.0001) continue;
+            this.pageAspectRatios.set(pageNum, ratio);
+            changed = true;
+            if (pageNum === 1) this.pageAspectRatio = ratio;
+        }
+        if (!changed || !this.pageElements) return;
+        this.recalculatePageDimensions();
+        for (const [pageNum, el] of this.pageElements) this.applyPageBox(el.wrapper, pageNum);
+        if (this.viewport) this.setupIntersectionObserver();
     }
 
     // 모드 설정
@@ -111,6 +170,15 @@ export class VirtualScrollManager {
         this.pageHeight = Math.floor(this.pageWidth / this.pageAspectRatio);
     }
 
+    tallestPageHeight() {
+        let height = this.pageHeight || 1;
+        if (!this.pageWidth) return height;
+        for (const pageNum of this.pageAspectRatios.keys()) {
+            height = Math.max(height, Math.floor(this.pageWidth / this.aspectFor(pageNum)));
+        }
+        return height;
+    }
+
     // 모든 페이지 placeholder 생성
     createPagePlaceholders() {
         for (const el of this.pageElements.values()) this.comparison.release(el);
@@ -122,8 +190,7 @@ export class VirtualScrollManager {
             const wrapper = document.createElement('div');
             wrapper.className = 'page-wrapper loading';
             wrapper.dataset.page = i;
-            wrapper.style.width = `${this.pageWidth}px`;
-            wrapper.style.height = `${this.pageHeight}px`;
+            this.applyPageBox(wrapper, i);
 
             if (i === 1) {
                 wrapper.classList.add('cover-page');
@@ -152,7 +219,7 @@ export class VirtualScrollManager {
 
         const options = {
             root: this.viewport,
-            rootMargin: `${this.bufferPages * this.pageHeight}px 0px`,
+            rootMargin: `${this.bufferPages * this.tallestPageHeight()}px 0px`,
             threshold: 0.01
         };
 
@@ -246,6 +313,7 @@ export class VirtualScrollManager {
                 // 아래에서 선명한 렌더가 끝나면 교체된다. (분판 토글 상태도 반영됨)
                 const preview = this.viewer.pagePreviews && this.viewer.pagePreviews.get(pageNum);
                 if (preview) {
+                    this.syncPageAspect(pageNum, preview.imageData);
                     const pvCanvas = document.createElement('canvas');
                     pvCanvas.className = 'page-canvas';
                     this.renderToCanvas(pvCanvas, preview);
@@ -262,11 +330,15 @@ export class VirtualScrollManager {
                 this.viewer.addToCache(pageNum, pageData);
             }
 
-            // 캔버스 생성
+            // 이 페이지 비트맵 비율로 박스를 맞춘 뒤에 캔버스를 넣는다.
+            // 박스가 이전 문서(또는 첫 페이지) 비율이면 CSS가 100%로 늘려 찌그러진다.
+            this.syncPageAspect(pageNum, pageData.imageData);
+
+            // 캔버스 생성. 실제 픽셀은 renderToCanvas가 비트맵 크기로 다시 잡는다.
             const canvas = document.createElement('canvas');
             canvas.className = 'page-canvas';
             canvas.width = this.pageWidth;
-            canvas.height = this.pageHeight;
+            canvas.height = Math.max(1, Math.floor(this.pageWidth / this.aspectFor(pageNum)));
 
             // 분판 적용하여 캔버스에 렌더링
             this.renderToCanvas(canvas, pageData);
@@ -445,21 +517,24 @@ export class VirtualScrollManager {
 
     // 현재 보이는 페이지 계산
     getCurrentVisiblePage() {
-        const scrollTop = this.viewport.scrollTop;
-        const viewportHeight = this.viewport.clientHeight;
-        const pageFullHeight = this.pageHeight + this.pageGap;
-
-        // 화면 중앙에 있는 행
-        const centerY = scrollTop + viewportHeight / 2;
-        const row = Math.floor(centerY / pageFullHeight);
-
-        // 두 페이지 모드: 행 번호를 그 행의 왼쪽 페이지로 환산
-        // (한 페이지 모드 계산을 그대로 쓰면 쪽수가 2배 속도로 어긋난다)
-        const pageNum = this.displayMode === 'two-page'
-            ? (row <= 0 ? 1 : row * 2)
-            : row + 1;
-
-        return Math.max(1, Math.min(this.totalPages, pageNum));
+        const centerY = this.viewport.scrollTop + this.viewport.clientHeight / 2;
+        let best = 1;
+        let bestDist = Infinity;
+        const pages = this.displayMode === 'two-page'
+            ? [1, ...Array.from({ length: Math.max(0, Math.floor((this.totalPages - 1) / 2)) }, (_, i) => (i + 1) * 2)]
+            : this.pageElements.keys();
+        for (const pageNum of pages) {
+            const el = this.pageElements.get(pageNum);
+            if (!el?.wrapper) continue;
+            const top = el.wrapper.offsetTop || 0;
+            const mid = top + (el.wrapper.offsetHeight || this.pageHeight) / 2;
+            const dist = Math.abs(mid - centerY);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = pageNum;
+            }
+        }
+        return Math.max(1, Math.min(this.totalPages || 1, best));
     }
 
     // 현재 페이지 업데이트
@@ -481,9 +556,9 @@ export class VirtualScrollManager {
         const pageEl = this.pageElements.get(pageNum);
         if (!pageEl) return;
 
-        const pageFullHeight = this.pageHeight + this.pageGap;
-        // 두 페이지 모드는 행 기준으로 위치 계산 (한 페이지 모드 수식이면 2배 아래로 감)
-        const targetY = this.pageToRow(pageNum) * pageFullHeight;
+        // 페이지 높이가 제각각이면 균일 간격 공식은 다른 페이지로 보낸다.
+        // offsetTop은 스크롤 컨테이너(뷰포트) 기준 레이아웃 위치다.
+        const targetY = pageEl.wrapper.offsetTop || 0;
 
         // 먼 페이지는 즉시 점프 — 수백 페이지를 스무스 스크롤로 지나가면
         // 중간 페이지들이 IntersectionObserver에 걸려 렌더 큐만 오염시키고 도착도 늦다
@@ -501,10 +576,9 @@ export class VirtualScrollManager {
         // 크기 재계산
         this.recalculatePageDimensions();
 
-        // 모든 wrapper 크기 업데이트
+        // 모든 wrapper 크기 업데이트. 높이는 페이지마다 자기 비율을 따른다.
         this.pageElements.forEach((el, pageNum) => {
-            el.wrapper.style.width = `${this.pageWidth}px`;
-            el.wrapper.style.height = `${this.pageHeight}px`;
+            this.applyPageBox(el.wrapper, pageNum);
 
             // 캔버스는 이미 렌더 DPI 크기다. 줌은 CSS 표시 크기만 바꾸므로
             // width 재대입/분판 재합성 없이 비교 양쪽 버퍼를 그대로 확대한다.
@@ -578,9 +652,8 @@ export class VirtualScrollManager {
         this.recalculatePageDimensions();
 
         // wrapper 크기만 먼저 갱신 (캔버스 버퍼는 그대로 두고 CSS가 늘려 보여준다)
-        this.pageElements.forEach((el) => {
-            el.wrapper.style.width = `${this.pageWidth}px`;
-            el.wrapper.style.height = `${this.pageHeight}px`;
+        this.pageElements.forEach((el, pageNum) => {
+            this.applyPageBox(el.wrapper, pageNum);
         });
 
         // 레이아웃이 반영된 뒤 같은 지점이 커서 아래 오도록 스크롤 보정
@@ -723,6 +796,7 @@ export class VirtualScrollManager {
 
     // 정리
     destroy() {
+        this.unbindViewportEvents();
         if (this.observer) {
             this.observer.disconnect();
         }
